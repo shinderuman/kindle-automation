@@ -1,0 +1,437 @@
+# kindle-automation の AWS SAM テンプレート（SPECIFICATION.md 5/6/7/8/13/17.2/19）。
+#
+# 既存 S3 bucket は取り込まず、名前を Parameter で受け取る（AGENTS.md「既存S3 bucketそのものをstackの削除対象にしない」）。
+# 秘密情報は SSM Parameter Store から実行時に取得し、環境変数・SAM Parameter・ログへ平文で置かない（SPECIFICATION.md 19）。
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: kindle-automation Lambda/Scheduler/SQS/CloudWatch（SPECIFICATION.md 準拠）
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: 既存 S3 bucket 名（SPECIFICATION.md 9.1）。stack は bucket 自体を管理しない。
+    Default: kindle-asins
+  LogLevel:
+    Type: String
+    Description: 構造化ログの level（INFO/WARN/ERROR）。空なら INFO。
+    Default: INFO
+  SchedulersEnabled:
+    Type: String
+    Description: EventBridge Scheduler の初期状態（true=ENABLED / false=DISABLED）。SPECIFICATION.md 20.3 で段階的に有効化する。
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  WorkerMappingEnabled:
+    Type: String
+    Description: check-worker の SQS event source mapping 初期状態（true=有効 / false=無効）。Scheduler 有効化parameterとは独立で、SPECIFICATION.md 20.3 step8 で個別に有効化する。
+    AllowedValues: ["true", "false"]
+    Default: "false"
+
+Conditions:
+  SchedulersEnabled: !Equals [!Ref SchedulersEnabled, "true"]
+  WorkerMappingEnabled: !Equals [!Ref WorkerMappingEnabled, "true"]
+
+# S3 object key は SPECIFICATION.md 9.1 の固定値。両 Lambda で共通。
+Mappings:
+  S3Keys:
+    Common:
+      Unprocessed: unprocessed_asins.json
+      PaperBooks: paper_books_asins.json
+      Authors: authors.json
+      ExcludedTitleKeywords: excluded_title_keywords.json
+      Notified: notified_asins.json
+      Upcoming: upcoming_asins.json
+      CheckerConfig: checker_configs.json
+
+Globals:
+  Function:
+    Runtime: provided.al2023
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        S3_BUCKET: !Ref S3BucketName
+        S3_REGION: !Ref AWS::Region
+        S3_UNPROCESSED_OBJECT_KEY: !FindInMap [S3Keys, Common, Unprocessed]
+        S3_PAPER_BOOKS_OBJECT_KEY: !FindInMap [S3Keys, Common, PaperBooks]
+        S3_AUTHORS_OBJECT_KEY: !FindInMap [S3Keys, Common, Authors]
+        S3_EXCLUDED_TITLE_KEYWORDS_OBJECT_KEY: !FindInMap [S3Keys, Common, ExcludedTitleKeywords]
+        S3_NOTIFIED_OBJECT_KEY: !FindInMap [S3Keys, Common, Notified]
+        S3_UPCOMING_OBJECT_KEY: !FindInMap [S3Keys, Common, Upcoming]
+        S3_CHECKER_CONFIG_OBJECT_KEY: !FindInMap [S3Keys, Common, CheckerConfig]
+        LOG_LEVEL: !Ref LogLevel
+
+Resources:
+  # ───────────────────────── SQS ─────────────────────────
+  # Work Queue（FIFO）。Amazon系は amazon-requests、gist_update は external-updates を application 側で固定。
+  WorkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: kindle-automation-jobs.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt WorkDLQ.Arn
+        maxReceiveCount: "5"
+
+  WorkDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: kindle-automation-jobs-dlq.fifo
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # Scheduler DLQ（Standard）。EventBridge Scheduler の再試行限界到達メッセージを受ける。
+  SchedulerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: kindle-automation-scheduler-dlq
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  # ───────────────────────── Lambda ─────────────────────────
+  ScheduleChecksFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: x86_64
+    Properties:
+      CodeUri: ..
+      Handler: bootstrap
+      MemorySize: 256
+      Timeout: 60
+      Role: !GetAtt ScheduleChecksRole.Arn
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref WorkQueue
+
+  CheckWorkerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: x86_64
+    Properties:
+      CodeUri: ..
+      Handler: bootstrap
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt CheckWorkerRole.Arn
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref WorkQueue
+      Events:
+        WorkQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt WorkQueue.Arn
+            BatchSize: 1
+            # worker event source mapping は EventBridge Scheduler の有効化parameter（SchedulersEnabled）と独立。
+            # Scheduler有効化parameter（step9）と混同せず、step8 でこのparameter経由で個別に有効化する。
+            Enabled: !If [WorkerMappingEnabled, true, false]
+            # partial batch response で job 単位の失敗を再配信させる（SPECIFICATION.md 7.4）。
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  # ───────────────────────── CloudWatch Logs ─────────────────────────
+  ScheduleChecksLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ScheduleChecksFunction}"
+      RetentionInDays: 30
+
+  CheckWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CheckWorkerFunction}"
+      RetentionInDays: 30
+
+  # level=ERROR の構造化ログを単一 KindleAutomation/ErrorCount へ集計（SPECIFICATION.md 18.2）。
+  ScheduleChecksErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ScheduleChecksLogGroup
+      FilterPattern: '{ $.level = "ERROR" }'
+      MetricTransformations:
+        - MetricName: ErrorCount
+          MetricNamespace: KindleAutomation
+          MetricValue: "1"
+
+  CheckWorkerErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref CheckWorkerLogGroup
+      FilterPattern: '{ $.level = "ERROR" }'
+      MetricTransformations:
+        - MetricName: ErrorCount
+          MetricNamespace: KindleAutomation
+          MetricValue: "1"
+
+  # ───────────────────────── CloudWatch Alarm ─────────────────────────
+  # SPECIFICATION.md 17.2。ALARM 遷移でのみ schedule-checks を起動し Slack error channel へ通知する。OK 遷移では起動しない（復旧は Alarm の OK 遷移で確認）。
+  WorkDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kindle-automation-work-dlq
+      AlarmDescription: Work Queue DLQ にメッセージが溜まった
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WorkDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !GetAtt ScheduleChecksFunction.Arn
+
+  SchedulerDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kindle-automation-scheduler-dlq
+      AlarmDescription: Scheduler DLQ にメッセージが溜まった
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt SchedulerDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !GetAtt ScheduleChecksFunction.Arn
+
+  WorkQueueStallAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: kindle-automation-work-queue-stall
+      AlarmDescription: Work Queue の最古メッセージが2時間を超えて滞留した
+      MetricName: ApproximateAgeOfOldestMessage
+      Namespace: AWS/SQS
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WorkQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 7200
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !GetAtt ScheduleChecksFunction.Arn
+
+  # CloudWatch Alarm から schedule-checks を invoke する resource-based permission（SPECIFICATION.md 19）。
+  ScheduleChecksAlarmPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ScheduleChecksFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cloudwatch.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:kindle-automation-*"
+
+  # ───────────────────────── EventBridge Scheduler ─────────────────────────
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-schedule-checks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ScheduleChecksFunction.Arn
+              # EventBridge Scheduler が再試行限界到達メッセージを SchedulerDLQ へ送信する（SPECIFICATION.md 17.2）。
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt SchedulerDLQ.Arn
+
+  SaleSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: kindle-automation-sale
+      ScheduleExpression: cron(0 0/2 * * ? *)
+      ScheduleExpressionTimezone: Asia/Tokyo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: !If [SchedulersEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !GetAtt ScheduleChecksFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: |
+          {
+              "version": 1,
+              "source": "scheduler",
+              "check_type": "sale",
+              "scheduled_at": "<aws.scheduler.scheduled-time>"
+          }
+        RetryPolicy:
+          MaximumRetryAttempts: 3
+          # AWS::Scheduler::Schedule RetryPolicy の正しいプロパティ名（InSeconds）。誤記で無視され既定86400秒になるのを防ぐ。
+          MaximumEventAgeInSeconds: 240
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDLQ.Arn
+
+  NewReleaseSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: kindle-automation-new-release
+      ScheduleExpression: cron(10 0/6 * * ? *)
+      ScheduleExpressionTimezone: Asia/Tokyo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: !If [SchedulersEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !GetAtt ScheduleChecksFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: |
+          {
+              "version": 1,
+              "source": "scheduler",
+              "check_type": "new_release",
+              "scheduled_at": "<aws.scheduler.scheduled-time>"
+          }
+        RetryPolicy:
+          MaximumRetryAttempts: 3
+          MaximumEventAgeInSeconds: 240
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDLQ.Arn
+
+  PaperToKindleSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: kindle-automation-paper-to-kindle
+      ScheduleExpression: cron(20 0/6 * * ? *)
+      ScheduleExpressionTimezone: Asia/Tokyo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: !If [SchedulersEnabled, ENABLED, DISABLED]
+      Target:
+        Arn: !GetAtt ScheduleChecksFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: |
+          {
+              "version": 1,
+              "source": "scheduler",
+              "check_type": "paper_to_kindle",
+              "scheduled_at": "<aws.scheduler.scheduled-time>"
+          }
+        RetryPolicy:
+          MaximumRetryAttempts: 3
+          MaximumEventAgeInSeconds: 240
+        DeadLetterConfig:
+          Arn: !GetAtt SchedulerDLQ.Arn
+
+  # ───────────────────────── IAM（Lambda 実行 Role） ─────────────────────────
+  ScheduleChecksRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: s3-checker-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${S3BucketName}/*"
+        - PolicyName: sqs-send
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt WorkQueue.Arn
+        # SSM は /myapp/secure/* と /myapp/plain/* へ限定。コードが個別 key だけ取得する（SPECIFICATION.md 19）。
+        - PolicyName: ssm-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/myapp/secure/*"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/myapp/plain/*"
+
+  CheckWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: s3-checker-data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${S3BucketName}/*"
+        - PolicyName: sqs-work-queue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:SendMessage
+                Resource: !GetAtt WorkQueue.Arn
+        - PolicyName: ssm-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/myapp/secure/*"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/myapp/plain/*"
+
+Outputs:
+  ScheduleChecksFunctionArn:
+    Description: schedule-checks Lambda ARN
+    Value: !GetAtt ScheduleChecksFunction.Arn
+  CheckWorkerFunctionArn:
+    Description: check-worker Lambda ARN
+    Value: !GetAtt CheckWorkerFunction.Arn
+  WorkQueueUrl:
+    Description: Work Queue URL
+    Value: !Ref WorkQueue
+  WorkQueueArn:
+    Description: Work Queue ARN
+    Value: !GetAtt WorkQueue.Arn

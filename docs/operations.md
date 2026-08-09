@@ -1,0 +1,178 @@
+# 運用手順
+
+本書は `SPECIFICATION.md` §17, §20, §26 に基づく本番運用手順の集約である。
+業務仕様・閾値は `SPECIFICATION.md` を正とし、本書は操作手順と確認手順を示す。
+記載のコマンドは profile・region の明示を前提とする（AGENTS.md §13）。
+
+## 前提
+
+- 本番 Lambda は `schedule-checks` と `check-worker` の2本だけ。
+- Amazon HTTP 取得は直列化されており、1 worker 起動で Amazon へ最大1回しかアクセスしない。
+- 商品通知（Slack notice / Mastodon）は best-effort。通知 outbox は持たない。
+- 運用エラー通知は CloudWatch Alarm の `ALARM` 遷移時だけ Slack error channel へ1件送る。
+
+---
+
+## 1. デプロイ（前後確認）
+
+`scripts/deploy.sh` は build / package / changeset / deploy を分離する。
+default で `SchedulersEnabled=false`（Scheduler 無効）を想定する。
+
+### 1.1 ローカル品質確認（デプロイ前に必須）
+
+```bash
+make check
+go test -race ./...
+govulncheck ./...
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/schedule-checks
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
+```
+
+`gofmt -l` が空、test / vet / staticcheck / govulncheck の error と warning が0件であることを確認する。
+
+### 1.2 build → package → change set 確認
+
+```bash
+./scripts/deploy.sh --profile <P> --region <R> --stage build
+./scripts/deploy.sh --profile <P> --region <R> --stage package
+./scripts/deploy.sh --profile <P> --region <R> --stage changeset
+```
+
+change set 作成後、適用前に内容を確認する。
+
+```bash
+aws cloudformation describe-change-set \
+  --change-set-name <ChangeSetId> --profile <P> --region <R>
+```
+
+### 1.3 deploy（適用）
+
+```bash
+./scripts/deploy.sh --profile <P> --region <R> --stage deploy
+```
+
+### 1.4 デプロイ後確認
+
+- 両 Lambda の Log Group が作成され、保持期間が30日であること。
+- Work Queue / Work DLQ / Scheduler DLQ が FIFO / Standard 構成どおりに作成されていること。
+- event source mapping の `BatchSize=1`、`ReportBatchItemFailures` が設定されていること。
+- 3 Scheduler が `SchedulersEnabled` の指定どおりの有効状態であること（初回は無効）。
+- 2 Lambda の IAM role が共有されていないこと。
+- S3 bucket リソースが stack 削除対象に入っていないこと。
+
+---
+
+## 2. best-effort 通知の制約
+
+商品通知は S3 更新成功後に行う。Slack・Mastodon は各5秒 timeout で、片方の失敗後も他方を実行する。
+通知 adapter は各送信結果を個別に構造化ログへ出す（`notification_error`）。
+
+- S3 commit 後かつ通知前に実行環境が停止した場合は通知が欠落する。
+- 通知後かつ SQS message 削除前に停止した場合は再実行で重複する余地がある。
+- S3 状態の整合性を通知の exactly-once 性より優先する。通知失敗で保存済み価格を巻き戻さない。
+- 個別 Amazon リクエストエラーを Slack へ送らない。再試行中のエラーは CloudWatch Logs のみ。
+
+これらは仕様（`SPECIFICATION.md` §17.1）。通知 outbox は追加しない。
+
+---
+
+## 3. DLQ / Alarm 対応
+
+Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移したときだけ、
+`schedule-checks` が Alarm イベントで起動し Slack error channel へ1件通知する。
+同じ Alarm 状態の間にエラー件数分の通知は増やさない。復旧は Alarm の `OK` 遷移で確認する。
+
+### 3.1 Work DLQ（`SPECIFICATION.md` §26.1）
+
+1. Alarm 通知の queue 名と message 数を確認する。
+2. DLQ message の `job_id`, `cycle_id`, `kind`, target を確認する。
+3. `job_id` で CloudWatch Logs を検索し、最大5回分の `error_type`, `http_status`, `response_bytes` を比較する。
+4. 単一 target の問題か、同時刻の複数 target に共通する問題かを判定する。
+5. selector・code・対象 data の必要な修正を行い、fixture と自動 test を追加する。
+6. 修正版を deploy する。
+7. DLQ message を Work Queue へ redrive する。
+8. `job_completed` ログ、DLQ 空、Alarm の `OK` 遷移を確認する。
+
+原因確認前に DLQ message を削除しない。404・商品種別不一致などの terminal result は DLQ へ入らない。
+
+### 3.2 Queue 滞留（`SPECIFICATION.md` §26.2）
+
+`ApproximateAgeOfOldestMessage` が2時間（7200秒）を超えた場合は次を確認する。
+
+- 同じ Amazon job が再試行を繰り返していないか。
+- 403, 429, CAPTCHA, 短い200本文が複数 target で発生していないか。
+- 1件の平均 `duration_ms` が増加していないか。
+- 直前の周回が次のセール周回までに終了しているか。
+
+原因を確認せずに MessageGroupId を分割しない。分割すると Amazon 同時リクエスト数が増える。
+構造化ログで直列処理が周期内に収まらないことを確認した場合だけ変更する。
+
+### 3.3 Scheduler DLQ
+
+EventBridge Scheduler の再試行上限を超えた event が Scheduler DLQ へ入る。
+DLQ message の Scheduler 入力 JSON（`SPECIFICATION.md` §6 形式）から対象 check 種別と時刻を確認し、
+`schedule-checks` の該当時刻のログで投入成否（`cycle_dispatched` / `cycle_disabled`）を確認する。
+
+---
+
+## 4. ロールバック（`SPECIFICATION.md` §20.4）
+
+1. 新 Scheduler 3つと SQS event source mapping を無効にする。
+2. 旧3 Checker（既存新刊・セール・紙書籍）の EventBridge trigger を再有効化する。
+3. S3 backup と現行データを比較する。
+4. 切り替え後の手動追加を失わないよう、必要なレコードだけを選択的に復元する。
+
+S3 backup を配列全体で無条件に上書きしてロールバックしない。
+手動追加レコードは条件付き書き込みでは検出できないため、選択的復元で保護する。
+
+---
+
+## 5. MaxPrice 移行（dry-run / apply）
+
+`SPECIFICATION.md` §20.2 の MaxPrice 初期化パッチ。
+UserScript の Option+↑ で生成された既存 MaxPrice には紙書籍価格が入るため、
+`MaxPrice = CurrentPrice` へ置き換える。対象は次の3 object。
+
+- `unprocessed_asins.json`
+- `upcoming_asins.json`
+- `notified_asins.json`
+
+`paper_books_asins.json` はセール価格履歴ではないため対象外。
+
+### 5.1 dry-run（既定）
+
+```bash
+go run ./scripts/migrate-maxprice -bucket <BUCKET> -region <R>
+```
+
+変更を適用せず、変更件数・ASIN 集合・CurrentPrice・他 field の不変を検証する。
+`CurrentPrice == 0` のレコードは `MaxPrice` も0のままにする。
+
+### 5.2 検証項目（dry-run / apply 両方）
+
+- ASIN 件数が変化しないこと。
+- ASIN 集合が変化しないこと。
+- 各レコードの `CurrentPrice` が変化しないこと。
+- `MaxPrice` 以外の field と未知 field（Extra）が保持されること。
+
+### 5.3 apply（明示指定時のみ）
+
+```bash
+go run ./scripts/migrate-maxprice -bucket <BUCKET> -region <R> -apply
+```
+
+`-apply` を明示指定した場合だけ S3 へ書き込む。書き込みは `If-Match` を使う。
+apply 後も §5.2 の検証項目を再確認する。
+
+---
+
+## 6. ローカル JSON 編集（`SPECIFICATION.md` §26.3）
+
+- upload 直前に対象 S3 object の最新版を取得する。
+- ローカル追加分を最新版へ merge してから upload する。
+- 自動処理が先に書き込んだ内容を、古いローカル copy で配列全体上書きしない。
+- upload 後に件数と追加 ASIN または作者を確認する。
+
+自動処理側は ETag 競合時に手動変更を読み直して merge する。
+手動側が古い copy を後から無条件 upload した場合は S3 の条件付き書き込みで検出できないため、
+上記手順で回避する。

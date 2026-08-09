@@ -1,0 +1,7 @@
+# Lambda 配布バイナリ・アーカイブ。生成物を本番 source へ混在させない（AGENTS.md 12, 14）。
+bootstrap
+*.zip
+.build/
+
+# SAM build・package 生成物（AGENTS.md 13）。
+.aws-sam/

@@ -1,0 +1,184 @@
+// Package checkworker は check-worker Lambda の composition root である。
+// SQS イベントの decode、job kind ごとのユースケース振り分け、AWS/config 依存組み立て、
+// amazon/storage と各 application ユースケース間の bridge（DTO 変換・adapter）を担当する。
+// 業務判定・HTML selector・S3 merge ロジックは持たない（AGENTS.md 4）。
+package checkworker
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"time"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambdacontext"
+	"github.com/shinderuman/kindle-automation/internal/application/execution"
+	"github.com/shinderuman/kindle-automation/internal/application/newrelease"
+	"github.com/shinderuman/kindle-automation/internal/application/papertokindle"
+	"github.com/shinderuman/kindle-automation/internal/application/sale"
+	"github.com/shinderuman/kindle-automation/internal/gist"
+	"github.com/shinderuman/kindle-automation/internal/job"
+	"github.com/shinderuman/kindle-automation/internal/logging"
+)
+
+// Worker は1起動で1つのジョブを処理する。ジョブ種別ごとに対応する application ユースケースへ振り分ける。
+type Worker struct {
+	SaleDeps  sale.Dependencies
+	NRDeps    newrelease.Dependencies
+	PaperDeps papertokindle.Dependencies
+	GistDeps  gist.Dependencies
+	Logger    *slog.Logger
+}
+
+// route は1つのジョブを種別に応じたユースケースへ振り分ける。
+// 戻り値の Outcome は結果分類とHTTP計測値を、error は再試行させる原因を表す。
+func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error) {
+	switch j.Kind {
+	case job.KindSaleCheck:
+		return sale.HandleSaleCheck(ctx, w.SaleDeps, j)
+	case job.KindSaleFinalize:
+		return sale.HandleSaleFinalize(ctx, w.SaleDeps, j)
+	case job.KindNewReleaseSearch:
+		return newrelease.HandleNewReleaseSearch(ctx, w.NRDeps, j)
+	case job.KindNewReleaseResult:
+		return newrelease.HandleNewReleaseResult(ctx, w.NRDeps, j)
+	case job.KindNewReleaseDetail:
+		return newrelease.HandleNewReleaseDetail(ctx, w.NRDeps, j)
+	case job.KindPaperToKindleCheck:
+		return papertokindle.HandlePaperToKindleCheck(ctx, w.PaperDeps, j)
+	case job.KindPaperToKindleDetail:
+		return papertokindle.HandlePaperToKindleDetail(ctx, w.PaperDeps, j)
+	case job.KindGistUpdate:
+		return gist.Update(ctx, w.GistDeps, j.Target.GistType)
+	default:
+		return execution.Errored("unknown_kind", 0, 0), fmt.Errorf("unknown job kind %q", j.Kind)
+	}
+}
+
+// HandleSQSEvent は SQS イベントを受け取り各レコードをジョブへ decode して振り分ける。
+// 正常・terminal・retryable を問わず各ジョブ結果を固定共通fieldでログへ出す（SPECIFICATION.md 18.1）。
+// decode・業務処理の失敗は error として返し Lambda 経由で SQS へ再配信させる（SPECIFICATION.md 7.2/12）。
+func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) error {
+	for _, record := range event.Records {
+		j, err := job.Decode([]byte(record.Body))
+		if err != nil {
+			w.logDecodeFailure(ctx, record, err)
+			return fmt.Errorf("decode sqs message %s: %w", record.MessageId, err)
+		}
+		start := time.Now()
+		oc, err := w.route(ctx, j)
+		w.logJobResult(ctx, record, j, oc, err, time.Since(start))
+		if err != nil {
+			return fmt.Errorf("handle job %s: %w", j.JobID, err)
+		}
+	}
+	return nil
+}
+
+// logJobResult は1ジョブの処理結果を固定共通fieldで出す（SPECIFICATION.md 18.1/18.3）。
+// result に応じて job_completed(INFO)/job_terminal(WARN)/job_error または gist_error(ERROR) へ振り分ける。
+// 取得不能な値は string は空、数値は 0 とする。http_status は未送信時（0）は空文字列（SPECIFICATION.md 18.1）。
+func (w *Worker) logJobResult(ctx context.Context, record events.SQSMessage, j job.Job, oc execution.Outcome, cause error, duration time.Duration) {
+	if w.Logger == nil {
+		return
+	}
+	level, event := levelEventFor(oc.Result, j.Kind)
+	errMsg := ""
+	if cause != nil {
+		errMsg = cause.Error()
+	}
+	w.Logger.LogAttrs(ctx, level, event,
+		slog.String("check_type", string(j.CheckType)),
+		slog.String("job_id", j.JobID),
+		slog.String("cycle_id", j.CycleID),
+		slog.String("target", targetOf(j)),
+		slog.Int("receive_count", receiveCount(record)),
+		slog.String("result", oc.Result),
+		slog.String("error_type", oc.ErrorType),
+		slog.String("http_status", httpStatusString(oc.HTTPStatus)),
+		slog.Int("duration_ms", int(duration.Milliseconds())),
+		slog.Int("response_bytes", oc.ResponseBytes),
+		slog.String("aws_request_id", requestID(ctx)),
+		slog.String("error", errMsg),
+	)
+}
+
+// logDecodeFailure は decode 失敗を job_error として出す（SPECIFICATION.md 18.3）。
+// job が得られていないため job_id/cycle_id/target/check_type は空になる。
+func (w *Worker) logDecodeFailure(ctx context.Context, record events.SQSMessage, err error) {
+	if w.Logger == nil {
+		return
+	}
+	w.Logger.LogAttrs(ctx, slog.LevelError, logging.EventJobError,
+		slog.String("check_type", ""),
+		slog.String("job_id", ""),
+		slog.String("cycle_id", ""),
+		slog.String("target", ""),
+		slog.Int("receive_count", receiveCount(record)),
+		slog.String("result", execution.ResultError),
+		slog.String("error_type", "decode"),
+		slog.String("http_status", ""),
+		slog.Int("duration_ms", 0),
+		slog.Int("response_bytes", 0),
+		slog.String("aws_request_id", requestID(ctx)),
+		slog.String("sqs_message_id", record.MessageId),
+		slog.String("error", err.Error()),
+	)
+}
+
+// levelEventFor は結果分類と job kind から level と固定イベント名を決める。
+// gist_update の失敗は gist_error、それ以外の処理エラーは job_error（SPECIFICATION.md 18.3）。
+func levelEventFor(result string, kind job.Kind) (slog.Level, string) {
+	switch result {
+	case execution.ResultCompleted:
+		return slog.LevelInfo, logging.EventJobCompleted
+	case execution.ResultTerminal:
+		return slog.LevelWarn, logging.EventJobTerminal
+	default:
+		if kind == job.KindGistUpdate {
+			return slog.LevelError, logging.EventGistError
+		}
+		return slog.LevelError, logging.EventJobError
+	}
+}
+
+// targetOf は job の対象識別子（ASIN/作者名/gist_type）を1つ取り出す。いずれも無ければ空。
+func targetOf(j job.Job) string {
+	switch {
+	case j.Target.ASIN != "":
+		return j.Target.ASIN
+	case j.Target.AuthorName != "":
+		return j.Target.AuthorName
+	case j.Target.GistType != "":
+		return j.Target.GistType
+	default:
+		return ""
+	}
+}
+
+// receiveCount は SQS の ApproximateReceiveCount 属性を読み取る。属性がない場合は 0。
+func receiveCount(record events.SQSMessage) int {
+	if v, ok := record.Attributes["ApproximateReceiveCount"]; ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// httpStatusString は HTTP status を文字列へ正規化する。未送信（0）の時は空（SPECIFICATION.md 18.1）。
+func httpStatusString(status int) string {
+	if status == 0 {
+		return ""
+	}
+	return strconv.Itoa(status)
+}
+
+// requestID は Lambda request ID を取り出す。コンテキストに無い場合は空。
+func requestID(ctx context.Context) string {
+	if lctx, ok := lambdacontext.FromContext(ctx); ok {
+		return lctx.AwsRequestID
+	}
+	return ""
+}
