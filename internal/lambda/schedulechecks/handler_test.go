@@ -3,10 +3,17 @@ package schedulechecks
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
+
 	"github.com/shinderuman/kindle-automation/internal/application/dispatch"
+	"github.com/shinderuman/kindle-automation/internal/config"
 	"github.com/shinderuman/kindle-automation/internal/job"
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
@@ -159,5 +166,72 @@ func TestHandleAlarm_NoSenderSucceeds(t *testing.T) {
 	sched := &Scheduler{}
 	if err := sched.HandleAlarm(context.Background(), "WorkDLQDepth"); err != nil {
 		t.Fatalf("HandleAlarm with no sender should succeed: %v", err)
+	}
+}
+
+// 同一 Scheduler（composition root 相当）を再構築せず HandleEvent を2回呼び、間に stub S3 の
+// checker 設定を変更すると2回目が新値を読むことを検証する（warm execution environment でも反映）。
+func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
+	store := storage.NewMemStore()
+	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`)
+	enq := &recordingEnqueuer{}
+	sched := &Scheduler{
+		Deps: dispatch.Dependencies{
+			AsinListReader: asinListReader{store: store},
+			AuthorReader:   authorReader{store: store},
+			ConfigReader:   checkerConfigReader{store: store, key: "checker_configs.json"},
+			Enqueuer:       enq,
+			UpcomingMerger: fakeMerger{},
+			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
+		},
+	}
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+
+	// call1: SaleChecker 有効 → sale_finalize 1件を投入する。
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+		t.Fatalf("first HandleEvent: %v", err)
+	}
+	after1 := len(enq.jobs)
+	if after1 == 0 {
+		t.Fatal("first call should enqueue when SaleChecker is enabled")
+	}
+	// Scheduler 再構築なしで S3 の checker 設定を無効化する。
+	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":false}}`)
+	// call2: SaleChecker 無効 → 投入しない（新値を読んでいる証拠）。
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+		t.Fatalf("second HandleEvent: %v", err)
+	}
+	if len(enq.jobs) != after1 {
+		t.Errorf("second call should not enqueue when disabled: before=%d after=%d", after1, len(enq.jobs))
+	}
+}
+
+// --- secret key 集合の回帰テスト ---
+
+// stubSecretGetter は SSM GetParameter の stub。値があれば返し、なければ ParameterNotFound。
+type stubSecretGetter struct {
+	values map[string]string
+}
+
+func (g *stubSecretGetter) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	if v, ok := g.values[*in.Name]; ok {
+		return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: aws.String(v)}}, nil
+	}
+	return nil, &smithy.GenericAPIError{Code: "ParameterNotFound"}
+}
+
+// schedule-checks は Slack 通知用の2 key だけを必須とし、他の不要 key が欠けても起動を妨げない。
+func TestScheduleChecksSecretKeySet(t *testing.T) {
+	want := []string{config.KeySlackBotToken, config.KeySlackErrorChannel}
+	if !reflect.DeepEqual(scheduleChecksSecretKeys, want) {
+		t.Fatalf("scheduleChecksSecretKeys = %v, want %v", scheduleChecksSecretKeys, want)
+	}
+	// その2 key だけ存在し、他が全て欠けても LoadSecrets は成功する。
+	g := &stubSecretGetter{values: map[string]string{
+		"/myapp/secure/" + config.KeySlackBotToken:    "token",
+		"/myapp/plain/" + config.KeySlackErrorChannel: "C-err",
+	}}
+	if _, err := config.LoadSecrets(context.Background(), g, scheduleChecksSecretKeys, nil); err != nil {
+		t.Fatalf("LoadSecrets with only schedule-checks keys must succeed: %v", err)
 	}
 }

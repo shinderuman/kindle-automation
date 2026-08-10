@@ -87,7 +87,7 @@ func TestLoadSecrets_AllKeys(t *testing.T) {
 		secureSSMPath + "/" + KeyMastodonAccessToken:  "atoken",
 		secureSSMPath + "/" + KeyGitHubToken:          "ghtoken",
 	}}
-	secrets, err := LoadSecrets(context.Background(), g, AllSecretKeys)
+	secrets, err := LoadSecrets(context.Background(), g, AllSecretKeys, nil)
 	if err != nil {
 		t.Fatalf("LoadSecrets: %v", err)
 	}
@@ -96,5 +96,40 @@ func TestLoadSecrets_AllKeys(t *testing.T) {
 	}
 	if secrets.SlackErrorChannel != "C2" {
 		t.Errorf("plain fallback not applied: %+v", secrets)
+	}
+}
+
+// required key が SSM に存在しない場合は起動エラー（SPECIFICATION.md 19 step4）。
+func TestLoadSecrets_RequiredMissingErrors(t *testing.T) {
+	g := &stubGetter{values: map[string]string{
+		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
+	}}
+	_, err := LoadSecrets(context.Background(), g,
+		[]string{KeyAmazonPartnerTag, KeyGitHubToken}, nil)
+	if err == nil {
+		t.Fatal("LoadSecrets should fail when a required key is missing")
+	}
+}
+
+// optional key は SSM に存在しなくても起動を妨げない（任意通知先の未設定）。存在すれば値が入る。
+func TestLoadSecrets_OptionalMissingSucceeds(t *testing.T) {
+	g := &stubGetter{values: map[string]string{
+		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
+		secureSSMPath + "/" + KeySlackBotToken:    "token",
+	}}
+	secrets, err := LoadSecrets(context.Background(), g,
+		[]string{KeyAmazonPartnerTag},
+		[]string{KeySlackBotToken, KeySlackNoticeChannel, KeyMastodonServer})
+	if err != nil {
+		t.Fatalf("LoadSecrets with missing optional: %v", err)
+	}
+	if secrets.AmazonPartnerTag != "tag" {
+		t.Errorf("required AmazonPartnerTag = %q, want tag", secrets.AmazonPartnerTag)
+	}
+	if secrets.SlackBotToken != "token" {
+		t.Errorf("present optional SlackBotToken = %q, want token", secrets.SlackBotToken)
+	}
+	if secrets.SlackNoticeChannel != "" || secrets.MastodonServer != "" {
+		t.Errorf("missing optional keys must stay empty: %+v", secrets)
 	}
 }

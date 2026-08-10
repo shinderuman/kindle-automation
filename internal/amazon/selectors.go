@@ -66,5 +66,10 @@ const (
 	selectorSearchPriceFall  = ".a-price .a-offscreen"
 	selectorSearchAuthor     = ".a-size-base"
 	selectorSearchAuthorFall = ".a-row.a-size-base.a-color-secondary"
+	selectorSearchFormat     = ".puis-price-instructions-style a.a-text-bold"
 	selectorSearchReleaseDay = ".puis-desktop-list-row .puisg-col-4-of-24 div:nth-child(2) div:nth-child(2) span span"
 )
+
+// kindleFormatLabel は検索結果カードのKindle形式表示text（実HTMLで確認）。
+// この文字列だけが候補をKindle版と確定させる（SPECIFICATION.md 11.2, 13.4）。
+const kindleFormatLabel = "Kindle版"

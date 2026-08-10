@@ -137,6 +137,10 @@ func TestEvaluatePriceChange(t *testing.T) {
 		{name: "閾値以上の値下がり", oldCurrent: 800, current: 600, wantKind: PriceDown, wantDiff: -200},
 		{name: "閾値未満の変動は通知しない", oldCurrent: 600, current: 650, wantKind: NoChange, wantDiff: 0},
 		{name: "境界値ちょうどは値上がり", oldCurrent: 600, current: 700, wantKind: PriceUp, wantDiff: 100},
+		{name: "値上がり境界値直前は通知しない", oldCurrent: 600, current: 699, wantKind: NoChange, wantDiff: 0},
+		{name: "値下がり境界値ちょうどは値下がり", oldCurrent: 700, current: 600, wantKind: PriceDown, wantDiff: -100},
+		{name: "値下がり境界値直前は通知しない", oldCurrent: 700, current: 601, wantKind: NoChange, wantDiff: 0},
+		{name: "差額は整数へゼロ方向へ切り捨てる", oldCurrent: 600, current: 700.9, wantKind: PriceUp, wantDiff: 100},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,4 +150,162 @@ func TestEvaluatePriceChange(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConditionsAny(t *testing.T) {
+	tests := []struct {
+		name string
+		c    Conditions
+		want bool
+	}{
+		{name: "全条件不成立はfalse", c: Conditions{}, want: false},
+		{name: "価格差単独成立はtrue", c: Conditions{PriceDrop: true}, want: true},
+		{name: "ポイント数単独成立はtrue", c: Conditions{Points: true}, want: true},
+		{name: "ポイント還元率単独成立はtrue", c: Conditions{PointRate: true}, want: true},
+		{name: "クーポン単独成立はtrue", c: Conditions{Coupon: true}, want: true},
+		{name: "2条件成立はtrue", c: Conditions{Points: true, Coupon: true}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.c.Any(); got != tc.want {
+				t.Fatalf("Any = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateThresholdBoundaries(t *testing.T) {
+	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
+
+	t.Run("価格差は直前不成立/一致と直後成立", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			current float64
+			max     float64
+			want    bool
+		}{
+			{name: "差150は不成立(直前)", current: 800, max: 950, want: false},
+			{name: "差151は成立(一致)", current: 800, max: 951, want: true},
+			{name: "差152は成立(直後)", current: 800, max: 952, want: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := Evaluate(Input{CurrentPrice: tc.current, MaxPrice: tc.max}, th).PriceDrop
+				if got != tc.want {
+					t.Fatalf("PriceDrop = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("ポイント数は直前不成立/一致と直後成立", func(t *testing.T) {
+		// CurrentPriceとMaxPriceを大きく取り、還元率と価格差が重ならないようにする。
+		cases := []struct {
+			name   string
+			points int
+			want   bool
+		}{
+			{name: "150ptは不成立(直前)", points: 150, want: false},
+			{name: "151ptは成立(一致)", points: 151, want: true},
+			{name: "152ptは成立(直後)", points: 152, want: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				in := Input{CurrentPrice: 100000, MaxPrice: 100000, Points: tc.points}
+				got := Evaluate(in, th).Points
+				if got != tc.want {
+					t.Fatalf("Points = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("ポイント還元率は直前不成立/一致と直後成立し丸めず生値で比較する", func(t *testing.T) {
+		// current=600 で points=120 が 20.0%。points<151 なので Points 条件は重ならない。
+		cases := []struct {
+			name    string
+			current float64
+			points  int
+			want    bool
+		}{
+			{name: "19.83%は不成立(直前)", current: 600, points: 119, want: false},
+			{name: "20.0%は成立(一致)", current: 600, points: 120, want: true},
+			{name: "20.17%は成立(直後)", current: 600, points: 121, want: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				in := Input{CurrentPrice: tc.current, MaxPrice: tc.current, Points: tc.points}
+				got := Evaluate(in, th).PointRate
+				if got != tc.want {
+					t.Fatalf("PointRate = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+}
+
+func TestEvaluateFirstFetchNoPriceDrop(t *testing.T) {
+	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
+	// MaxPrice未取得(0)の初回取得では、現価格が安くても価格差セールは成立しない（SPEC 12.3）。
+	// ポイントとクーポンは初回取得でも判定する。
+	got := Evaluate(Input{CurrentPrice: 600, MaxPrice: 0, Points: 200, Coupon: true}, th)
+	if got.PriceDrop {
+		t.Errorf("PriceDrop must be false when MaxPrice is uninitialized (first fetch)")
+	}
+	if !got.Points || !got.Coupon {
+		t.Errorf("Points and Coupon must still be evaluated on first fetch: %+v", got)
+	}
+}
+
+func TestEvaluatePointRateZeroPrice(t *testing.T) {
+	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
+	// CurrentPrice=0 でも 0 除算せず、還元率条件は成立しない。ポイント数は単独で判定する。
+	got := Evaluate(Input{CurrentPrice: 0, MaxPrice: 0, Points: 1, Coupon: false}, th)
+	if got.PointRate {
+		t.Errorf("PointRate must be false for zero price (no division by zero)")
+	}
+	if got.Points {
+		t.Errorf("Points 1 < SaleThreshold 151 must be false")
+	}
+}
+
+func TestNotificationLinesPointRateRounding(t *testing.T) {
+	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
+	// 還元率は小数第1位へ丸める（%.1f、最近接丸め）。整数円・整数ptの現実入力で検証する。
+	cases := []struct {
+		name    string
+		current float64
+		points  int
+		want    string
+	}{
+		{name: "33.33%は33.3%", current: 600, points: 200, want: "✅ ポイント還元 33.3%"},
+		{name: "66.67%は66.7%", current: 300, points: 200, want: "✅ ポイント還元 66.7%"},
+		{name: "21.67%は21.7%", current: 600, points: 130, want: "✅ ポイント還元 21.7%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := Input{CurrentPrice: tc.current, MaxPrice: tc.current, Points: tc.points}
+			lines := NotificationLines(in, Evaluate(in, th), "")
+			for _, l := range lines {
+				if l == tc.want {
+					return
+				}
+			}
+			t.Fatalf("NotificationLines = %v, want to contain %q", lines, tc.want)
+		})
+	}
+}
+
+func TestNotificationLinesPriceDropTruncation(t *testing.T) {
+	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
+	// 価格差の {diff}円 は int() でゼロ方向へ切り捨てる（SPEC 12.4）。小数価格で切り捨て規則を検証。
+	in := Input{CurrentPrice: 600, MaxPrice: 800.9, Points: 0, Coupon: false}
+	lines := NotificationLines(in, Evaluate(in, th), "")
+	want := "✅ 最高額との価格差 200円" // int(200.9) = 200
+	for _, l := range lines {
+		if l == want {
+			return
+		}
+	}
+	t.Fatalf("NotificationLines = %v, want to contain %q", lines, want)
 }

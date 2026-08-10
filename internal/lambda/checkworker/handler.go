@@ -20,6 +20,7 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/gist"
 	"github.com/shinderuman/kindle-automation/internal/job"
 	"github.com/shinderuman/kindle-automation/internal/logging"
+	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
 // Worker は1起動で1つのジョブを処理する。ジョブ種別ごとに対応する application ユースケースへ振り分ける。
@@ -28,7 +29,12 @@ type Worker struct {
 	NRDeps    newrelease.Dependencies
 	PaperDeps papertokindle.Dependencies
 	GistDeps  gist.Dependencies
-	Logger    *slog.Logger
+	// 可変 S3 設定の読み込み元。checker_configs.json・excluded_title_keywords.json は
+	// invocation ごとに最新値を読む（refreshVariableConfig）。
+	store                    storage.ObjectStore
+	checkerConfigKey         string
+	excludedTitleKeywordsKey string
+	Logger                   *slog.Logger
 }
 
 // route は1つのジョブを種別に応じたユースケースへ振り分ける。
@@ -60,6 +66,10 @@ func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error
 // 正常・terminal・retryable を問わず各ジョブ結果を固定共通fieldでログへ出す（SPECIFICATION.md 18.1）。
 // decode・業務処理の失敗は error として返し Lambda 経由で SQS へ再配信させる（SPECIFICATION.md 7.2/12）。
 func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) error {
+	// 可変 S3 設定を invocation ごとに最新へ反映する（cold start に固定しない）。
+	if err := w.refreshVariableConfig(ctx); err != nil {
+		return fmt.Errorf("load variable config: %w", err)
+	}
 	for _, record := range event.Records {
 		j, err := job.Decode([]byte(record.Body))
 		if err != nil {

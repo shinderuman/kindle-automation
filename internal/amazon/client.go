@@ -107,6 +107,12 @@ func (c *Client) FetchProduct(ctx context.Context, asin string) (FetchResult, er
 		// 200 でも必須構造（#productTitle）がない場合は取得内容不足として再試行する。
 		return FetchResult{Category: CategoryRetryable, HTTPStatus: status, ResponseBytes: responseBytes}, nil
 	}
+	if info.ASIN == "" {
+		// canonical/final URL のいずれからも対象ASINを確認できない200は正常とせず、
+		// 必須構造欠落の取得内容不足として再試行する（SPECIFICATION.md 11.3）。
+		// 要求ASINを無条件に代入して検証を形骸化しない。
+		return FetchResult{Category: CategoryRetryable, HTTPStatus: status, ResponseBytes: responseBytes}, nil
+	}
 	return FetchResult{Category: CategoryOK, Info: info, HTTPStatus: status, ResponseBytes: responseBytes}, nil
 }
 

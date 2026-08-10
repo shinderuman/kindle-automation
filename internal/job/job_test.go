@@ -21,7 +21,7 @@ func validBaseJob(kind Kind, target Target) Job {
 }
 
 func TestValidate(t *testing.T) {
-	product := &SearchProduct{ASIN: "B0FX3X569X", Title: "T", KindlePrice: 759}
+	product := &SearchProduct{ASIN: "B0FX3X569X", Title: "T", KindlePrice: 759, ItemType: ItemTypeKindle}
 
 	tests := []struct {
 		name    string
@@ -37,6 +37,8 @@ func TestValidate(t *testing.T) {
 		{name: "new_release_searchのauthor_name空はMissingField", job: validBaseJob(KindNewReleaseSearch, Target{}), wantErr: ErrMissingField},
 		{name: "new_release_resultはasinとauthorとproduct必須", job: validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李", Product: product}), wantErr: nil},
 		{name: "new_release_resultのproduct nilはMissingField", job: validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李"}), wantErr: ErrMissingField},
+		{name: "new_release_resultのitem_type空はInvalidItemType", job: validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李", Product: &SearchProduct{ASIN: "B0FX3X569X", ItemType: ""}}), wantErr: ErrInvalidItemType},
+		{name: "new_release_resultのitem_type未知値はInvalidItemType", job: validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李", Product: &SearchProduct{ASIN: "B0FX3X569X", ItemType: "ebooks"}}), wantErr: ErrInvalidItemType},
 		{name: "new_release_detailはasinとauthor必須", job: validBaseJob(KindNewReleaseDetail, Target{ASIN: "B0FX3X569X", AuthorName: "海李"}), wantErr: nil},
 		{name: "paper_to_kindle_checkはASIN必須", job: validBaseJob(KindPaperToKindleCheck, Target{ASIN: "B0FX3X569X"}), wantErr: nil},
 		{name: "paper_to_kindle_detailはasinとsource_asin必須", job: validBaseJob(KindPaperToKindleDetail, Target{ASIN: "B0FX3X569X", SourceASIN: "B0PAPER001"}), wantErr: nil},
@@ -182,6 +184,40 @@ func TestEncodeOmitsUnusedTargetFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEncodeDecodeResultItemTypeRoundTrip は new_release_result の product.item_type が
+// canonical値 kindle で encode→decode→検証を往復することを検証する（SPECIFICATION.md 7.2, 13.4）。
+func TestEncodeDecodeResultItemTypeRoundTrip(t *testing.T) {
+	src := validBaseJob(KindNewReleaseResult, Target{
+		ASIN: "B0FX3X569X", AuthorName: "海李",
+		Product: &SearchProduct{ASIN: "B0FX3X569X", Title: "T", ItemType: ItemTypeKindle},
+	})
+	data, err := src.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := Decode(data)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Target.Product == nil || got.Target.Product.ItemType != ItemTypeKindle {
+		t.Fatalf("item_type round-trip = %q, want %q", getItemType(got.Target.Product), ItemTypeKindle)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate after decode: %v", err)
+	}
+	// JSON上の canonical 表記も検証する。
+	if !strings.Contains(string(data), `"item_type":"kindle"`) {
+		t.Fatalf("encoded JSON lacks canonical item_type: %s", data)
+	}
+}
+
+func getItemType(p *SearchProduct) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return p.ItemType
 }
 
 func TestEncodeScheduledAtAsRFC3339(t *testing.T) {

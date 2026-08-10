@@ -16,6 +16,8 @@ func TestClassifyHTTPStatus(t *testing.T) {
 		{name: "410はPermanentClientError", status: 410, want: CategoryPermanentClientError},
 		{name: "500はRetryable", status: 500, want: CategoryRetryable},
 		{name: "503はRetryable", status: 503, want: CategoryRetryable},
+		{name: "301は成功扱いせずRetryable", status: 301, want: CategoryRetryable},
+		{name: "100は成功扱いせずRetryable", status: 100, want: CategoryRetryable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

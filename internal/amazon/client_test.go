@@ -1,8 +1,10 @@
 package amazon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,6 +106,43 @@ func TestFetchProduct_ShortBodyIsRetryable(t *testing.T) {
 	if result.Category != CategoryRetryable {
 		t.Errorf("short 200 without #productTitle must be retryable, got %v", result.Category)
 	}
+}
+
+func TestFetchProduct_MissingASINIsRetryable(t *testing.T) {
+	// #productTitle はあるが ASIN input・canonical link ともになく、最終URL path にも
+	// /dp/{ASIN} が無い200。対象ASINを canonical/final URL のいずれからも確認できないため
+	// 必須構造欠落の取得内容不足として再試行する（SPECIFICATION.md 11.3, bug1）。
+	// 要求ASINを無条件に代入して検証を形骸化しない。
+	htmlBody := `<html><body><span id="productTitle">タイトル</span></body></html>`
+	c := newClientWithHTTPClient(amazonBase, &http.Client{
+		Timeout:       5 * time.Second,
+		CheckRedirect: checkRedirect,
+		Transport:     finalURLNoASINRT{body: []byte(htmlBody)},
+	})
+	result, err := c.FetchProduct(context.Background(), "B0FX3X569X")
+	if err != nil {
+		t.Fatalf("FetchProduct: %v", err)
+	}
+	if result.Category != CategoryRetryable {
+		t.Errorf("200 without ASIN source must be retryable, got %v", result.Category)
+	}
+	if result.HTTPStatus != 200 {
+		t.Errorf("HTTPStatus = %d, want 200 (応答あり)", result.HTTPStatus)
+	}
+}
+
+// finalURLNoASINRT は応答をそのまま返しつつ、最終URL path を ASIN を含まない /selected へ
+// 替える Transport。Amazon が商品URLを /dp/{ASIN} を含まない path へ誘導した状況を再現する。
+type finalURLNoASINRT struct{ body []byte }
+
+func (rt finalURLNoASINRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Path = "/selected"
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(rt.body)),
+		Request:    req,
+		Header:     make(http.Header),
+	}, nil
 }
 
 func TestFetchProduct_CaptchaIsRetryable(t *testing.T) {
@@ -259,5 +298,161 @@ func TestIsAmazonHost_AcceptsApexAndSubdomainRejectsSpoof(t *testing.T) {
 		if IsAmazonHost(host) {
 			t.Errorf("IsAmazonHost(%q) = true, want false", host)
 		}
+	}
+}
+
+// NewClient は本番用の依存(timeout・redirect検証)を組み立てた client を返す。
+func TestNewClient_ReturnsConfiguredClient(t *testing.T) {
+	c := NewClient()
+	if c == nil {
+		t.Fatal("NewClient = nil, want non-nil production client")
+	}
+}
+
+// checkRedirect は相対redirect(host 空)を許容する。host が空のときは
+// IsAmazonHost 判定へ進まず追随する（SPECIFICATION.md 11.1）。
+func TestCheckRedirect_EmptyHostAllowed(t *testing.T) {
+	req := &http.Request{URL: &url.URL{Host: "", Path: "/dp/B0FX3X569X"}}
+	if err := checkRedirect(req, nil); err != nil {
+		t.Errorf("checkRedirect empty host err = %v, want nil", err)
+	}
+}
+
+// 商品ページ取得でTCP/DNSレベルの通信失敗が起きた場合は応答なしのerrorとして返す
+// （SPECIFICATION.md 11.3 timeout、DNS、接続失敗=retryable。HTTP client内で再試行しない）。
+func TestFetchProduct_ConnectionFailure(t *testing.T) {
+	c := newClientWithHTTPClient("http://127.0.0.1:1", &http.Client{
+		Timeout:       2 * time.Second,
+		CheckRedirect: checkRedirect,
+	})
+	_, err := c.FetchProduct(context.Background(), "B0FX3X569X")
+	if err == nil {
+		t.Fatal("connection failure must return error")
+	}
+}
+
+// response body の読込失敗も応答ありのerrorとして返す（SPECIFICATION.md 11.3）。
+// 応答は Amazon 由来とは限らないため本文は parse せず error を上位へ伝播する。
+type readErrBody struct{}
+
+func (readErrBody) Read(_ []byte) (int, error) {
+	return 0, errors.New("simulated read error")
+}
+
+type readErrRT struct{}
+
+func (readErrRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(readErrBody{}),
+		Request:    req,
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestFetchProduct_BodyReadError(t *testing.T) {
+	c := newClientWithHTTPClient(amazonBase, &http.Client{
+		Timeout:       5 * time.Second,
+		CheckRedirect: checkRedirect,
+		Transport:     readErrRT{},
+	})
+	_, err := c.FetchProduct(context.Background(), "B0FX3X569X")
+	if err == nil {
+		t.Fatal("body read error must return error")
+	}
+}
+
+// FetchSearch の body 超過は応答ありの retryable として計測値を保持する（SPECIFICATION.md 11.3, 18.1）。
+func TestFetchSearch_BodyTooLarge(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		big := make([]byte, maxBodyBytes+1)
+		for i := range big {
+			big[i] = 'a'
+		}
+		_, _ = w.Write(big)
+	}))
+	defer ts.Close()
+
+	result, err := newTestClient(t, ts, 30*time.Second).FetchSearch(context.Background(), "海李")
+	if err != nil {
+		t.Fatalf("FetchSearch: %v", err)
+	}
+	if result.Category != CategoryRetryable {
+		t.Errorf("Category = %v, want Retryable", result.Category)
+	}
+	if result.HTTPStatus != 200 {
+		t.Errorf("HTTPStatus = %d, want 200 (応答あり)", result.HTTPStatus)
+	}
+	if result.ResponseBytes <= int(maxBodyBytes) {
+		t.Errorf("ResponseBytes = %d, want > %d", result.ResponseBytes, maxBodyBytes)
+	}
+}
+
+// FetchSearch の CAPTCHA 本文は retryable に分類する（SPECIFICATION.md 11.3, 22.2）。
+func TestFetchSearch_CaptchaIsRetryable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html><body>画像に表示されている文字を入力してください</body></html>"))
+	}))
+	defer ts.Close()
+
+	result, err := newTestClient(t, ts, 5*time.Second).FetchSearch(context.Background(), "海李")
+	if err != nil {
+		t.Fatalf("FetchSearch: %v", err)
+	}
+	if result.Category != CategoryRetryable {
+		t.Errorf("CAPTCHA search page must be retryable, got %v", result.Category)
+	}
+}
+
+// FetchSearch でもTCP/DNSレベルの通信失敗は応答なしのerrorとして返す（SPECIFICATION.md 11.3）。
+func TestFetchSearch_ConnectionFailure(t *testing.T) {
+	c := newClientWithHTTPClient("http://127.0.0.1:1", &http.Client{
+		Timeout:       2 * time.Second,
+		CheckRedirect: checkRedirect,
+	})
+	_, err := c.FetchSearch(context.Background(), "海李")
+	if err == nil {
+		t.Fatal("connection failure must return error")
+	}
+}
+
+// baseURL が不正でリクエストを構築できない場合はerrorとして返す（設定異常）。
+func TestFetchProduct_MalformedBaseURL(t *testing.T) {
+	c := newClientWithHTTPClient("http://[::1zzz", &http.Client{
+		Timeout:       5 * time.Second,
+		CheckRedirect: checkRedirect,
+	})
+	_, err := c.FetchProduct(context.Background(), "B0FX3X569X")
+	if err == nil {
+		t.Fatal("malformed base URL must return error")
+	}
+}
+
+// FetchSearch の HTTP status 分類（SPECIFICATION.md 11.3）。
+func TestFetchSearch_StatusClassification(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   Category
+	}{
+		{name: "403 Retryable", status: http.StatusForbidden, want: CategoryRetryable},
+		{name: "500 Retryable", status: http.StatusInternalServerError, want: CategoryRetryable},
+		{name: "400 PermanentClientError", status: http.StatusBadRequest, want: CategoryPermanentClientError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer ts.Close()
+
+			result, err := newTestClient(t, ts, 5*time.Second).FetchSearch(context.Background(), "海李")
+			if err != nil {
+				t.Fatalf("FetchSearch: %v", err)
+			}
+			if result.Category != tc.want {
+				t.Errorf("status %d: Category = %v, want %v", tc.status, result.Category, tc.want)
+			}
+		})
 	}
 }

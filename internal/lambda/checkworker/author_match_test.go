@@ -34,19 +34,19 @@ func TestAuthorMatch_SearchExtractionToApplication(t *testing.T) {
 	if len(hits) != 1 {
 		t.Fatalf("search hits = %d, want 1", len(hits))
 	}
-	label := hits[0].AuthorLabel
-	if label != "海李 (著)" {
-		t.Fatalf("search AuthorLabel = %q, want 海李 (著)", label)
+	contributors := hits[0].Contributors
+	if len(contributors) != 1 || contributors[0] != "海李 (著)" {
+		t.Fatalf("search Contributors = %v, want [海李 (著)]", contributors)
 	}
-	if !newrelease.AuthorMatches("海李", label) {
-		t.Errorf("AuthorMatches(海李, %q) = false, want true (役割表記を除去して一致)", label)
+	if !newrelease.AuthorMatches("海李", contributors) {
+		t.Errorf("AuthorMatches(海李, %v) = false, want true (役割表記を除去して一致)", contributors)
 	}
-	if newrelease.AuthorMatches("上原誠", label) {
-		t.Errorf("AuthorMatches(上原誠, %q) = true, want false", label)
+	if newrelease.AuthorMatches("上原誠", contributors) {
+		t.Errorf("AuthorMatches(上原誠, %v) = true, want false", contributors)
 	}
 	// 部分名（"海"）は contributor と完全一致しないため Hit しない。
-	if newrelease.AuthorMatches("海", label) {
-		t.Errorf("partial name 海 must not match %q", label)
+	if newrelease.AuthorMatches("海", contributors) {
+		t.Errorf("partial name 海 must not match %v", contributors)
 	}
 }
 
@@ -60,18 +60,19 @@ func TestAuthorMatch_ProductExtractionMultipleContributors(t *testing.T) {
 </body></html>`
 
 	info := amazon.ExtractProduct(mustDoc(t, productHTML), "https://www.amazon.co.jp/dp/B0FX3X569X")
-	if info.AuthorLabel != "上原誠 やきいもほくほく" {
-		t.Fatalf("product AuthorLabel = %q, want 上原誠 やきいもほくほく", info.AuthorLabel)
+	wantContributors := []string{"上原誠", "やきいもほくほく"}
+	if len(info.Contributors) != len(wantContributors) || info.Contributors[0] != wantContributors[0] || info.Contributors[1] != wantContributors[1] {
+		t.Fatalf("product Contributors = %v, want %v", info.Contributors, wantContributors)
 	}
-	label := info.AuthorLabel
-	for _, author := range []string{"上原誠", "やきいもほくほく"} {
-		if !newrelease.AuthorMatches(author, label) {
-			t.Errorf("AuthorMatches(%s, %q) = false, want true (複数contributorのいずれかに一致)", author, label)
+	contributors := info.Contributors
+	for _, author := range wantContributors {
+		if !newrelease.AuthorMatches(author, contributors) {
+			t.Errorf("AuthorMatches(%s, %v) = false, want true (複数contributorのいずれかに一致)", author, contributors)
 		}
 	}
 	for _, partial := range []string{"上原", "誠", "やきいも"} {
-		if newrelease.AuthorMatches(partial, label) {
-			t.Errorf("partial name %q must not match %q", partial, label)
+		if newrelease.AuthorMatches(partial, contributors) {
+			t.Errorf("partial name %q must not match %v", partial, contributors)
 		}
 	}
 }

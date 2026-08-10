@@ -94,6 +94,21 @@ func TestExtractProduct_KindlePriceThreeLayers(t *testing.T) {
 	}
 }
 
+// TestExtractProduct_PurchasePriceWithoutPrefixIsParsed は購入価格正規表現の第2表現
+// 「￥Xで購入」を第1表現（「または」/「購入価格」前置）とは独立して検証する。
+// 第1層(slot-price)を0円にして第2層の parsePurchasePrice へ進め、extraMessage を
+// 第2表現のみ（前置なし）にして pattern1 が不一致となり pattern2 だけで取れる合成HTMLで期待価格を検証する。
+func TestExtractProduct_PurchasePriceWithoutPrefixIsParsed(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="tmm-grid-swatch-KINDLE"><span class="a-button"><span class="a-button-inner"><a class="a-button-text"><span class="slot-price"><span>￥0</span></span><span class="slot-extraMessage"><span class="kindleExtraMessage">￥1234で購入</span></span></a></span></span></div>
+</body></html>`
+
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if !got.CurrentPrice.Valid() || got.CurrentPrice.Yen() != 1234 {
+		t.Fatalf("CurrentPrice = %+v, want 1234", got.CurrentPrice)
+	}
+}
+
 func TestExtractProduct_KindlePriceAbsentIsUnknown(t *testing.T) {
 	const htmlSource = `<html><body><span id="productTitle">タイトル</span></body></html>`
 	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
@@ -204,8 +219,12 @@ func TestExtractSearch_BasicFields(t *testing.T) {
 	if !h.Price.Valid() || h.Price.Yen() != 759 {
 		t.Errorf("Price = %+v, want 759", h.Price)
 	}
-	if h.AuthorLabel != "海李 (著)" {
-		t.Errorf("AuthorLabel = %q, want 海李 (著)", h.AuthorLabel)
+	if len(h.Contributors) != 1 || h.Contributors[0] != "海李 (著)" {
+		t.Errorf("Contributors = %#v, want [\"海李 (著)\"]", h.Contributors)
+	}
+	// 形式表示がない候補はKindle版と確定しない（SPECIFICATION.md 13.4）。
+	if h.IsKindle {
+		t.Errorf("IsKindle = true, want false (形式表示なし)")
 	}
 }
 
@@ -214,6 +233,90 @@ func TestExtractSearch_Empty(t *testing.T) {
 	hits := ExtractSearch(newDoc(t, htmlSource))
 	if len(hits) != 0 {
 		t.Fatalf("len(hits) = %d, want 0", len(hits))
+	}
+}
+
+// 実HTML fixture: digital-text 検索結果カードは Kindle形式表示でKindle版と確定する。
+// 未知/非Kindleを誤ってKindle扱いしないこと、contributor が販売者・日付と分離されることを検証する（SPECIFICATION.md 11.2, 13.4）。
+func TestExtractSearch_RealFixture_KindleFormatAndContributors(t *testing.T) {
+	hits := ExtractSearch(loadFixtureDoc(t, "search_digital_text.html"))
+	if len(hits) < 1 {
+		t.Fatalf("len(hits) = %d, want >=1 from real fixture", len(hits))
+	}
+	// digital-text 検索の実カードはすべて Kindle版 を表示する。
+	for i, h := range hits {
+		if !h.IsKindle {
+			t.Errorf("hits[%d].IsKindle = false, want true (実fixtureのカードはKindle版表示)", i)
+		}
+	}
+	// 1件目の作者欄は「スコット・フィッツジェラルド、 村上春樹 | 販売者:...」形式。
+	// 販売者・日付を除外し、contributor ごとに分割されることを検証する。
+	first := hits[0]
+	if !containsString(first.Contributors, "村上春樹") {
+		t.Errorf("first.Contributors = %#v, want 村上春樹 を含む（販売者・日付は除外）", first.Contributors)
+	}
+	for _, c := range first.Contributors {
+		if strings.Contains(c, "販売者") || strings.Contains(c, "2026/") {
+			t.Errorf("contributor %q に販売者/日付が混入", c)
+		}
+	}
+}
+
+// 検索結果カードのKindle形式表示でKindle/非Kindle/種別不明を判定する（SPECIFICATION.md 13.4）。
+// 非Kindle・種別不明の最小fixtureは実markupの構造を基に形式markerを差し替え/除去して作る。
+func TestExtractSearch_KindleFormatClassification(t *testing.T) {
+	const kindleCard = `<div data-component-type="s-search-result">
+  <div class="s-title-instructions-style"><a href="/dp/B0KKKKKK01"><h2><span>K</span></h2></a></div>
+  <div class="puis-price-instructions-style"><a class="a-size-base a-link-normal a-text-bold">Kindle版</a></div>
+</div>`
+	const audibleCard = `<div data-component-type="s-search-result">
+  <div class="s-title-instructions-style"><a href="/dp/B0AAAAAA02"><h2><span>A</span></h2></a></div>
+  <div class="puis-price-instructions-style"><a class="a-size-base a-link-normal a-text-bold">オーディオブック</a></div>
+</div>`
+	const unknownCard = `<div data-component-type="s-search-result">
+  <div class="s-title-instructions-style"><a href="/dp/B0UUUUUU03"><h2><span>U</span></h2></a></div>
+  <div class="puis-price-instructions-style"><span class="a-color-secondary">形式不明</span></div>
+</div>`
+	doc := newDoc(t, `<html><body>`+kindleCard+audibleCard+unknownCard+`</body></html>`)
+	hits := ExtractSearch(doc)
+	if len(hits) != 3 {
+		t.Fatalf("len(hits) = %d, want 3", len(hits))
+	}
+	want := map[string]bool{"B0KKKKKK01": true, "B0AAAAAA02": false, "B0UUUUUU03": false}
+	for _, h := range hits {
+		got, ok := want[h.ASIN]
+		if !ok {
+			t.Fatalf("unexpected ASIN %q", h.ASIN)
+		}
+		if h.IsKindle != got {
+			t.Errorf("ASIN %q IsKindle = %v, want %v", h.ASIN, h.IsKindle, got)
+		}
+	}
+}
+
+// splitSearchContributors は作者表記から販売者/日付を除外し contributor ごとに分割する。
+func TestSplitSearchContributors(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "単一contributorと役割", in: "海李 (著)", want: []string{"海李 (著)"}},
+		{name: "複数contributorと販売者日付", in: "スコット・フィッツジェラルド、 村上春樹 | 販売者:Amazon Services International LLC  | 2026/8/7", want: []string{"スコット・フィッツジェラルド", "村上春樹"}},
+		{name: "空", in: "  ", want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitSearchContributors(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitSearchContributors(%q) = %#v, want %#v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("splitSearchContributors(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 
@@ -350,12 +453,12 @@ func loadFixtureDoc(t *testing.T, name string) *goquery.Document {
 	return doc
 }
 
-// 実HTML fixture: Kindle商品ページの作者表記は #bylineInfo a のテキスト群。
+// 実HTML fixture: Kindle商品ページの contributor 表記は #bylineInfo a の各テキスト。
 // 現EditionがKindleなので KINDLEスウォッチのリンクは javascript:void(0) になり候補ASINは空。
-func TestExtractProduct_RealFixture_KindlePageAuthorLabel(t *testing.T) {
+func TestExtractProduct_RealFixture_KindlePageContributors(t *testing.T) {
 	got := ExtractProduct(loadFixtureDoc(t, "product_B0FX3X569X.html"), "B0FX3X569X")
-	if !strings.Contains(got.AuthorLabel, "上原誠") || !strings.Contains(got.AuthorLabel, "やきいもほくほく") {
-		t.Errorf("AuthorLabel = %q, want 上原誆 と やきいもほくほく を含む", got.AuthorLabel)
+	if !containsString(got.Contributors, "上原誠") || !containsString(got.Contributors, "やきいもほくほく") {
+		t.Errorf("Contributors = %#v, want 上原誠 と やきいもほくほく を含む", got.Contributors)
 	}
 	if got.KindleSwatchASIN != "" {
 		t.Errorf("KindleSwatchASIN = %q, want empty (current edition is Kindle)", got.KindleSwatchASIN)
@@ -363,6 +466,15 @@ func TestExtractProduct_RealFixture_KindlePageAuthorLabel(t *testing.T) {
 	if !got.HasKindleSwatch {
 		t.Errorf("HasKindleSwatch = false, want true")
 	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, v := range items {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // 実HTML fixture: 紙書籍(ISBN)ページの KINDLEスウォッチリンクからKindle版ASINを取り出す。
@@ -373,5 +485,172 @@ func TestExtractProduct_RealFixture_PaperPageKindleSwatchASIN(t *testing.T) {
 	}
 	if !got.HasPaperSwatch || !got.HasKindleSwatch {
 		t.Errorf("HasPaperSwatch=%v HasKindleSwatch=%v, want both true", got.HasPaperSwatch, got.HasKindleSwatch)
+	}
+}
+
+// SPECIFICATION.md 22.2「ポイントあり」。第1層(slot-buyingPoints)がなくても第2層(slot-extraMessage)から
+// ポイントを再抽出できる（UserScript getKindlePoints と同じ2層構造、SPECIFICATION.md 11.2）。
+func TestExtractProduct_PointsFromExtraMessage(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="tmm-grid-swatch-KINDLE"><span class="a-button"><span class="a-button-inner"><a class="a-button-text"><span class="slot-extraMessage"><span class="kindleExtraMessage">または ￥759 で購入 388pt</span></span></a></span></span></div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if got.Points != 388 {
+		t.Errorf("Points = %d, want 388 (第2層 slot-extraMessage から抽出)", got.Points)
+	}
+}
+
+// クーポンバッジがあっても "クーポン:" を含まなければクーポンなしとする（SPECIFICATION.md 11.2）。
+func TestExtractProduct_CouponBadgeWithoutKeyword(t *testing.T) {
+	const htmlSource = `<html><body>
+<i class="a-icon a-icon-addon newCouponBadge">セール中</i>
+<div class="couponLabelText">500円OFF</div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if got.Coupon {
+		t.Errorf("Coupon = true, want false (バッジに クーポン: なし)")
+	}
+	if got.CouponText != "" {
+		t.Errorf("CouponText = %q, want empty", got.CouponText)
+	}
+}
+
+// バッジに "クーポン:" があるが .couponLabelText を取得できない場合もクーポンありと成立させる
+// （SPECIFICATION.md 11.2）。このとき文言は空になる。
+func TestExtractProduct_CouponBadgeKeywordButNoLabelText(t *testing.T) {
+	const htmlSource = `<html><body>
+<i class="a-icon a-icon-addon newCouponBadge">クーポン: 適用済</i>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if !got.Coupon {
+		t.Errorf("Coupon = false, want true (バッジに クーポン: あり)")
+	}
+	if got.CouponText != "" {
+		t.Errorf("CouponText = %q, want empty (.couponLabelText 不在)", got.CouponText)
+	}
+}
+
+// クーポン文言の率(%)表記も最初の直接text nodeとしてそのまま取得する（SPECIFICATION.md 11.2）。
+// 固定額/率の表現差で抽出を変えない。
+func TestExtractProduct_CouponPercentageText(t *testing.T) {
+	const htmlSource = `<html><body>
+<i class="a-icon a-icon-addon newCouponBadge">クーポン: 適用済</i>
+<div class="couponLabelText">10% OFF <a href="#">規約</a></div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if !got.Coupon {
+		t.Errorf("Coupon = false, want true")
+	}
+	if got.CouponText != "10% OFF" {
+		t.Errorf("CouponText = %q, want 10%% OFF", got.CouponText)
+	}
+}
+
+// 価格要素は存在するが数字を含まない場合は未取得とする（SPECIFICATION.md 11.3 価格解析失敗）。
+// 0円として保存しない（SPECIFICATION.md 11.2）。
+func TestExtractProduct_MalformedPriceIsUnknown(t *testing.T) {
+	const htmlSource = `<html><body>
+<span id="productTitle">タイトル</span>
+<span id="kindle-price">価格未定</span>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if got.CurrentPrice.Valid() {
+		t.Errorf("CurrentPrice = %+v, want unknown (価格解析失敗)", got.CurrentPrice)
+	}
+}
+
+// 発売日は "YYYY/M/D" 形式も受け付け UTC 00:00:00 へ正規化する（SPECIFICATION.md 11.2）。
+func TestExtractProduct_ReleaseDateSlashForm(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="rpi-attribute-book_details-publication_date">
+  <div class="a-section a-spacing-none a-text-center rpi-attribute-value"><span>2026/8/28</span></div>
+</div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	want := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	if !got.HasReleaseDate || !got.ReleaseDate.Equal(want) {
+		t.Fatalf("ReleaseDate = %v (has=%v), want %v", got.ReleaseDate, got.HasReleaseDate, want)
+	}
+}
+
+// UserScriptに存在しない新規fallback候補 #detailBullets_feature_div から発売日を取り出せる
+// （SPECIFICATION.md 11.2。primary セレクタが空のときだけ試す）。
+func TestExtractProduct_ReleaseDateFallbackSelector(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="detailBullets_feature_div"><ul><li><span>発売日: 2026年8月28日</span></li></ul></div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	want := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	if !got.HasReleaseDate || !got.ReleaseDate.Equal(want) {
+		t.Fatalf("ReleaseDate = %v (has=%v), want %v via fallback", got.ReleaseDate, got.HasReleaseDate, want)
+	}
+}
+
+// 発売日要素が存在しても解析不能なら HasReleaseDate=false とする（SPECIFICATION.md 11.3 解析失敗）。
+func TestExtractProduct_MalformedReleaseDate(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="rpi-attribute-book_details-publication_date">
+  <div class="a-section a-spacing-none a-text-center rpi-attribute-value"><span>発売未定</span></div>
+</div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
+	if got.HasReleaseDate {
+		t.Errorf("HasReleaseDate = true, want false (発売日解析失敗)")
+	}
+}
+
+// parsePoints は 0 以下やポイント表記のないtextを0にする（SPECIFICATION.md 11.2 ポイントなし=0）。
+func TestParsePoints_ZeroAndAbsent(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "0ptは0", text: "0pt", want: 0},
+		{name: "ポイント表記なしは0", text: "（ポイントなし）", want: 0},
+		{name: "日本語ポイント表記", text: "388ポイント", want: 388},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parsePoints(tc.text); got != tc.want {
+				t.Fatalf("parsePoints(%q) = %d, want %d", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// 検索カードのタイトルセレクタが .s-title-instructions-style を持たない場合、
+// タイトルは fallback(h2 span)で取り、商品URLは h2 a / .a-link-normal[href*='/dp/'] から取り出す
+// （SPECIFICATION.md 11.2）。
+func TestExtractSearch_URLFallback(t *testing.T) {
+	const htmlSource = `<html><body>
+<div data-component-type="s-search-result">
+  <h2><span>タイトル</span></h2>
+  <a class="a-link-normal" href="/dp/B0FX3X569X/ref=x">リンク</a>
+</div>
+</body></html>`
+	hits := ExtractSearch(newDoc(t, htmlSource))
+	if len(hits) != 1 {
+		t.Fatalf("len(hits) = %d, want 1", len(hits))
+	}
+	if hits[0].ASIN != "B0FX3X569X" {
+		t.Errorf("ASIN = %q, want B0FX3X569X (URL fallback)", hits[0].ASIN)
+	}
+	if hits[0].Title != "タイトル" {
+		t.Errorf("Title = %q, want タイトル", hits[0].Title)
+	}
+}
+
+// KINDLEスウォッチ内のASIN付きリンクが複数ある場合は最初のものを採用し、以降は読み飛ばす。
+func TestExtractKindleSwatchASIN_PicksFirstAndSkipsRest(t *testing.T) {
+	const htmlSource = `<html><body>
+<div id="tmm-grid-swatch-KINDLE">
+  <a href="/dp/B0FX3X569X/ref=x">a</a>
+  <a href="/dp/B0OTHER012/ref=y">b</a>
+</div>
+</body></html>`
+	got := ExtractProduct(newDoc(t, htmlSource), "4434361325")
+	if got.KindleSwatchASIN != "B0FX3X569X" {
+		t.Errorf("KindleSwatchASIN = %q, want B0FX3X569X (最初のリンクを採用)", got.KindleSwatchASIN)
 	}
 }

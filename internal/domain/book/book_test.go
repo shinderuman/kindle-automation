@@ -62,6 +62,12 @@ func TestUpdatePriceHistory(t *testing.T) {
 			want:    KindleBook{CurrentPrice: NewPrice(1000), MaxPrice: NewPrice(1200), CreatedAt: created},
 		},
 		{
+			name:    "今回価格が過去最高を超える場合はMaxPriceを今回価格へ更新する",
+			old:     KindleBook{CurrentPrice: NewPrice(700), MaxPrice: NewPrice(800), CreatedAt: created},
+			current: NewPrice(1000),
+			want:    KindleBook{CurrentPrice: NewPrice(1000), MaxPrice: NewPrice(1000), CreatedAt: created},
+		},
+		{
 			name:    "今回価格が未取得のときはMaxPriceを過去最高で維持する",
 			old:     KindleBook{CurrentPrice: NewPrice(900), MaxPrice: NewPrice(900), CreatedAt: created},
 			current: UnknownPrice(),

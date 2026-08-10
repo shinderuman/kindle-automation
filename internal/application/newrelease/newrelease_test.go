@@ -147,7 +147,7 @@ func completeHit(asin string) SearchHit {
 	return SearchHit{
 		ASIN: asin, Title: "タイトル", URL: "https://u/" + asin,
 		KindlePrice: book.NewPrice(800), ReleaseDate: futureDate, HasReleaseDate: true,
-		AuthorLabel: "海李", IsKindle: true,
+		Contributors: []string{"海李"}, IsKindle: true,
 	}
 }
 
@@ -199,26 +199,37 @@ func TestExcludedByKeywordAndYearMonth(t *testing.T) {
 	}
 }
 
+// TestAuthorMatches は contributor 境界を保持した []string を受け取り、
+// 正規化した完全名同士を比較することを検証する（SPECIFICATION.md 13.3, bug1）。
+// 空白トークン単位の部分一致は行わないため、姓だけ同一の別人を誤検出しない。
 func TestAuthorMatches(t *testing.T) {
-	if !AuthorMatches("海李", "海李") {
-		t.Errorf("一致する場合はtrue")
+	if !AuthorMatches("海李", []string{"海李"}) {
+		t.Errorf("完全一致する場合はtrue")
 	}
-	if AuthorMatches("海李", "別人") {
+	if AuthorMatches("海李", []string{"別人"}) {
 		t.Errorf("不一致はfalse")
 	}
-	if AuthorMatches("海李", "") {
+	if AuthorMatches("海李", nil) {
 		t.Errorf("contributor空はfalse")
 	}
-	if !AuthorMatches("ＡＢＣ", "ABC") {
+	if !AuthorMatches("ＡＢＣ", []string{"ABC"}) {
 		t.Errorf("全角半角違いは正規化で一致")
 	}
-	// SPECIFICATION.md 13.3: 正規化した対象作者名が contributor 名を「含む」場合を一致とする。
-	// 既存Go実装(isNameMatched)の strings.Contains と同じ挙動。
-	if !AuthorMatches("上原誠", "上原") {
-		t.Errorf("対象作者名がcontributorを含む場合はtrue（SPEC §13.3 含む判定）")
-	}
-	if !AuthorMatches("海李", "海李 (著)") {
+	// 各 contributor ごとに役割表記を除去して比較する。
+	if !AuthorMatches("海李", []string{"海李 (著)"}) {
 		t.Errorf("役割括弧を除去したcontributorと一致する場合はtrue")
+	}
+	// 複数 contributor のいずれかと完全一致すればtrue。
+	if !AuthorMatches("やきいもほくほく", []string{"上原誠", "やきいもほくほく"}) {
+		t.Errorf("複数contributorのいずれかに完全一致する場合はtrue")
+	}
+	// bug1: 「山田 太郎」と対象「山田次郎」は姓だけ同じ別人。完全名が異なるためfalse。
+	if AuthorMatches("山田次郎", []string{"山田 太郎"}) {
+		t.Errorf("空白入り別人（山田 太郎 vs 山田次郎）は姓部分一致でもfalse")
+	}
+	// 完全名が異なる部分一致（上原 vs 上原誠）はfalse。
+	if AuthorMatches("上原", []string{"上原誠"}) {
+		t.Errorf("部分名（上原）は完全名（上原誠）と異なるためfalse")
 	}
 }
 
@@ -292,7 +303,7 @@ func TestHandleNewReleaseSearch_SkipsExcludedCandidates(t *testing.T) {
 	yearMonth := completeHit("B0YEARMONT1")
 	yearMonth.Title = "2026年8月号"
 	authorMismatch := completeHit("B0AUTHOR001")
-	authorMismatch.AuthorLabel = "別人"
+	authorMismatch.Contributors = []string{"別人"}
 	missing := completeHit("B0MISSING01")
 	missing.URL = ""
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn, keyword, yearMonth, authorMismatch, missing}}}
@@ -363,7 +374,7 @@ func TestHandleNewReleaseDetail_FetchesOnceAndApplies(t *testing.T) {
 	info := ProductInfo{
 		ASIN: "B0FX3X569X", Title: "タイトル", URL: "https://u",
 		CurrentPrice: book.NewPrice(800), ReleaseDate: futureDate, HasReleaseDate: true,
-		HasKindleSwatch: true, AuthorLabel: "海李",
+		HasKindleSwatch: true, Contributors: []string{"海李"},
 	}
 	fetcher := &fakeProductFetcher{result: ProductResult{Category: ProductOK, Info: info}}
 	deps := baseDeps()
@@ -390,7 +401,7 @@ func TestHandleNewReleaseDetail_TerminalCasesReturnNil(t *testing.T) {
 		{name: "not_found", cat: ProductNotFound},
 		{name: "asin_mismatch", cat: ProductOK, info: ProductInfo{ASIN: "B0DIFFERNT1", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true}},
 		{name: "not_kindle", cat: ProductOK, info: ProductInfo{ASIN: "B0FX3X569X", Title: "T", HasKindleSwatch: false}},
-		{name: "author_mismatch", cat: ProductOK, info: ProductInfo{ASIN: "B0FX3X569X", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, AuthorLabel: "別人"}},
+		{name: "author_mismatch", cat: ProductOK, info: ProductInfo{ASIN: "B0FX3X569X", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, Contributors: []string{"別人"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -619,23 +630,39 @@ func TestBuildJobs_AreDeterministicAndUseAmazonRequests(t *testing.T) {
 	}
 }
 
-// TestBuildAuthorGistJob_DiscriminatorIsDeterministic は同一 cycle でも異なる作者の Author 変更で
-// 別 job_id となり、同一作者の再試行は同一 job_id になることを検証する。
-// SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、別作者で dedup 衝突を回避する（SPECIFICATION.md 7.2）。
-// Target.GistType は new_release のまま変えない（gist updater 契約）。
+// TestBuildAuthorGistJob_DiscriminatorIsDeterministic は Author 用 gist job_id の決定性と
+// 衝突回避を検証する。SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、
+// job_id が衝突すると後続 job が5分 dedup で消失する（SPECIFICATION.md 7.2）。
+// 同一 cycle・同一作者でも候補 A/B（異なるASIN）は別 job_id、同一候補の再試行は同一 job_id、
+// 異なる作者も別 job_id になること。Target.GistType は new_release のまま変えない（gist updater 契約）。
 func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
-	authorA := buildAuthorGistJob(detailJob("B0FX3X569X", "海李"))
-	authorB := buildAuthorGistJob(detailJob("B0FX3X569X", "佐藤"))
-	if authorA.JobID == authorB.JobID {
-		t.Errorf("different authors must differ: %s", authorA.JobID)
+	const author = "海李"
+	// 同一作者の候補 A/B（異なるASIN）。これが新旧ASINごとに段階的に LatestReleaseDate を更新する経路。
+	candA := buildAuthorGistJob(detailJob("B0FX3X569X", author), "B0FX3X569X")
+	candB := buildAuthorGistJob(detailJob("B0FX3X5700", author), "B0FX3X5700")
+	if candA.JobID == candB.JobID {
+		t.Errorf("same author different candidates must differ: %s", candA.JobID)
 	}
-	if scheduling.DedupID(authorA.JobID) == scheduling.DedupID(authorB.JobID) {
+	if scheduling.DedupID(candA.JobID) == scheduling.DedupID(candB.JobID) {
+		t.Errorf("same author different candidates dedup must differ")
+	}
+	// 同一候補の再試行（Lambda/SQS 再配信）は同一 job_id で冪等になる。
+	if buildAuthorGistJob(detailJob("B0FX3X569X", author), "B0FX3X569X").JobID != candA.JobID {
+		t.Errorf("same candidate retry must be deterministic")
+	}
+	// 異なる作者も別 job_id になる。
+	other := buildAuthorGistJob(detailJob("B0FX3X569X", "佐藤"), "B0FX3X569X")
+	if candA.JobID == other.JobID {
+		t.Errorf("different authors must differ: %s", candA.JobID)
+	}
+	if scheduling.DedupID(candA.JobID) == scheduling.DedupID(other.JobID) {
 		t.Errorf("different authors dedup must differ")
 	}
-	if buildAuthorGistJob(detailJob("B0FX3X569X", "海李")).JobID != authorA.JobID {
-		t.Errorf("same author must be deterministic")
+	// MessageGroupId は gist_update につき external-updates（SPECIFICATION.md 7.1/7.3）。
+	if got := job.MessageGroup(candA.Kind); got != "external-updates" {
+		t.Errorf("MessageGroup = %q, want external-updates", got)
 	}
-	if authorA.Target.GistType != gistNewRelID {
-		t.Errorf("GistType = %q, want %q", authorA.Target.GistType, gistNewRelID)
+	if candA.Target.GistType != gistNewRelID {
+		t.Errorf("GistType = %q, want %q", candA.Target.GistType, gistNewRelID)
 	}
 }

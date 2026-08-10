@@ -231,7 +231,7 @@ Amazon系の1件が再試行中は、`amazon-requests`の後続ジョブを待�
 | `paper_to_kindle_detail` | Kindle版の`asin`、紙書籍の`source_asin` |
 | `gist_update` | `gist_type` |
 
-`new_release_result`の`product`は検索HTMLから抽出したASIN、タイトル、URL、Kindle価格、発売日、作者表記、商品種別だけを持つ。`MaxPrice`、`CreatedAt`、通知状態等の管理値を入れない。
+`new_release_result`の`product`は検索HTMLから抽出したASIN、タイトル、URL、Kindle価格、発売日、作者表記、商品種別だけを持つ。`MaxPrice`、`CreatedAt`、通知状態等の管理値を入れない。商品種別`item_type`の正規値は小文字`kindle`のみとし、検索結果でKindle版と確定できた候補だけがこの値を持つ。未知・非Kindle候補は`new_release_result`へ進めず`new_release_detail`へ回すため、`item_type`へ推測値や空文字を入れない。
 
 メッセージへS3レコード全体を入れない。workerはASINまたは作者名をキーに、処理開始時の最新S3レコードを読み直す。手動削除済みの対象は再追加せず、`target_removed`として正常終了する。
 
@@ -480,7 +480,12 @@ KindleポイントはUserScript（`common.js`の`getKindlePoints`）と同じ2�
 | 商品URL | タイトル要素の`closest('a')`、次に`h2 a, .a-link-normal[href*="/dp/"]` | なし |
 | 価格 | `span.a-offscreen`（`￥`前置で解析） | `.a-price .a-offscreen` |
 | 作者表記 | `.a-size-base` | `.a-row.a-size-base.a-color-secondary` |
+| Kindle形式 | `.puis-price-instructions-style a.a-text-bold`の最初のtext（実HTMLで`Kindle版`を確認） | なし |
 | 発売日表示 | `.puis-desktop-list-row .puisg-col-4-of-24 div:nth-child(2) div:nth-child(2) span span` | なし |
+
+検索URLの`i=digital-text`だけでは候補がKindle版と確定できない。検索結果カード内のKindle形式表示（`.puis-price-instructions-style a.a-text-bold`のtextが`Kindle版`）で初めてKindle版と確定し、確定できた候補だけ`new_release_result`へ進む。形式表示が`Kindle版`以外、または取得できない候補は非Kindle/種別不明として`new_release_detail`へ回し、Kindle扱いしない。
+
+作者表記は1つのテキストに複数 contributor と販売者・日付が混入し得る（例: `著者A、 著者B | 販売者:... | 2026/8/7`）。contributor 境界を保持するため、` | `より前の著者部分を取り出し`、`で分割して各 contributor を個別に格納する。
 
 UserScriptは価格・作者表記に表のUserScript由来欄のセレクタを使用し、新規fallback候補欄は使用しないため、実装時もUserScript由来を優先し、取得できない場合だけ新規fallback候補を試す。ASINの`data-asin`属性はUserScriptが使用しないため、本仕様でもURL抽出を優先し、`data-asin`は実HTML検証後に補助とするか判断する。
 
@@ -628,7 +633,7 @@ https://www.amazon.co.jp/s?k={URLエンコードした作者名}&i=digital-text&
 - タイトルに`\d{4}年\d{1,2}月`を含む
 - 検索結果の作者表記が対象作者と一致しない
 
-作者名の比較では、全角ASCIIを半角へ変換し、全角・半角スペースを除去する。既存Go実装と同じく、正規化した対象作者名が正規化したcontributor名を含む場合を一致とする。
+作者名の比較では、全角ASCIIを半角へ変換し、全角・半角スペースを除去した正規化名同士を比較する。contributor 表記は役割（`(著)`等）や販売者・日付が混入し得るため、各 contributor ごとに役割表記を除去して正規化した完全名を作り、対象作者の正規化名と完全一致する contributor が1つでもあれば一致とする。空白で分解した姓・名トークン単位の部分一致は見逃しや誤検出を生むため行わない（例: contributor`山田 太郎`を`山田`/`太郎`に分けて対象`山田次郎`へ部分一致させることはしない）。
 
 UserScriptの`MIN_PRICE`による221円以下の除外と、直近7日間という判定窓は使用しない。これらはGo側の新刊管理仕様に存在しないためである。
 
@@ -636,12 +641,12 @@ UserScriptの`MIN_PRICE`による221円以下の除外と、直近7日間とい�
 
 事前除外を通過した候補について、検索結果から次を取得できた場合は`new_release_result`を投入する。
 
-- Kindle商品であることを示す情報
+- Kindle商品であることを示す情報（検索結果カードのKindle形式表示が`Kindle版`であること）
 - 正のKindle価格
 - 発売日
 - 作者表記
 
-発売日、価格、Kindle種別のいずれかを検索結果から確定できない場合だけ、候補ごとに`new_release_detail`を投入して商品ページを確認する。検索結果に発売日が存在しないこと自体は検索失敗としない。`new_release_result`と`new_release_detail`は同じdomain判定・保存ユースケースを呼び出す。
+Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内のKindle形式表示で`Kindle版`と確認できた候補だけをKindle版とする。確認できない候補は`new_release_result`へ進めない。発売日、価格、Kindle種別のいずれかを検索結果から確定できない場合だけ、候補ごとに`new_release_detail`を投入して商品ページを確認する。検索結果に発売日が存在しないこと自体は検索失敗としない。`new_release_result`と`new_release_detail`は同じdomain判定・保存ユースケースを呼び出す。
 
 詳細ページで次を満たすことを必須とする。
 

@@ -56,7 +56,7 @@ func toNewReleaseProductResult(r amazon.FetchResult, partnerTag string) newrelea
 			ReleaseDate:     info.ReleaseDate,
 			HasReleaseDate:  info.HasReleaseDate,
 			HasKindleSwatch: info.HasKindleSwatch,
-			AuthorLabel:     info.AuthorLabel,
+			Contributors:    info.Contributors,
 		},
 		HTTPStatus:    r.HTTPStatus,
 		ResponseBytes: r.ResponseBytes,
@@ -80,7 +80,8 @@ func mapNRProductCategory(c amazon.Category) newrelease.ProductCategory {
 }
 
 // toNewReleaseSearchResult は amazon 検索ページ取得結果を新刊 search 用の結果へ変換する。
-// 検索対象は Kindle store（digital-text）なので候補はすべて Kindle 版とし、URL は保存用 URL を構築する。
+// IsKindle は検索結果カードの形式表示でKindle版と確認できた候補だけ真とする（SPECIFICATION.md 13.4）。
+// URL は保存用 URL を構築する。
 func toNewReleaseSearchResult(r amazon.SearchResult, partnerTag string) newrelease.SearchResult {
 	hits := make([]newrelease.SearchHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
@@ -91,8 +92,8 @@ func toNewReleaseSearchResult(r amazon.SearchResult, partnerTag string) newrelea
 			KindlePrice:    h.Price,
 			ReleaseDate:    h.ReleaseDate,
 			HasReleaseDate: h.HasReleaseDate,
-			AuthorLabel:    h.AuthorLabel,
-			IsKindle:       true,
+			Contributors:   h.Contributors,
+			IsKindle:       h.IsKindle,
 		})
 	}
 	return newrelease.SearchResult{

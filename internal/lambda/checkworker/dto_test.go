@@ -25,7 +25,7 @@ func sampleAmazonInfo() amazon.ProductInfo {
 		HasReleaseDate:   true,
 		HasKindleSwatch:  true,
 		HasPaperSwatch:   true,
-		AuthorLabel:      "上原誠 やきいもほくほく",
+		Contributors:     []string{"上原誠", "やきいもほくほく"},
 		KindleSwatchASIN: "B0FX3X569X",
 	}
 }
@@ -72,8 +72,8 @@ func TestToNewReleaseProductResult_BuildsPartnerTagURL(t *testing.T) {
 	if got.Info.URL != want {
 		t.Errorf("URL = %q, want %q", got.Info.URL, want)
 	}
-	if got.Info.AuthorLabel != "上原誠 やきいもほくほく" {
-		t.Errorf("AuthorLabel = %q", got.Info.AuthorLabel)
+	if len(got.Info.Contributors) != 2 || got.Info.Contributors[0] != "上原誠" || got.Info.Contributors[1] != "やきいもほくほく" {
+		t.Errorf("Contributors = %v, want [上原誠 やきいもほくほく]", got.Info.Contributors)
 	}
 	if !got.Info.HasReleaseDate || !got.Info.ReleaseDate.Equal(releaseDay()) {
 		t.Errorf("ReleaseDate not mapped: %+v", got.Info)
@@ -90,21 +90,25 @@ func TestToNewReleaseProductResult_EmptyPartnerTagOmitsTag(t *testing.T) {
 	}
 }
 
-func TestToNewReleaseSearchResult_AllKindleWithTaggedURL(t *testing.T) {
+// TestToNewReleaseSearchResult_PropagatesIsKindleAndTaggedURL は検索カードの形式表示で判定した
+// IsKindle を dto がそのまま伝播すること（true/false とも）と保存用 tag 付き URL 構築を検証する
+// （SPECIFICATION.md 13.4, bug3）。IsKindle は形式表示由来の値のみを使い、URL由来で確定しない。
+func TestToNewReleaseSearchResult_PropagatesIsKindleAndTaggedURL(t *testing.T) {
 	r := amazon.SearchResult{
 		Category: amazon.CategoryOK,
 		Hits: []amazon.SearchHit{
-			{ASIN: "B0FX3X569X", Title: "A", Price: book.NewPrice(759), ReleaseDate: releaseDay(), HasReleaseDate: true, AuthorLabel: "著者A"},
-			{ASIN: "B0FX3X569Y", Title: "B"},
+			{ASIN: "B0FX3X569X", Title: "A", Price: book.NewPrice(759), ReleaseDate: releaseDay(), HasReleaseDate: true, Contributors: []string{"著者A"}, IsKindle: true},
+			{ASIN: "B0FX3X569Y", Title: "B", Contributors: []string{"著者B"}, IsKindle: false},
 		},
 	}
 	got := toNewReleaseSearchResult(r, "kindlebot-22")
 	if len(got.Hits) != 2 {
 		t.Fatalf("len(hits) = %d, want 2", len(got.Hits))
 	}
-	for _, h := range got.Hits {
-		if !h.IsKindle {
-			t.Errorf("IsKindle = false, want true for %q", h.ASIN)
+	wantKindle := []bool{true, false}
+	for i, h := range got.Hits {
+		if h.IsKindle != wantKindle[i] {
+			t.Errorf("hit[%d] IsKindle = %v, want %v (形式表示をそのまま伝播)", i, h.IsKindle, wantKindle[i])
 		}
 		if got := h.URL; got != "https://www.amazon.co.jp/dp/"+h.ASIN+"?tag=kindlebot-22" {
 			t.Errorf("URL = %q for %q", got, h.ASIN)
@@ -112,6 +116,9 @@ func TestToNewReleaseSearchResult_AllKindleWithTaggedURL(t *testing.T) {
 	}
 	if !got.Hits[0].HasReleaseDate || !got.Hits[0].ReleaseDate.Equal(releaseDay()) {
 		t.Errorf("ReleaseDate not mapped on first hit: %+v", got.Hits[0])
+	}
+	if len(got.Hits[0].Contributors) != 1 || got.Hits[0].Contributors[0] != "著者A" {
+		t.Errorf("hit[0] Contributors not mapped: %v", got.Hits[0].Contributors)
 	}
 }
 

@@ -27,6 +27,23 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
+// checkWorkerRequiredSecretKeys は check-worker Lambda が必須で必要な SSM secret key。
+// Amazon affiliate tag と Gist 更新 token は本処理に必須（SPECIFICATION.md 19）。
+var checkWorkerRequiredSecretKeys = []string{
+	config.KeyAmazonPartnerTag,
+	config.KeyGitHubToken,
+}
+
+// checkWorkerOptionalSecretKeys は check-worker Lambda が任意で使用する SSM secret key。
+// Slack/Mastodon 通知は設定されていれば送信し、未設定なら送信しない。欠けても起動を妨げない。
+// SLACK_ERROR_CHANNEL は check-worker が使用しないため含めない（schedule-checks 専用）。
+var checkWorkerOptionalSecretKeys = []string{
+	config.KeySlackBotToken,
+	config.KeySlackNoticeChannel,
+	config.KeyMastodonServer,
+	config.KeyMastodonAccessToken,
+}
+
 // Start は check-worker Lambda のエントリポイント。依存を組み立て Lambda runtime へ登録する。
 // 起動時の依存組み立て・validation 失敗は継続不能のため標準エラーへ出力し非0で終了する。
 func Start() {
@@ -61,18 +78,9 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 
 	store := storage.NewS3Store(s3Client, env.S3Bucket)
 
-	secrets, err := config.LoadSecrets(ctx, ssmClient, config.AllSecretKeys)
+	secrets, err := config.LoadSecrets(ctx, ssmClient, checkWorkerRequiredSecretKeys, checkWorkerOptionalSecretKeys)
 	if err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
-	}
-
-	checker, err := loadCheckerConfigs(ctx, store, env.CheckerConfigKey)
-	if err != nil {
-		return nil, err
-	}
-	excluded, err := loadExcludedKeywords(ctx, store, env.ExcludedTitleKeywordsKey)
-	if err != nil {
-		return nil, err
 	}
 
 	amazonClient := amazon.NewClient()
@@ -89,7 +97,6 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 			Enqueuer: enqueuer,
 			Config: sale.Config{
 				UnprocessedKey: env.UnprocessedKey,
-				Thresholds:     checker.SaleThresholds(),
 			},
 			Clock: clock,
 		},
@@ -101,7 +108,7 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 			AuthorStore:    storage.NewAuthorFileStore(store, env.AuthorsKey),
 			Enqueuer:       enqueuer,
 			Notifier:       notifier,
-			Config:         newrelease.Config{ExcludedKeywords: excluded},
+			Config:         newrelease.Config{},
 			Clock:          clock,
 		},
 		PaperDeps: papertokindle.Dependencies{
@@ -123,9 +130,13 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 			PaperBooks: storage.NewBookFileStore(store, env.PaperBooksKey),
 			Authors:    storage.NewAuthorFileStore(store, env.AuthorsKey),
 			Updater:    gist.NewGitHubClient(secrets.GitHubToken),
-			Settings:   gistSettings(checker),
 		},
-		Logger: logger,
+		// checker_configs.json・excluded_title_keywords.json は手動更新され得る可変設定のため
+		// invocation ごとに最新値を読む（refreshVariableConfig）。store/key は不変で cold start 再利用。
+		store:                    store,
+		checkerConfigKey:         env.CheckerConfigKey,
+		excludedTitleKeywordsKey: env.ExcludedTitleKeywordsKey,
+		Logger:                   logger,
 	}, nil
 }
 
@@ -162,6 +173,25 @@ func loadExcludedKeywords(ctx context.Context, store storage.ObjectStore, key st
 	return keywords, nil
 }
 
+// refreshVariableConfig は checker_configs.json と excluded_title_keywords.json を読み直し、
+// 各ユースケース依存の可変設定（SaleThreshold・除外キーワード・Gist 設定）へ反映する。
+// warm execution environment の連続 invocation でも次回から S3 の変更を反映するため HandleSQSEvent の先頭で呼ぶ。
+// 不変な依存（Fetcher・Store・Notifier・Enqueuer・Clock）はそのまま再利用する。
+func (w *Worker) refreshVariableConfig(ctx context.Context) error {
+	checker, err := loadCheckerConfigs(ctx, w.store, w.checkerConfigKey)
+	if err != nil {
+		return err
+	}
+	excluded, err := loadExcludedKeywords(ctx, w.store, w.excludedTitleKeywordsKey)
+	if err != nil {
+		return err
+	}
+	w.SaleDeps.Config.Thresholds = checker.SaleThresholds()
+	w.NRDeps.Config.ExcludedKeywords = excluded
+	w.GistDeps.Settings = gistSettings(checker)
+	return nil
+}
+
 // buildNotifier は SSM 秘密情報から Slack・Mastodon 送信者を構築する。未設定の送信先は nil とし送信しない。
 func buildNotifier(secrets config.Secrets, logger *slog.Logger) *notification.Notifier {
 	var slack, mastodon notification.Sender
@@ -186,7 +216,7 @@ func gistSettings(checker config.CheckerConfigs) gist.Settings {
 func gistTarget(checker config.CheckerConfigs, gistType string) gist.Target {
 	id, filename, err := checker.GistMeta(gistType)
 	if err != nil {
-		// gist_type は固定3種のため GistMeta は失敗しない。失敗は起動時の継続不能エラー。
+		// gist_type は固定3種のため GistMeta は失敗しない。失敗は到達不能な継続不能エラー。
 		panic(fmt.Sprintf("checker config missing gist meta for %s: %v", gistType, err))
 	}
 	return gist.Target{ID: id, Filename: filename}

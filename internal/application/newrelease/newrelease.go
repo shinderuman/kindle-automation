@@ -61,7 +61,7 @@ type SearchHit struct {
 	KindlePrice    book.Price
 	ReleaseDate    time.Time
 	HasReleaseDate bool
-	AuthorLabel    string
+	Contributors   []string
 	IsKindle       bool
 }
 
@@ -97,7 +97,7 @@ type ProductInfo struct {
 	ReleaseDate     time.Time
 	HasReleaseDate  bool
 	HasKindleSwatch bool
-	AuthorLabel     string
+	Contributors    []string
 }
 
 // ProductResult は商品ページ1回の取得結果。
@@ -285,7 +285,7 @@ func HandleNewReleaseDetail(ctx context.Context, deps Dependencies, j job.Job) (
 		return execution.Errored(errorTypeDateUnavailable, result.HTTPStatus, result.ResponseBytes),
 			fmt.Errorf("release date not available for %s", asin) // 解析失敗 retryable
 	}
-	if !AuthorMatches(j.Target.AuthorName, info.AuthorLabel) {
+	if !AuthorMatches(j.Target.AuthorName, info.Contributors) {
 		return execution.Terminal(errorTypeAuthorMismatch, result.HTTPStatus, result.ResponseBytes), nil // 作者不一致 terminal
 	}
 	if ExcludedByKeyword(info.Title, deps.Config.ExcludedKeywords) || ExcludedByYearMonth(info.Title) {
@@ -296,7 +296,7 @@ func HandleNewReleaseDetail(ctx context.Context, deps Dependencies, j job.Job) (
 		Title:       info.Title,
 		URL:         info.URL,
 		ReleaseDate: info.ReleaseDate,
-		AuthorLabel: info.AuthorLabel,
+		AuthorLabel: strings.Join(info.Contributors, " "),
 		KindlePrice: info.CurrentPrice,
 	})
 	// applyCandidate は Amazon 未アクセスのため計測値を持たない。詳細jobの取得計測値を反映する。
@@ -327,7 +327,7 @@ func enqueueCandidate(ctx context.Context, deps Dependencies, j job.Job, hit Sea
 	if ExcludedByYearMonth(hit.Title) {
 		return nil
 	}
-	if !AuthorMatches(j.Target.AuthorName, hit.AuthorLabel) {
+	if !AuthorMatches(j.Target.AuthorName, hit.Contributors) {
 		return nil
 	}
 	exists, err := deps.NotifiedStore.Exists(ctx, hit.ASIN)
@@ -368,7 +368,7 @@ func applyCandidate(ctx context.Context, deps Dependencies, j job.Job, c Candida
 	// upsert 失敗の再実行で authorChanged=false になっても決定的 job_id で欠損・重複しない（7.5）。
 	// 投入失敗時は error とし notified/upcoming へ進まない。過去発売分で Author 変更があっても投入する。
 	if authorChanged {
-		if err := deps.Enqueuer.Enqueue(ctx, buildAuthorGistJob(j)); err != nil {
+		if err := deps.Enqueuer.Enqueue(ctx, buildAuthorGistJob(j, c.ASIN)); err != nil {
 			return execution.Errored(errorTypeEnqueueFailed, 0, 0), fmt.Errorf("enqueue author gist: %w", err)
 		}
 	}
@@ -400,7 +400,8 @@ func buildResultJob(j job.Job, hit SearchHit) job.Job {
 		URL:         hit.URL,
 		KindlePrice: hit.KindlePrice.Yen(),
 		ReleaseDate: hit.ReleaseDate,
-		AuthorLabel: hit.AuthorLabel,
+		AuthorLabel: strings.Join(hit.Contributors, " "),
+		ItemType:    job.ItemTypeKindle,
 	}
 	return job.Job{
 		Version:     job.Version,
@@ -426,14 +427,16 @@ func buildDetailJob(j job.Job, hit SearchHit) job.Job {
 }
 
 // buildAuthorGistJob は Author 用 gist_update ジョブを生成する。
-// job_id は gist_type + 作者名で決定的。Gist updater は authors.json 全体を再生成するため
+// job_id は gist_type + 作者名 + 候補ASIN で決定的。Gist updater は authors.json 全体を再生成するため
 // Target.GistType は new_release のまま変えない（job schema 互換、SPECIFICATION.md 7.2/15）。
-// 作者名を discriminator へ入れることで同一 cycle の異なる作者の Author 変更が
-// SQS FIFO 5分 dedup で消えず、同一作者の再試行は同一 job_id で冪等になる。
-func buildAuthorGistJob(j job.Job) job.Job {
+// 候補ASIN（状態変更元）を discriminator へ入れることで同一 cycle・同一作者の複数候補（A/B）の
+// Author 変更がそれぞれ別 job_id となり SQS FIFO 5分 dedup で消えず、
+// 同一候補の再試行は同一 job_id で冪等になる。異なる作者も当然別 job_id になる。
+// candidateASIN は result/detail job の必須 ASIN（requireASIN 済み）を渡すため空にはならない。
+func buildAuthorGistJob(j job.Job, candidateASIN string) job.Job {
 	return job.Job{
 		Version:     job.Version,
-		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistNewRelID+":"+j.Target.AuthorName),
+		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistNewRelID+":"+j.Target.AuthorName+":"+candidateASIN),
 		Kind:        job.KindGistUpdate,
 		CheckType:   j.CheckType,
 		CycleID:     j.CycleID,
@@ -484,19 +487,18 @@ func IsFutureRelease(releaseDate, now time.Time) bool {
 	return releaseDate.After(now)
 }
 
-// AuthorMatches は対象作者名が contributor 表記のいずれかを含むかを返す（SPECIFICATION.md 13.3）。
-// 既存Go実装(isNameMatched)と同じく、正規化した対象作者名へ正規化したcontributor名が
-// 部分文字列として含まれる場合を一致とする。contributor 表記は複数人を空白区切りで含み得る
-// （例: "上原誠 やきいもほくほく"）。役割の括弧（例: "海李 (著)"）を除去した上で空白ごとに分割し、
-// いずれかの contributor が対象作者名へ含まれれば一致とする。
-func AuthorMatches(authorName, contributorLabel string) bool {
+// AuthorMatches は対象作者名が contributor 表記のいずれかと完全一致するかを返す（SPECIFICATION.md 13.3）。
+// 各 contributor ごとに役割表記（(著)等）を除去し、NormalizeAuthorName で正規化した完全名同士を比較する。
+// contributor 境界は HTML parser が要素単位で保持した []string であり、ここで空白トークンへ分解しない。
+// したがって「山田 太郎」を姓と名に分けて対象「山田次郎」へ部分一致させる誤検出は起きない。
+func AuthorMatches(authorName string, contributors []string) bool {
 	author := NormalizeAuthorName(authorName)
-	if author == "" || contributorLabel == "" {
+	if author == "" {
 		return false
 	}
-	stripped := roleParenRe.ReplaceAllString(contributorLabel, " ")
-	for _, c := range strings.Fields(stripped) {
-		if strings.Contains(author, NormalizeAuthorName(c)) {
+	for _, c := range contributors {
+		stripped := roleParenRe.ReplaceAllString(c, " ")
+		if NormalizeAuthorName(stripped) == author {
 			return true
 		}
 	}

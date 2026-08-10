@@ -13,6 +13,10 @@ import (
 // Version はジョブメッセージ schema の現行版（SPECIFICATION.md 7.2）。
 const Version = 1
 
+// ItemTypeKindle は new_release_result の product.item_type の正規値（SPECIFICATION.md 7.2, 13.4）。
+// 検索結果でKindle版と確定した候補だけがこの値を持つ。
+const ItemTypeKindle = "kindle"
+
 // Kind はジョブ種別。
 type Kind string
 
@@ -74,6 +78,7 @@ var (
 	ErrUnknownKind        = errors.New("unknown job kind")
 	ErrMissingField       = errors.New("missing required target field")
 	ErrInvalidASIN        = errors.New("invalid ASIN format")
+	ErrInvalidItemType    = errors.New("invalid product item_type")
 )
 
 var (
@@ -105,6 +110,11 @@ func (j Job) Validate() error {
 		}
 		if j.Target.AuthorName == "" || j.Target.Product == nil {
 			return ErrMissingField
+		}
+		// product.item_type はKindle版確定候補だけが持つ正規値（SPECIFICATION.md 7.2, 13.4）。
+		// 空や未知値は検索種別確認の省略/誤分類を意味するため受け付けない。
+		if j.Target.Product.ItemType != ItemTypeKindle {
+			return ErrInvalidItemType
 		}
 	case KindNewReleaseDetail:
 		if err := requireASIN(j.Target.ASIN); err != nil {

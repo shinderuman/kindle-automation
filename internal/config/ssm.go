@@ -64,15 +64,28 @@ type ParameterGetter interface {
 	GetParameter(ctx context.Context, in *ssm.GetParameterInput, opts ...func(*ssm.Options)) (*ssm.GetParameterOutput, error)
 }
 
-// LoadSecrets は各 key を /myapp/secure/{KEY}(WithDecryption) → /myapp/plain/{KEY} の順で取得する
-// （SPECIFICATION.md 19）。両方に存在する場合は secure 側を使用し、両方になければ起動エラーとする。
+// LoadSecrets は required keys を /myapp/secure/{KEY}(WithDecryption) → /myapp/plain/{KEY} の順で
+// 必須取得し、optional keys を任意取得して Secrets を構築する（SPECIFICATION.md 19）。
+// 両方に存在する場合は secure 側を使用する。
+// required は両方になければ起動エラーとする。optional は存在しなければ空文字のままとし error としない
+// （Slack/Mastodon 等の任意通知先）。secure/plain 判定以外の SSM エラーは error として伝播する。
 // GetParametersByPath は使わず、必要な key だけを個別取得する。
-func LoadSecrets(ctx context.Context, getter ParameterGetter, keys []string) (Secrets, error) {
-	values := make(map[string]string, len(keys))
-	for _, key := range keys {
+func LoadSecrets(ctx context.Context, getter ParameterGetter, required, optional []string) (Secrets, error) {
+	values := make(map[string]string, len(required)+len(optional))
+	for _, key := range required {
 		v, err := loadOneSecret(ctx, getter, key)
 		if err != nil {
 			return Secrets{}, fmt.Errorf("load secret %s: %w", key, err)
+		}
+		values[key] = v
+	}
+	for _, key := range optional {
+		v, err := loadOneSecret(ctx, getter, key)
+		if err != nil {
+			if errors.Is(err, ErrSecretNotFound) {
+				continue
+			}
+			return Secrets{}, fmt.Errorf("load optional secret %s: %w", key, err)
 		}
 		values[key] = v
 	}

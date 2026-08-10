@@ -46,9 +46,11 @@ type fakeStore struct {
 	applied bool
 	err     error
 	updated book.KindleBook
+	calls   int
 }
 
 func (s *fakeStore) UpdateOneBook(_ context.Context, _, _ string, update func(book.KindleBook) book.KindleBook) (bool, error) {
+	s.calls++
 	s.updated = update(s.oldBook)
 	return s.applied, s.err
 }
@@ -193,7 +195,8 @@ func TestHandleSaleCheck_NotKindleIsTerminal(t *testing.T) {
 func TestHandleSaleCheck_PriceUnavailableIsRetryable(t *testing.T) {
 	info := okInfo("B0FX3X569X", 0) // CurrentPrice Invalid
 	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
-	d := deps(fetcher, &fakeStore{applied: true}, &fakeNotifier{})
+	store := &fakeStore{applied: true}
+	d := deps(fetcher, store, &fakeNotifier{})
 
 	oc, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X"))
 	if err == nil {
@@ -201,6 +204,10 @@ func TestHandleSaleCheck_PriceUnavailableIsRetryable(t *testing.T) {
 	}
 	if oc.Result != execution.ResultError || oc.ErrorType != errorTypePriceUnavailable {
 		t.Errorf("outcome = %+v, want result=error error_type=%s", oc, errorTypePriceUnavailable)
+	}
+	// 価格不明は保存前に弾き、0円を保存しない（SPEC 11.2/12.6）。
+	if store.calls != 0 {
+		t.Errorf("store calls = %d, want 0 (must not save when price unavailable)", store.calls)
 	}
 }
 
@@ -342,5 +349,173 @@ func TestHandleSaleFinalize_EnqueuesSaleGistUpdate(t *testing.T) {
 	}
 	if job.AmazonRequests(gist.Kind) != 0 {
 		t.Errorf("gist_update must not access Amazon")
+	}
+}
+
+type failingEnqueuer struct{ err error }
+
+func (e *failingEnqueuer) Enqueue(_ context.Context, _ job.Job) error { return e.err }
+
+// statefulStore は更新結果を自身へ反映し、重複配信時の状態遷移を検証する。
+type statefulStore struct {
+	book    book.KindleBook
+	applied bool
+	calls   int
+}
+
+func (s *statefulStore) UpdateOneBook(_ context.Context, _, _ string, update func(book.KindleBook) book.KindleBook) (bool, error) {
+	s.calls++
+	s.book = update(s.book)
+	return s.applied, nil
+}
+
+func TestHandleSaleFinalize_EnqueueFailureReturnsError(t *testing.T) {
+	d := Dependencies{Enqueuer: &failingEnqueuer{err: errors.New("sqs throttled")}}
+	j := job.Job{Version: job.Version, JobID: "f", Kind: job.KindSaleFinalize, CheckType: job.CheckSale, CycleID: "sale:c"}
+
+	oc, err := HandleSaleFinalize(context.Background(), d, j)
+	if err == nil {
+		t.Fatal("gist enqueue failure must return error")
+	}
+	if oc.Result != execution.ResultError || oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("outcome = %+v, want result=error error_type=%s", oc, errorTypeEnqueueFailed)
+	}
+}
+
+func TestHandleSaleCheck_PriceDownNotifiesWhenNoSale(t *testing.T) {
+	info := okInfo("B0FX3X569X", 700)
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	// old Max=800/Current=800, current=700: 価格差100<151で非セール、変動-100で値下がり通知。
+	store := &fakeStore{oldBook: existingBook("B0FX3X569X", 800), applied: true}
+	notifier := &fakeNotifier{}
+	d := deps(fetcher, store, notifier)
+
+	if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
+		t.Fatalf("HandleSaleCheck: %v", err)
+	}
+	if !notifier.called {
+		t.Fatal("price down must notify")
+	}
+	if !strings.Contains(notifier.message, "値下がり") {
+		t.Errorf("not price-down message: %s", notifier.message)
+	}
+	if store.updated.MaxPrice.Yen() != 800 {
+		t.Errorf("MaxPrice = %v, want 800 (kept on price down)", store.updated.MaxPrice)
+	}
+}
+
+func TestHandleSaleCheck_PriceUpUpdatesMaxPriceWhenNoSale(t *testing.T) {
+	info := okInfo("B0FX3X569X", 800)
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	// old Max=600/Current=600, current=800: 価格差負で非セール、変動+200で値上がり、Maxは800へ更新。
+	store := &fakeStore{oldBook: existingBook("B0FX3X569X", 600), applied: true}
+	d := deps(fetcher, store, &fakeNotifier{})
+
+	if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
+		t.Fatalf("HandleSaleCheck: %v", err)
+	}
+	if store.updated.CurrentPrice.Yen() != 800 {
+		t.Errorf("CurrentPrice = %v, want 800", store.updated.CurrentPrice)
+	}
+	if store.updated.MaxPrice.Yen() != 800 {
+		t.Errorf("MaxPrice = %v, want 800 (price up updates max)", store.updated.MaxPrice)
+	}
+}
+
+func TestHandleSaleCheck_FirstFetchNoPriceDropButPointsCouponNotify(t *testing.T) {
+	info := okInfo("B0FX3X569X", 600)
+	info.Points = 200
+	info.Coupon = true
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	// 未取得レコード(価格ゼロ)の初回取得: 価格差セールは成立せず、ポイントとクーポンは成立する（SPEC 12.3）。
+	store := &fakeStore{
+		oldBook: book.KindleBook{ASIN: "B0FX3X569X", Title: "タイトル", URL: "https://u"},
+		applied: true,
+	}
+	notifier := &fakeNotifier{}
+	d := deps(fetcher, store, notifier)
+
+	if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
+		t.Fatalf("HandleSaleCheck: %v", err)
+	}
+	if !notifier.called {
+		t.Fatal("first fetch with points/coupon must notify sale")
+	}
+	if !strings.Contains(notifier.message, "セール情報") {
+		t.Errorf("not sale message: %s", notifier.message)
+	}
+	if strings.Contains(notifier.message, "最高額との価格差") {
+		t.Errorf("price drop must not be in first-fetch sale message: %s", notifier.message)
+	}
+	if store.updated.MaxPrice.Yen() != 600 {
+		t.Errorf("MaxPrice = %v, want 600 (first fetch basis)", store.updated.MaxPrice)
+	}
+	if !store.updated.CreatedAt.Equal(fixedClock()) {
+		t.Errorf("CreatedAt = %v, want fixedClock (set on first fetch)", store.updated.CreatedAt)
+	}
+}
+
+func TestHandleSaleCheck_DuplicateDeliveryIsIdempotent(t *testing.T) {
+	info := okInfo("B0FX3X569X", 600)
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	store := &statefulStore{book: existingBook("B0FX3X569X", 900), applied: true}
+	d := Dependencies{
+		Fetcher: fetcher, Store: store, Notifier: &fakeNotifier{},
+		Config: Config{Thresholds: baseThresholds()}, Clock: fixedClock,
+	}
+
+	// SQSの少なくとも1回配信を前提に同じjobを2回処理しても、価格履歴は冪等に収束する（SPEC 7.4）。
+	for i := 0; i < 2; i++ {
+		if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
+			t.Fatalf("call %d: HandleSaleCheck: %v", i, err)
+		}
+	}
+	if store.book.CurrentPrice.Yen() != 600 {
+		t.Errorf("CurrentPrice = %v, want 600 after re-delivery", store.book.CurrentPrice)
+	}
+	if store.book.MaxPrice.Yen() != 900 {
+		t.Errorf("MaxPrice = %v, want 900 (stable, not inflated) after re-delivery", store.book.MaxPrice)
+	}
+	if store.calls != 2 {
+		t.Errorf("store calls = %d, want 2", store.calls)
+	}
+}
+
+// orderStore/orderNotifier は保存→通知の副作用順序を共有スライスへ記録する。
+type orderStore struct {
+	old   book.KindleBook
+	order *[]string
+}
+
+func (s *orderStore) UpdateOneBook(_ context.Context, _, _ string, update func(book.KindleBook) book.KindleBook) (bool, error) {
+	_ = update(s.old)
+	*s.order = append(*s.order, "save")
+	return true, nil
+}
+
+type orderNotifier struct{ order *[]string }
+
+func (n *orderNotifier) Notify(_ context.Context, _ string) error {
+	*n.order = append(*n.order, "notify")
+	return nil
+}
+
+func TestHandleSaleCheck_SavesBeforeNotify(t *testing.T) {
+	info := okInfo("B0FX3X569X", 600)
+	info.Points = 200
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	var order []string
+	store := &orderStore{old: existingBook("B0FX3X569X", 900), order: &order}
+	notifier := &orderNotifier{order: &order}
+	d := Dependencies{
+		Fetcher: fetcher, Store: store, Notifier: notifier,
+		Config: Config{Thresholds: baseThresholds()}, Clock: fixedClock,
+	}
+
+	if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
+		t.Fatalf("HandleSaleCheck: %v", err)
+	}
+	if len(order) != 2 || order[0] != "save" || order[1] != "notify" {
+		t.Fatalf("side-effect order = %v, want [save notify]", order)
 	}
 }

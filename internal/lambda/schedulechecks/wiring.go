@@ -13,11 +13,20 @@ import (
 
 	"github.com/shinderuman/kindle-automation/internal/application/dispatch"
 	"github.com/shinderuman/kindle-automation/internal/config"
+	"github.com/shinderuman/kindle-automation/internal/job"
 	"github.com/shinderuman/kindle-automation/internal/logging"
 	"github.com/shinderuman/kindle-automation/internal/notification"
 	"github.com/shinderuman/kindle-automation/internal/queue"
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
+
+// scheduleChecksSecretKeys は schedule-checks Lambda が起動に必要な SSM secret key。
+// CloudWatch Alarm を Slack error channel へ通知するため Slack Bot Token と Error Channel だけを
+// 必須とし、AllSecretKeys のうちそれ以外（Mastodon・GitHub 等）は起動要件としない（SPECIFICATION.md 19）。
+var scheduleChecksSecretKeys = []string{
+	config.KeySlackBotToken,
+	config.KeySlackErrorChannel,
+}
 
 // Start は schedule-checks Lambda のエントリポイント。依存を組み立て Lambda runtime へ登録する。
 // 起動時の依存組み立て失敗は継続不能のため標準エラーへ出力し非0で終了する。
@@ -52,19 +61,17 @@ func buildScheduler(ctx context.Context) (*Scheduler, error) {
 
 	store := storage.NewS3Store(s3Client, env.S3Bucket)
 
-	secrets, err := config.LoadSecrets(ctx, ssmClient, config.AllSecretKeys)
+	secrets, err := config.LoadSecrets(ctx, ssmClient, scheduleChecksSecretKeys, nil)
 	if err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
-	}
-	checker, err := loadCheckerConfigs(ctx, store, env.CheckerConfigKey)
-	if err != nil {
-		return nil, err
 	}
 
 	deps := dispatch.Dependencies{
 		AsinListReader: asinListReader{store: store},
 		AuthorReader:   authorReader{store: store},
-		ConfigReader:   checker,
+		// checker_configs.json は手動更新され得る可変設定のため、IsEnabled の呼び出しごとに
+		// 最新値を読む（cold start に固定しない）。store/key は不変なので cold start 再利用できる。
+		ConfigReader:   checkerConfigReader{store: store, key: env.CheckerConfigKey},
 		Enqueuer:       queue.NewEnqueuer(sqsClient, env.QueueURL, logger),
 		UpcomingMerger: upcomingMerger{store: store, unprocessedKey: env.UnprocessedKey, upcomingKey: env.UpcomingKey},
 		Keys: dispatch.Keys{
@@ -100,4 +107,20 @@ func loadCheckerConfigs(ctx context.Context, store storage.ObjectStore, key stri
 		return config.CheckerConfigs{}, err
 	}
 	return checker, nil
+}
+
+// checkerConfigReader は dispatch.ConfigReader への adapter。IsEnabled の呼び出しごとに
+// checker_configs.json を読み直すことで、warm execution environment でも更新を次回 invocation へ反映する。
+// store/key は不変（cold start 再利用）だが、設定値は毎回最新を読む。
+type checkerConfigReader struct {
+	store storage.ObjectStore
+	key   string
+}
+
+func (r checkerConfigReader) IsEnabled(ctx context.Context, checkType job.CheckType) (bool, error) {
+	checker, err := loadCheckerConfigs(ctx, r.store, r.key)
+	if err != nil {
+		return false, err
+	}
+	return checker.IsEnabled(ctx, checkType)
 }

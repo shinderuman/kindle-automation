@@ -41,7 +41,7 @@ type ProductInfo struct {
 	HasReleaseDate   bool
 	HasKindleSwatch  bool
 	HasPaperSwatch   bool
-	AuthorLabel      string
+	Contributors     []string
 	KindleSwatchASIN string
 }
 
@@ -51,9 +51,11 @@ type SearchHit struct {
 	Title          string
 	URL            string
 	Price          book.Price
-	AuthorLabel    string
+	Contributors   []string
 	ReleaseDate    time.Time
 	HasReleaseDate bool
+	// IsKindle は検索結果カードのKindle形式表示でKindle版と確認できたか（SPECIFICATION.md 13.4）。
+	IsKindle bool
 }
 
 // ExtractProduct は商品ページから値を抽出する（SPECIFICATION.md 11.2）。
@@ -74,20 +76,22 @@ func ExtractProduct(doc *goquery.Document, finalURL string) ProductInfo {
 		HasReleaseDate:   hasDate,
 		HasKindleSwatch:  doc.Find(selectorKindleSwatch).Length() > 0,
 		HasPaperSwatch:   doc.Find(selectorPaperSwatch).Length() > 0,
-		AuthorLabel:      extractAuthorLabel(doc),
+		Contributors:     extractProductContributors(doc),
 		KindleSwatchASIN: extractKindleSwatchASIN(doc),
 	}
 }
 
-// extractAuthorLabel は #bylineInfo a のテキストを空白区切りで結合する（実HTML fixture で確認）。
-func extractAuthorLabel(doc *goquery.Document) string {
-	var parts []string
+// extractProductContributors は商品ページ #bylineInfo a の各 contributor テキストを個別に返す。
+// 役割表記`(著)`は兄弟 span にありリンクテキストには含まれないため、各リンクテキストを
+// そのまま1 contributor とする（実HTML fixture product_B0FX3X569X で確認）。
+func extractProductContributors(doc *goquery.Document) []string {
+	var contributors []string
 	doc.Find(selectorBylineAuthors).Each(func(_ int, s *goquery.Selection) {
 		if t := strings.TrimSpace(s.Text()); t != "" {
-			parts = append(parts, t)
+			contributors = append(contributors, t)
 		}
 	})
-	return strings.Join(parts, " ")
+	return contributors
 }
 
 // extractKindleSwatchASIN は KINDLEスウォッチ内で最初の ASIN付きリンクからKindle版ASINを取り出す。
@@ -200,10 +204,36 @@ func extractSearchHit(s *goquery.Selection) SearchHit {
 		Title:          title,
 		URL:            url,
 		Price:          price,
-		AuthorLabel:    author,
+		Contributors:   splitSearchContributors(author),
 		ReleaseDate:    releaseDate,
 		HasReleaseDate: hasDate,
+		IsKindle:       isKindleFormat(s.Find(selectorSearchFormat).First().Text()),
 	}
+}
+
+// splitSearchContributors は検索結果の作者表記テキストから各 contributor を取り出す。
+// 実HTMLでは1テキストに `著者A、 著者B | 販売者:... | 日付` のように複数 contributor と
+// 販売者・日付が混入するため、先頭の ` | ` までを著者部分とし `、` で分割する（SPECIFICATION.md 11.2）。
+func splitSearchContributors(authorText string) []string {
+	authorText = strings.TrimSpace(authorText)
+	if authorText == "" {
+		return nil
+	}
+	if idx := strings.Index(authorText, " | "); idx >= 0 {
+		authorText = authorText[:idx]
+	}
+	var contributors []string
+	for _, name := range strings.Split(authorText, "、") {
+		if name = strings.TrimSpace(name); name != "" {
+			contributors = append(contributors, name)
+		}
+	}
+	return contributors
+}
+
+// isKindleFormat は検索結果カードの形式表示がKindle版を示すかを返す（SPECIFICATION.md 13.4）。
+func isKindleFormat(formatText string) bool {
+	return strings.TrimSpace(formatText) == kindleFormatLabel
 }
 
 // textOf はセレクタの最初の要素の text を返す。

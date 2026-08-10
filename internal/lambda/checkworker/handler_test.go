@@ -3,17 +3,24 @@ package checkworker
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/shinderuman/kindle-automation/internal/application/newrelease"
 	"github.com/shinderuman/kindle-automation/internal/application/papertokindle"
 	"github.com/shinderuman/kindle-automation/internal/application/sale"
+	"github.com/shinderuman/kindle-automation/internal/config"
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 	"github.com/shinderuman/kindle-automation/internal/gist"
 	"github.com/shinderuman/kindle-automation/internal/job"
+	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
 // --- カウンタ付き stub fetcher 群 ---
@@ -63,8 +70,15 @@ func (f *countPaperFetcher) FetchKindlePage(_ context.Context, _ string) (papert
 	return f.kindleResult, nil
 }
 
+// testCheckerConfig は HandleSQSEvent が refreshVariableConfig で読める有効な checker 設定。
+// SaleChecker 有効・閾値正・Gist 設定ありで Validate を通す。
+const testCheckerConfig = `{"SaleChecker":{"Enabled":true,"GistID":"gist-test","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
+
 func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperFetcher, gistDeps gist.Dependencies) *Worker {
 	clock := func() time.Time { return time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC) }
+	store := storage.NewMemStore()
+	store.Seed("checker_configs.json", testCheckerConfig)
+	store.Seed("excluded_title_keywords.json", "[]")
 	return &Worker{
 		SaleDeps: sale.Dependencies{
 			Fetcher: saleF,
@@ -82,7 +96,10 @@ func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperF
 			KindlePageFetcher: paperF,
 			Clock:             clock,
 		},
-		GistDeps: gistDeps,
+		GistDeps:                 gistDeps,
+		store:                    store,
+		checkerConfigKey:         "checker_configs.json",
+		excludedTitleKeywordsKey: "excluded_title_keywords.json",
 	}
 }
 
@@ -222,10 +239,12 @@ func mustEncode(t *testing.T, j job.Job) string {
 
 type recordingGistUpdater struct {
 	called bool
+	ids    []string
 }
 
-func (u *recordingGistUpdater) Update(_ context.Context, _, _, _ string) error {
+func (u *recordingGistUpdater) Update(_ context.Context, id, _, _ string) error {
 	u.called = true
+	u.ids = append(u.ids, id)
 	return nil
 }
 
@@ -252,4 +271,91 @@ func TestHandleSQSEvent_UnknownKindIsTerminal(t *testing.T) {
 	if !errors.Is(err, job.ErrUnknownKind) {
 		t.Errorf("err = %v, want wrap of ErrUnknownKind", err)
 	}
+}
+
+// 同一 Worker（composition root 相当）を再構築せず HandleSQSEvent を2回呼び、間に stub S3 の
+// checker 設定を変更すると2回目が新値を読むことを検証する（warm execution environment でも反映）。
+func TestHandleSQSEvent_RefreshesCheckerConfigPerInvocation(t *testing.T) {
+	store := storage.NewMemStore()
+	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("gist-v1"))
+	store.Seed("excluded_title_keywords.json", "[]")
+	updater := &recordingGistUpdater{}
+	w := &Worker{
+		GistDeps: gist.Dependencies{
+			SaleBooks:  emptyBookList{},
+			PaperBooks: emptyBookList{},
+			Authors:    emptyAuthorList{},
+			Updater:    updater,
+		},
+		store:                    store,
+		checkerConfigKey:         "checker_configs.json",
+		excludedTitleKeywordsKey: "excluded_title_keywords.json",
+	}
+	body := mustEncode(t, job.Job{
+		Version: job.Version, JobID: "id", Kind: job.KindGistUpdate,
+		CheckType: job.CheckSale, CycleID: "c", Target: job.Target{GistType: gist.TypeSale},
+	})
+	event := events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: body}}}
+
+	if err := w.HandleSQSEvent(context.Background(), event); err != nil {
+		t.Fatalf("first HandleSQSEvent: %v", err)
+	}
+	// Worker を再構築せず S3 の checker 設定だけ変更する。
+	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("gist-v2"))
+	if err := w.HandleSQSEvent(context.Background(), event); err != nil {
+		t.Fatalf("second HandleSQSEvent: %v", err)
+	}
+
+	want := []string{"gist-v1", "gist-v2"}
+	if !reflect.DeepEqual(updater.ids, want) {
+		t.Errorf("gist IDs = %v, want %v (2回目の invocation が新値を見ること)", updater.ids, want)
+	}
+}
+
+func checkerConfigWithSaleGistID(gistID string) string {
+	return `{"SaleChecker":{"Enabled":true,"GistID":"` + gistID + `","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
+}
+
+// --- secret key 集合の回帰テスト ---
+
+// stubSecretGetter は SSM GetParameter の stub。値があれば返し、なければ ParameterNotFound。
+type stubSecretGetter struct {
+	values map[string]string
+}
+
+func (g *stubSecretGetter) GetParameter(_ context.Context, in *ssm.GetParameterInput, _ ...func(*ssm.Options)) (*ssm.GetParameterOutput, error) {
+	if v, ok := g.values[*in.Name]; ok {
+		return &ssm.GetParameterOutput{Parameter: &ssmtypes.Parameter{Value: aws.String(v)}}, nil
+	}
+	return nil, &smithy.GenericAPIError{Code: "ParameterNotFound"}
+}
+
+// check-worker の secret key 集合は SLACK_ERROR_CHANNEL 等の不要 key を含まず、
+// required だけ存在し optional が全て欠けても起動（LoadSecrets）を妨げない。
+func TestCheckWorkerSecretKeySet(t *testing.T) {
+	// check-worker が使用しない key は required・optional いずれにも含まれない。
+	allKeys := append(append([]string{}, checkWorkerRequiredSecretKeys...), checkWorkerOptionalSecretKeys...)
+	for _, unnecessary := range []string{config.KeySlackErrorChannel, config.KeyMastodonClientID, config.KeyMastodonClientSecret} {
+		if containsKey(allKeys, unnecessary) {
+			t.Errorf("check-worker must not load unnecessary key %s", unnecessary)
+		}
+	}
+
+	// required だけ SSM に存在し optional が全て欠けても LoadSecrets は成功する。
+	g := &stubSecretGetter{values: map[string]string{}}
+	for _, key := range checkWorkerRequiredSecretKeys {
+		g.values["/myapp/secure/"+key] = "v"
+	}
+	if _, err := config.LoadSecrets(context.Background(), g, checkWorkerRequiredSecretKeys, checkWorkerOptionalSecretKeys); err != nil {
+		t.Fatalf("LoadSecrets with only required keys must succeed: %v", err)
+	}
+}
+
+func containsKey(keys []string, want string) bool {
+	for _, k := range keys {
+		if k == want {
+			return true
+		}
+	}
+	return false
 }
