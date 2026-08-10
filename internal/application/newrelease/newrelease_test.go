@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
+	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
@@ -615,5 +616,26 @@ func TestBuildJobs_AreDeterministicAndUseAmazonRequests(t *testing.T) {
 	}
 	if buildDetailJob(j, completeHit("B0FX3X569X")).JobID != d.JobID {
 		t.Errorf("detail JobID is not deterministic")
+	}
+}
+
+// TestBuildAuthorGistJob_DiscriminatorIsDeterministic は同一 cycle でも異なる作者の Author 変更で
+// 別 job_id となり、同一作者の再試行は同一 job_id になることを検証する。
+// SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、別作者で dedup 衝突を回避する（SPECIFICATION.md 7.2）。
+// Target.GistType は new_release のまま変えない（gist updater 契約）。
+func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
+	authorA := buildAuthorGistJob(detailJob("B0FX3X569X", "海李"))
+	authorB := buildAuthorGistJob(detailJob("B0FX3X569X", "佐藤"))
+	if authorA.JobID == authorB.JobID {
+		t.Errorf("different authors must differ: %s", authorA.JobID)
+	}
+	if scheduling.DedupID(authorA.JobID) == scheduling.DedupID(authorB.JobID) {
+		t.Errorf("different authors dedup must differ")
+	}
+	if buildAuthorGistJob(detailJob("B0FX3X569X", "海李")).JobID != authorA.JobID {
+		t.Errorf("same author must be deterministic")
+	}
+	if authorA.Target.GistType != gistNewRelID {
+		t.Errorf("GistType = %q, want %q", authorA.Target.GistType, gistNewRelID)
 	}
 }

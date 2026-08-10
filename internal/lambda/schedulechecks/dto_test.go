@@ -39,3 +39,35 @@ func TestParseScheduleInput_RejectsInvalid(t *testing.T) {
 		})
 	}
 }
+
+// CloudWatch Alarm の直接 invoke payload（AWS 公式形式）から alarmName/state を取り出す。
+func TestParseAlarmInput_Valid(t *testing.T) {
+	body := `{"source":"aws.cloudwatch","alarmArn":"arn:aws:cloudwatch:us-east-1:111122223333:alarm:kindle-automation-work-dlq","accountId":"111122223333","time":"2026-08-04T12:36:15.490+0000","region":"us-east-1","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"ALARM","reason":"test","timestamp":"2026-08-04T12:36:15.490+0000"},"previousState":{"value":"OK","reason":"","timestamp":"2026-08-04T12:31:29.595+0000"}}}`
+	name, state, err := parseAlarmInput([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if name != "kindle-automation-work-dlq" {
+		t.Errorf("alarmName = %q", name)
+	}
+	if state != "ALARM" {
+		t.Errorf("state = %q, want ALARM", state)
+	}
+}
+
+func TestParseAlarmInput_RejectsInvalid(t *testing.T) {
+	cases := map[string]string{
+		"missing alarmName": `{"source":"aws.cloudwatch","alarmData":{"state":{"value":"ALARM"}}}`,
+		"missing state":     `{"source":"aws.cloudwatch","alarmData":{"alarmName":"x"}}`,
+		"empty alarmData":   `{"source":"aws.cloudwatch","alarmData":{}}`,
+		"no alarmData":      `{"source":"aws.cloudwatch"}`,
+		"broken json":       `not-json`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := parseAlarmInput([]byte(body)); !errors.Is(err, ErrInvalidAlarmInput) {
+				t.Fatalf("err = %v, want ErrInvalidAlarmInput", err)
+			}
+		})
+	}
+}

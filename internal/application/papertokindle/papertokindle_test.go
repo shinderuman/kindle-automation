@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
+	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
@@ -608,11 +609,42 @@ func TestBuildDetailJob_IsDeterministicAndUsesAmazonRequests(t *testing.T) {
 	if buildDetailJob(j, "B0KINDLE01").JobID != d.JobID {
 		t.Errorf("detail JobID is not deterministic")
 	}
-	gist := buildPaperToKindleGistJob(j)
+	gist := buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER001")
 	if got := job.MessageGroup(gist.Kind); got != "external-updates" {
 		t.Errorf("gist MessageGroup = %q, want external-updates", got)
 	}
 	if job.AmazonRequests(gist.Kind) != 0 {
 		t.Errorf("gist_update must not access Amazon")
+	}
+}
+
+// TestBuildPaperGistJob_DiscriminatorIsDeterministic は同一 cycle でも異なる S3 状態変更
+// （価格初期化 vs 削除、異なる紙書籍ASIN）で別 job_id となり、同一状態変更の再試行は同一 job_id になることを検証する。
+// SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、別 job_id で dedup 衝突を回避する（SPECIFICATION.md 7.2）。
+// Target.GistType は paper_to_kindle のまま変えない（job schema 互換）。
+func TestBuildPaperGistJob_DiscriminatorIsDeterministic(t *testing.T) {
+	j := checkJob("B0PAPER001")
+	priceInitA := buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER001")
+	deleteA := buildPaperToKindleGistJob(j, gistStagePaperDelete, "B0PAPER001")
+	priceInitB := buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER002")
+
+	// 同一紙書籍の価格初期化と削除は別状態変更 → 別 job_id / 別 dedup。
+	if priceInitA.JobID == deleteA.JobID {
+		t.Errorf("price_init and delete must differ: %s", priceInitA.JobID)
+	}
+	if scheduling.DedupID(priceInitA.JobID) == scheduling.DedupID(deleteA.JobID) {
+		t.Errorf("price_init and delete dedup must differ")
+	}
+	// 異なる紙書籍ASINは別 job_id。
+	if priceInitA.JobID == priceInitB.JobID {
+		t.Errorf("different paper ASIN must differ: %s", priceInitA.JobID)
+	}
+	// 同一状態変更の再試行は同一 job_id（決定的）。
+	if buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER001").JobID != priceInitA.JobID {
+		t.Errorf("same state change must be deterministic")
+	}
+	// GistType は paper_to_kindle で不変（gist updater 契約）。
+	if priceInitA.Target.GistType != gistPaperID {
+		t.Errorf("GistType = %q, want %q", priceInitA.Target.GistType, gistPaperID)
 	}
 }

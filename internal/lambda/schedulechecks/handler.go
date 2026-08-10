@@ -16,6 +16,12 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/notification"
 )
 
+// Lambda event の source 値。EventBridge Scheduler と CloudWatch Alarm 直接 invoke を判別する。
+const (
+	sourceScheduler  = "scheduler"
+	sourceCloudWatch = "aws.cloudwatch"
+)
+
 // Scheduler は schedule-checks Lambda の振る舞いを保持する。
 // Scheduler イベントは dispatch.Run へ、CloudWatch Alarm イベントは Slack error channel 通知へ振り分ける。
 type Scheduler struct {
@@ -83,26 +89,68 @@ func (s *Scheduler) HandleAlarm(ctx context.Context, alarmName string) error {
 }
 
 // HandleEvent は Lambda へ渡された生イベントを source で判別し Scheduler/Alarm へ振り分ける。
-// EventBridge Scheduler の定数入力は source=scheduler。それ以外は CloudWatch Alarm とみなす。
+// EventBridge Scheduler の定数入力は source=scheduler。CloudWatch Alarm の直接 invoke は source=aws.cloudwatch。
 func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error {
 	var peek struct {
-		Source    string `json:"source"`
-		AlarmName string `json:"AlarmName"`
+		Source string `json:"source"`
 	}
-	_ = json.Unmarshal(raw, &peek)
-	if peek.Source == "scheduler" {
+	if err := json.Unmarshal(raw, &peek); err != nil {
+		s.logTerminal(ctx, "event decode failed", "event_decode_failed", "", err)
+		return fmt.Errorf("decode event source: %w", err)
+	}
+	switch peek.Source {
+	case sourceScheduler:
 		event, err := parseScheduleInput(raw)
 		if err != nil {
-			if s.Logger != nil {
-				s.Logger.ErrorContext(ctx, "schedule input invalid",
-					slog.String("event", "schedule_input_invalid"),
-					slog.String("result", "terminal"),
-					slog.String("error", err.Error()),
-				)
-			}
+			s.logTerminal(ctx, "schedule input invalid", "schedule_input_invalid", "", err)
 			return err
 		}
 		return s.HandleSchedule(ctx, event)
+	case sourceCloudWatch:
+		return s.handleAlarmEvent(ctx, raw)
+	default:
+		err := fmt.Errorf("unknown event source %q", peek.Source)
+		s.logTerminal(ctx, "unknown event source", "unknown_event_source", peek.Source, err)
+		return err
 	}
-	return s.HandleAlarm(ctx, peek.AlarmName)
+}
+
+// handleAlarmEvent は CloudWatch Alarm の直接 invoke payload を decode し ALARM 遷移のみ通知する。
+// payload は source=aws.cloudwatch, alarmData.alarmName, alarmData.state.value（SPECIFICATION.md 17.2）。
+// decode/validation 失敗は terminal error として伝播する。ALARM 未満の状態では通知せず正常終了する。
+func (s *Scheduler) handleAlarmEvent(ctx context.Context, raw json.RawMessage) error {
+	alarmName, state, err := parseAlarmInput(raw)
+	if err != nil {
+		s.logTerminal(ctx, "alarm input invalid", "alarm_input_invalid", "", err)
+		return err
+	}
+	if state != AlarmStateAlarm {
+		// AlarmActions 経由なら通常 ALARM だが、OK/INSUFFICIENT_DATA では通知しない（SPECIFICATION.md 17.2）。
+		if s.Logger != nil {
+			s.Logger.LogAttrs(ctx, slog.LevelInfo, "alarm non-alarm state ignored",
+				slog.String("event", "alarm_state_ignored"),
+				slog.String("alarm_name", alarmName),
+				slog.String("state", state),
+			)
+		}
+		return nil
+	}
+	return s.HandleAlarm(ctx, alarmName)
+}
+
+// logTerminal は decode/validation 失敗など再試行無意味な terminal 起動を ERROR で記録する。
+// eventSource が空でなければ source field を添える。
+func (s *Scheduler) logTerminal(ctx context.Context, msg, event, eventSource string, err error) {
+	if s.Logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("event", event),
+		slog.String("result", "terminal"),
+		slog.String("error", err.Error()),
+	}
+	if eventSource != "" {
+		attrs = append(attrs, slog.String("source", eventSource))
+	}
+	s.Logger.LogAttrs(ctx, slog.LevelError, msg, attrs...)
 }

@@ -425,10 +425,15 @@ func buildDetailJob(j job.Job, hit SearchHit) job.Job {
 	}
 }
 
+// buildAuthorGistJob は Author 用 gist_update ジョブを生成する。
+// job_id は gist_type + 作者名で決定的。Gist updater は authors.json 全体を再生成するため
+// Target.GistType は new_release のまま変えない（job schema 互換、SPECIFICATION.md 7.2/15）。
+// 作者名を discriminator へ入れることで同一 cycle の異なる作者の Author 変更が
+// SQS FIFO 5分 dedup で消えず、同一作者の再試行は同一 job_id で冪等になる。
 func buildAuthorGistJob(j job.Job) job.Job {
 	return job.Job{
 		Version:     job.Version,
-		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistNewRelID),
+		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistNewRelID+":"+j.Target.AuthorName),
 		Kind:        job.KindGistUpdate,
 		CheckType:   j.CheckType,
 		CycleID:     j.CycleID,

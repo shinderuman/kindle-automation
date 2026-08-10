@@ -3,6 +3,7 @@ package schedulechecks
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shinderuman/kindle-automation/internal/application/dispatch"
@@ -31,11 +32,13 @@ func (enabledConfig) IsEnabled(_ context.Context, _ job.CheckType) (bool, error)
 
 type fakeSender struct {
 	called bool
+	msg    string
 	err    error
 }
 
-func (s *fakeSender) Send(_ context.Context, _ string) error {
+func (s *fakeSender) Send(_ context.Context, msg string) error {
 	s.called = true
+	s.msg = msg
 	return s.err
 }
 
@@ -83,17 +86,62 @@ func TestHandleEvent_SchedulerInvalidInputErrors(t *testing.T) {
 	}
 }
 
-// Alarm イベントは Slack error channel へ通知する。
+// CloudWatch Alarm 直接 invoke の実イベント（AWS 公式形式）。
+const alarmEventBody = `{"source":"aws.cloudwatch","alarmArn":"arn:aws:cloudwatch:us-east-1:111122223333:alarm:kindle-automation-work-dlq","accountId":"111122223333","time":"2026-08-04T12:36:15.490+0000","region":"us-east-1","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"ALARM","reason":"DLQ depth","timestamp":"2026-08-04T12:36:15.490+0000"},"previousState":{"value":"OK","reason":"","timestamp":"2026-08-04T12:31:29.595+0000"}}}`
+
+// Alarm イベント（ALARM 遷移）は alarmData.alarmName を取り出して Slack error channel へ通知する。
 func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 	sender := &fakeSender{}
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, sender)
-	body := `{"AlarmName":"WorkDLQDepth"}`
 
-	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+	if err := sched.HandleEvent(context.Background(), []byte(alarmEventBody)); err != nil {
 		t.Fatalf("HandleEvent alarm: %v", err)
 	}
 	if !sender.called {
 		t.Errorf("error sender must be called for alarm event")
+	}
+	if !strings.Contains(sender.msg, "kindle-automation-work-dlq") {
+		t.Errorf("notify message must include alarm name, got %q", sender.msg)
+	}
+}
+
+// ALARM 未満の状態（OK/INSUFFICIENT_DATA）では通知せず正常終了する（SPECIFICATION.md 17.2）。
+func TestHandleEvent_AlarmNonAlarmStateSkipsNotify(t *testing.T) {
+	sender := &fakeSender{}
+	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, sender)
+	body := `{"source":"aws.cloudwatch","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"OK"}}}`
+
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+		t.Fatalf("non-ALARM state must not error: %v", err)
+	}
+	if sender.called {
+		t.Errorf("error sender must not be called for non-ALARM state")
+	}
+}
+
+// Alarm payload の decode/validation 失敗は error として伝播する。
+func TestHandleEvent_AlarmInvalidInputErrors(t *testing.T) {
+	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
+	body := `{"source":"aws.cloudwatch","alarmData":{"state":{"value":"ALARM"}}}`
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
+		t.Fatal("HandleEvent must fail on alarm input missing alarmData.alarmName")
+	}
+}
+
+// 未知の source は error として伝播する（scheduler/cloudwatch 以外の誤 invoke を表面化）。
+func TestHandleEvent_UnknownSourceErrors(t *testing.T) {
+	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
+	body := `{"source":"aws.somethingelse"}`
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
+		t.Fatal("HandleEvent must fail on unknown source")
+	}
+}
+
+// 生イベントが JSON でない場合は error として伝播する。
+func TestHandleEvent_BrokenJSONErrors(t *testing.T) {
+	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
+	if err := sched.HandleEvent(context.Background(), []byte("not-json")); err == nil {
+		t.Fatal("HandleEvent must fail on broken JSON")
 	}
 }
 

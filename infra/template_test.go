@@ -64,3 +64,41 @@ func TestTemplate_AlarmsNotifyOnlyOnAlarm(t *testing.T) {
 		t.Errorf("CloudWatch::Alarm count = %d, want 3", alarmCount)
 	}
 }
+
+// TestTemplate_AlarmPermissionPrincipal は CloudWatch Alarm 直接 invoke 用の Lambda Permission が
+// 正しい service principal（lambda.alarms.cloudwatch.amazonaws.com）と SourceAccount/SourceArn を持つことを検証する。
+// cloudwatch.amazonaws.com では AlarmActions 直接 invoke を認めない（AWS 公式）。
+func TestTemplate_AlarmPermissionPrincipal(t *testing.T) {
+	data, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	top := mappingFields(doc.Content[0])
+	resources := mappingFields(top["Resources"])
+
+	res, ok := resources["ScheduleChecksAlarmPermission"]
+	if !ok {
+		t.Fatal("ScheduleChecksAlarmPermission resource missing")
+	}
+	props := mappingFields(mappingFields(res)["Properties"])
+	if principal := props["Principal"]; principal == nil || principal.Value != "lambda.alarms.cloudwatch.amazonaws.com" {
+		got := ""
+		if principal != nil {
+			got = principal.Value
+		}
+		t.Errorf("Principal = %q, want lambda.alarms.cloudwatch.amazonaws.com", got)
+	}
+	if action := props["Action"]; action == nil || action.Value != "lambda:InvokeFunction" {
+		t.Errorf("Action must be lambda:InvokeFunction")
+	}
+	if _, ok := props["SourceAccount"]; !ok {
+		t.Errorf("SourceAccount must be set for confused-deputy protection (AWS recommendation)")
+	}
+	if _, ok := props["SourceArn"]; !ok {
+		t.Errorf("SourceArn must be set for confused-deputy protection")
+	}
+}

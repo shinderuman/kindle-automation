@@ -192,6 +192,14 @@ var (
 	paperURLBase = "https://www.amazon.co.jp/dp/"
 )
 
+// paper_to_kindle gist_update の状態変更 stage。
+// 同一 cycle で「価格初期化」と「紙書籍削除」を別の gist job として区別する（SPECIFICATION.md 7.2）。
+// 異なる状態変更は別 job_id、同一状態変更の再試行は同一 job_id になる。
+const (
+	gistStagePaperPriceInit = "price_init"
+	gistStagePaperDelete    = "delete"
+)
+
 // HandlePaperToKindleCheck は paper_to_kindle_check ジョブを処理する。
 // 紙書籍ページへ1回アクセスし、紙価格初期化とKindle候補有無を確認する。
 // Kindle候補がスウォッチから得られた場合は paper_to_kindle_detail を投入し、同じ起動で詳細へはアクセスしない。
@@ -240,7 +248,7 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 		// Paper-to-Kindle 用 gist_update を決定的 job_id で投入する。
 		// 既に価格が設定済みなら priceInitialized=false となり投入しない（冪等、SPECIFICATION.md 7.5）。
 		if priceInitialized {
-			if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j)); err != nil {
+			if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j, gistStagePaperPriceInit, j.Target.ASIN)); err != nil {
 				return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
 					fmt.Errorf("enqueue paper-to-kindle gist after price init: %w", err)
 			}
@@ -371,7 +379,7 @@ func applyDetectedBook(ctx context.Context, deps Dependencies, j job.Job, d Dete
 	// SPEC 14.4 step5: Paper-to-Kindle 用 gist_update を決定的 job_id で投入する。
 	// Gist は paper_books 全体から再生成するため paper_books 削除後に投入し、
 	// upsert 失敗の再実行でも決定的 job_id で欠損・重複しない（7.5）。
-	if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j)); err != nil {
+	if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j, gistStagePaperDelete, j.Target.SourceASIN)); err != nil {
 		return execution.Errored(errorTypeEnqueueFailed, 0, 0), fmt.Errorf("enqueue paper-to-kindle gist: %w", err)
 	}
 
@@ -395,10 +403,15 @@ func buildDetailJob(j job.Job, kindleASIN string) job.Job {
 	}
 }
 
-func buildPaperToKindleGistJob(j job.Job) job.Job {
+// buildPaperToKindleGistJob は Paper-to-Kindle 用 gist_update ジョブを生成する。
+// job_id は gist_type + stage + paperASIN で決定的。Gist updater は S3 全体を再生成するため
+// Target.GistType は paper_to_kindle のまま変えない（job schema 互換、SPECIFICATION.md 7.2/15）。
+// stage+paperASIN により同一 cycle の異なる S3 状態変更が SQS FIFO 5分 dedup で消えず、
+// 同一状態変更の再試行は同一 job_id で冪等になる。
+func buildPaperToKindleGistJob(j job.Job, stage, paperASIN string) job.Job {
 	return job.Job{
 		Version:     job.Version,
-		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistPaperID),
+		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistPaperID+":"+stage+":"+paperASIN),
 		Kind:        job.KindGistUpdate,
 		CheckType:   j.CheckType,
 		CycleID:     j.CycleID,

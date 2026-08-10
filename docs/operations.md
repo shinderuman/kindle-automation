@@ -139,6 +139,11 @@ UserScript の Option+↑ で生成された既存 MaxPrice には紙書籍価�
 
 `paper_books_asins.json` はセール価格履歴ではないため対象外。
 
+### 5.0 事前 backup（dry-run の前必須, `SPECIFICATION.md` §20.3 step2）
+
+dry-run / apply の前に、上記3 object を日時付き backup prefix へ copy する。
+apply 後の戻しは選択的復元のみ許容し、配列全体の無条件上書きは禁止する（§4 ロールバック）。
+
 ### 5.1 dry-run（既定）
 
 ```bash

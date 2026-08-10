@@ -230,13 +230,17 @@ Resources:
         - !GetAtt ScheduleChecksFunction.Arn
 
   # CloudWatch Alarm から schedule-checks を invoke する resource-based permission（SPECIFICATION.md 19）。
+  # Principal は AlarmActions 直接 invoke 用の service principal（AWS 公式: lambda.alarms.cloudwatch.amazonaws.com）。
+  # cloudwatch.amazonaws.com では CloudWatch Alarm の直接 invoke を認めない。
+  # SourceArn/SourceAccount で対象 alarm と同一 account へ絞り confused-deputy を防ぐ（AWS 推奨）。
   ScheduleChecksAlarmPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt ScheduleChecksFunction.Arn
       Action: lambda:InvokeFunction
-      Principal: cloudwatch.amazonaws.com
+      Principal: lambda.alarms.cloudwatch.amazonaws.com
       SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:kindle-automation-*"
+      SourceAccount: !Ref AWS::AccountId
 
   # ───────────────────────── EventBridge Scheduler ─────────────────────────
   SchedulerRole:
