@@ -353,6 +353,20 @@ func TestHTTPStatusString(t *testing.T) {
 	}
 }
 
+// Logger 未設定でも logJobResult は panic せず何も出さない（処理結果は変わらない）。
+func TestLogJobResult_NilLoggerIsNoOp(t *testing.T) {
+	w := &Worker{Logger: nil}
+	j := job.Job{Kind: job.KindSaleCheck, CheckType: job.CheckSale}
+	// panic せず呼び出し元へ戻ることだけを検証する。
+	w.logJobResult(context.Background(), events.SQSMessage{}, j, execution.Completed(200, 10), nil, time.Millisecond)
+}
+
+// Logger 未設定でも logDecodeFailure は panic せず何も出さない。
+func TestLogDecodeFailure_NilLoggerIsNoOp(t *testing.T) {
+	w := &Worker{Logger: nil}
+	w.logDecodeFailure(context.Background(), events.SQSMessage{MessageId: "m1"}, errors.New("bad"))
+}
+
 func TestTargetOf_SelectsFirstNonEmpty(t *testing.T) {
 	if got := targetOf(job.Job{Target: job.Target{ASIN: "A"}}); got != "A" {
 		t.Errorf("asin target = %q", got)

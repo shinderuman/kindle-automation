@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -102,4 +103,80 @@ func TestLogAlarm_HasSingleEventKey(t *testing.T) {
 	if c := strings.Count(buf.String(), `"event"`); c != 1 {
 		t.Errorf("event key count = %d, want 1 (duplicate event key): %s", c, buf.String())
 	}
+}
+
+// logTerminal は event token を1つだけ event key へ出す（msg と event attr の二重出力回避）。
+// level=ERROR で result/error/source を含む（SPECIFICATION.md 18.1/18.3）。
+func TestLogTerminal_HasSingleEventKey(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
+
+	s.logTerminal(context.Background(), "unknown_event_source", "aws.somethingelse", errors.New("boom"))
+
+	m := parseLogLine(t, buf.Bytes())
+	if m["event"] != "unknown_event_source" {
+		t.Errorf("event = %v, want unknown_event_source", m["event"])
+	}
+	if c := strings.Count(buf.String(), `"event"`); c != 1 {
+		t.Errorf("event key count = %d, want 1 (重複 event key): %s", c, buf.String())
+	}
+	if m["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", m["level"])
+	}
+	if m["result"] != "terminal" {
+		t.Errorf("result = %v, want terminal", m["result"])
+	}
+	if m["error"] != "boom" {
+		t.Errorf("error = %v, want boom", m["error"])
+	}
+	if m["source"] != "aws.somethingelse" {
+		t.Errorf("source = %v, want aws.somethingelse", m["source"])
+	}
+}
+
+// source 無しの terminal ログは source field を出さない（eventSource 空の呼び出し）。
+func TestLogTerminal_NoSourceWhenEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
+
+	s.logTerminal(context.Background(), "event_decode_failed", "", errors.New("bad json"))
+
+	m := parseLogLine(t, buf.Bytes())
+	if _, ok := m["source"]; ok {
+		t.Errorf("source must be omitted when eventSource empty: %v", m)
+	}
+	if c := strings.Count(buf.String(), `"event"`); c != 1 {
+		t.Errorf("event key count = %d, want 1: %s", c, buf.String())
+	}
+}
+
+// 非 ALARM 状態の受領ログは event key を1つだけ持つ（msg/event attr の二重出力回避）。
+func TestHandleEvent_NonAlarmLogHasSingleEventKey(t *testing.T) {
+	var buf bytes.Buffer
+	sched := &Scheduler{
+		Logger:      logging.New(&buf, slog.LevelInfo),
+		ErrorSender: &fakeSender{},
+	}
+	body := `{"source":"aws.cloudwatch","alarmData":{"alarmName":"work-dlq","state":{"value":"INSUFFICIENT_DATA"}}}`
+
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+		t.Fatalf("non-ALARM state must not error: %v", err)
+	}
+	if c := strings.Count(buf.String(), `"event"`); c != 1 {
+		t.Fatalf("event key count = %d, want 1 (重複 event key): %s", c, buf.String())
+	}
+	m := parseLogLine(t, buf.Bytes())
+	if m["event"] != "alarm_state_ignored" {
+		t.Errorf("event = %v, want alarm_state_ignored", m["event"])
+	}
+	if m["state"] != "INSUFFICIENT_DATA" {
+		t.Errorf("state = %v, want INSUFFICIENT_DATA", m["state"])
+	}
+}
+
+// logCycle は Logger 未設定でも何も出力せず結果を変えない。
+func TestLogCycle_NilLoggerIsNoOp(t *testing.T) {
+	s := &Scheduler{Logger: nil}
+	event := dispatch.Event{CheckType: job.CheckSale, ScheduledAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)}
+	s.logCycle(context.Background(), event, dispatch.DispatchResult{TargetCount: 1, EnqueuedCount: 1})
 }

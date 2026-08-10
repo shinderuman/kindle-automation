@@ -75,6 +75,20 @@ func TestLoadOneSecret_NonNotFoundSecureErrorPropagates(t *testing.T) {
 	}
 }
 
+// secure 側が ParameterNotFound で plain 取得へ進んだ後、plain 側が一時エラーなら NotFound 扱いせず伝播する。
+func TestLoadOneSecret_NonNotFoundPlainErrorPropagates(t *testing.T) {
+	g := &stubGetter{errs: map[string]error{
+		plainSSMPath + "/" + KeySlackBotToken: &smithy.GenericAPIError{Code: "ThrottlingException"},
+	}}
+	_, err := loadOneSecret(context.Background(), g, KeySlackBotToken)
+	if err == nil {
+		t.Fatal("want propagated plain-side error")
+	}
+	if errors.Is(err, ErrSecretNotFound) {
+		t.Fatalf("plain-side non-NotFound error must not become ErrSecretNotFound: %v", err)
+	}
+}
+
 func TestLoadSecrets_AllKeys(t *testing.T) {
 	g := &stubGetter{values: map[string]string{
 		secureSSMPath + "/" + KeyAmazonPartnerTag:     "tag",

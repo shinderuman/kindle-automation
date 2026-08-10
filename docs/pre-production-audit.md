@@ -57,6 +57,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 | §12.3 / §12.4 / §12.5 | セール4条件の独立性, 紙書籍価格不使用, セール成立時も MaxPrice/CurrentPrice 更新, 価格変動通知との排他 | `internal/domain/sale/sale.go`, `internal/domain/book/book.go`, `internal/application/sale/sale.go` |
 | §13.3 | 対象作者名と contributor 表記を正規化した完全名同士で完全一致比較する。空白トークン部分一致は行わず、姓だけ同一の別人を誤検出しない | `internal/application/newrelease/newrelease.go` |
 | §13 | 検索→result/detail の2段階, 検索 job は S3 保存・通知しない | `internal/application/newrelease/newrelease.go` |
+| §7.2 / §13.4 | `new_release_result` の `product.item_type` は正規値 `kindle` のみ許可。空文字・未知値は `ErrInvalidItemType` で Amazon 到達前に拒否し、推測値・空文字を入れない | `internal/job/job.go` |
 | §15 | S3 全体から Gist 再生成, gist_type ごとの決定 ID | `internal/gist/gist.go`, `internal/gist/markdown.go` |
 | §17.2 | Alarm 3種が ALARM 遷移時のみ schedule-checks 起動, OKActions なし | `infra/template.yaml`, `internal/lambda/schedulechecks/handler.go` |
 | §18.1 | 共通ログ field 一式, ErrorCount metric filter | `internal/lambda/checkworker/handler.go`, `infra/template.yaml` |
@@ -68,15 +69,14 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 
 | 項目 | SPEC | 現状と検証条件 |
 |---|---|---|
-| `SearchProduct.ItemType` 未使用 | §7.2 / §13.4 | 定義されるが値の enum が SPEC に未定義。現状 `IsKindle=true`(digital-text 固定)が同等情報を担い、非機能的影響はない。推測値の設定や schema 削除は仕様判断待ち。 |
-| 実HTML fixture の拡充 | §22.2 | 検索ページ/CAPTCHA/404等の実HTMLは現時点で test 環境に不存在。自動テストから Amazon へアクセスできないため最小合成fixture で代用中。取得後 `testdata/amazon` へ保存し合成fixture を実fixture へ置き換える。実HTML構造の検証は live smoke(§2) と実fixture 取得が条件。 |
+| CAPTCHA / 404 / 必須要素欠落 の実HTML fixture | §22.2 | Kindle商品ページ(`testdata/amazon/product_B0FX3X569X.html`)・紙商品ページ(`testdata/amazon/paper_4434361325.html`)・検索ページ(`testdata/amazon/search_digital_text.html`)は実HTMLを保存済みで `internal/amazon/extractor_test.go` が使用中。仍未取得なのは SPEC §22.2 の CAPTCHA/アクセス拒否/短い200本文・404商品不存在・必須価格・タイトル欠落。自動テストから Amazon へアクセスできないため、これらの構造検証は live smoke(§2) と実fixture 追加が条件。 |
 
 ## 5. AWS 環境でのみ検証する項目
 
 コード単体では完結しない項目。`SPECIFICATION.md` §20.3 切り替え手順・§24 step12 に沿って実施する。
 
 ### 5.1 SAM デプロイ・CFn 検証
-- [ ] SAM CLI で `sam validate --profile <P> --region <R>` を実行し template 妥当性を確認する。
+- [ ] SAM CLI で `sam validate --template-file infra/template.yaml --profile <P> --region <R>` を実行し template 妥当性を確認する。template は `infra/template.yaml` にあるため `--template-file` 必須（省略時の default `template.yaml` は repo root に不存在）。
 - [ ] `./scripts/deploy.sh --stage build`（`--profile`/`--region` 必須）で sam build が成功すること。
 - [ ] `--stage deploy` が sam deploy の change set 確認プロンプトを表示し、確認後に同じ sam deploy で適用すること（`scripts/deploy_test.sh` で stub 検証済み）。
 - [ ] `--stage all` が sam build 後に sam deploy を実行すること（`scripts/deploy_test.sh` で stub 検証済み）。
@@ -101,7 +101,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 - [ ] OK 遷移では `schedule-checks` を起動しないこと。
 
 ### 5.5 実 HTTP・外部API
-- [ ] Lambda 環境から Amazon.co.jp への到達性と、実HTMLに対する各 selector の有効性（検索発売日 `nth-child`, CAPTCHA/access-denied marker）。実HTML構造の検証は live smoke(§2) と実fixture 取得後に完結する。
+- [ ] Lambda 環境から Amazon.co.jp への到達性と、実HTMLに対する各 selector の有効性（検索発売日 `nth-child`, CAPTCHA/access-denied marker）。Kindle商品・紙商品・検索ページの selector は実fixture(`testdata/amazon`)で検証済み。CAPTCHA/access-denied marker と 404 構造は live smoke(§2) と §4 の未取得 fixture 追加後に完結する。
 - [ ] Slack/Mastodon/GitHub Gist API への実際の送信・更新。
 
 ### 5.6 切り替え手順（§20.3）

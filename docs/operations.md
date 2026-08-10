@@ -58,7 +58,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 
 - 両 Lambda の Log Group が作成され、保持期間が30日であること。
 - Work Queue / Work DLQ / Scheduler DLQ が FIFO / Standard 構成どおりに作成されていること。
-- event source mapping の `BatchSize=1`、`ReportBatchItemFailures` が設定されていること。
+- event source mapping の `BatchSize=1` が設定されていること。check-worker は失敗時に Lambda error を返し SQS へ再配信させる契約（partial batch response は使用しない）。
 - 3 Scheduler が `SchedulersEnabled` の指定どおりの有効状態であること（初回は無効）。
 - 2 Lambda の IAM role が共有されていないこと。
 - S3 bucket リソースが stack 削除対象に入っていないこと。
@@ -97,6 +97,17 @@ Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移し�
 8. `job_completed` ログ、DLQ 空、Alarm の `OK` 遷移を確認する。
 
 原因確認前に DLQ message を削除しない。404・商品種別不一致などの terminal result は DLQ へ入らない。
+
+#### 3.1.1 設定読込失敗（`error_type=config_load`）
+
+`error_type=config_load` は単一 target ではなく `check-worker` 起動時の可変設定読込失敗である（`SPECIFICATION.md` §9.1）。`checker_configs.json` または `excluded_title_keywords.json` の object 不在・S3 一時障害・JSON 不正・型不正のいずれかで、当該 invocation の全 record が処理前に失敗する。Amazon 取得は始まっていないため `http_status`・`response_bytes` は空・0 になる。
+
+1. 両 object の存在と内容を確認する（存在・有効な JSON・想定する型）。
+2. `excluded_title_keywords.json` は文字列配列のみ有効。空配列 `[]` は正常だが、object 不在・`null`・配列以外は失敗原因。
+3. S3 一時障害の可能性がある場合は直近の S3 / Lambda エラーを確認し、再試行で復旧したかを見る。
+4. 内容を修正・復元したあと DLQ message を Work Queue へ redrive する。
+
+設定読込失敗を単一 target の Amazon エラーと誤認しない。同一時刻に複数 target が一斉に失敗している場合は設定読込を疑う。
 
 ### 3.2 Queue 滞留（`SPECIFICATION.md` §26.2）
 

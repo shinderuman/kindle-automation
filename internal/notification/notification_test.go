@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shinderuman/kindle-automation/internal/logging"
 )
@@ -179,5 +181,354 @@ func TestNotify_FailureLogHasSingleEventKey(t *testing.T) {
 	}
 	if c := strings.Count(buf.String(), `"event"`); c != 1 {
 		t.Errorf("event key count = %d, want 1 (duplicate event key): %s", c, buf.String())
+	}
+}
+
+// parseLogMap は JSON 1行を map へ復元する。
+func parseLogMap(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal log %q: %v", string(b), err)
+	}
+	return m
+}
+
+// newRawSlackServer は Authorization/body 解釈をせず、固定 status と本文を返す Slack 伪応答サーバー。
+// HTTP status 分類・decode 経路の検証に使う（newSlackServer は ok/false 固定で用途が違う）。
+func newRawSlackServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth は Slack・Mastodon 両方の失敗が
+// あっても片方を中止せず、両失敗を1件ずつ notification_error で記録し、error も両方を含むことを検証する
+// （SPECIFICATION.md 17.1: 片方の失敗後も他方を実行、各送信結果を個別にログ）。
+func TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth(t *testing.T) {
+	var slackBody map[string]string
+	var mastodonForm url.Values
+	slackSrv := newSlackServer(t, false, &slackBody) // ok:false
+	defer slackSrv.Close()
+	mastoSrv := newMastodonServer(t, http.StatusServiceUnavailable, &mastodonForm)
+	defer mastoSrv.Close()
+
+	var buf bytes.Buffer
+	logger := logging.New(&buf, slog.LevelInfo)
+	slack := NewSlackSender("tkn", "C123")
+	slack.baseURL = slackSrv.URL
+	masto := NewMastodonSender(mastoSrv.URL, "atoken")
+	n := NewNotifier(slack, masto, logger)
+
+	err := n.Notify(context.Background(), "メッセージ")
+	if err == nil {
+		t.Fatal("want error when both channels fail")
+	}
+	// 両側の失敗が error へ現れる（best-effort でも失敗を握り潰さない）。
+	if !strings.Contains(err.Error(), "slack") || !strings.Contains(err.Error(), "mastodon") {
+		t.Errorf("joined error must mention both channels: %v", err)
+	}
+	// 各送信失敗を channel 別に1件ずつ notification_error で記録する（観測可能性）。
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 failure logs (one per channel), got %d: %s", len(lines), buf.String())
+	}
+	seenSlack, seenMastodon := false, false
+	for _, line := range lines {
+		m := parseLogMap(t, []byte(line))
+		if m["event"] != logging.EventNotificationError {
+			t.Errorf("event = %v, want %q", m["event"], logging.EventNotificationError)
+		}
+		if m["level"] != "ERROR" {
+			t.Errorf("level = %v, want ERROR", m["level"])
+		}
+		switch m["channel"] {
+		case "slack":
+			seenSlack = true
+		case "mastodon":
+			seenMastodon = true
+		}
+	}
+	if !seenSlack || !seenMastodon {
+		t.Errorf("failure logs must cover both channels: %s", buf.String())
+	}
+}
+
+// TestNotify_FailureLogDoesNotLeakSecrets は失敗ログが token・channel 識別子を含まないことを検証する
+// （SPECIFICATION.md 18.1/19: token/秘密をログへ出さない）。
+func TestNotify_FailureLogDoesNotLeakSecrets(t *testing.T) {
+	var slackBody map[string]string
+	slackSrv := newSlackServer(t, false, &slackBody) // ok:false → "slack api error: invalid_channel"
+	defer slackSrv.Close()
+
+	var buf bytes.Buffer
+	logger := logging.New(&buf, slog.LevelInfo)
+	slack := NewSlackSender("SECRET-TOKEN-XYZ", "C-secret-channel")
+	slack.baseURL = slackSrv.URL
+	n := NewNotifier(slack, nil, logger)
+
+	_ = n.Notify(context.Background(), "msg")
+	out := buf.String()
+	if strings.Contains(out, "SECRET-TOKEN-XYZ") {
+		t.Errorf("failure log must not leak bearer token: %s", out)
+	}
+	if strings.Contains(out, "C-secret-channel") {
+		t.Errorf("failure log must not leak channel id: %s", out)
+	}
+}
+
+// TestTimeoutsAreFiveSeconds は SPECIFICATION.md 17.1 / AGENTS.md 9 の5秒 timeout 定数を固定する。
+func TestTimeoutsAreFiveSeconds(t *testing.T) {
+	if slackTimeout != 5*time.Second {
+		t.Errorf("slackTimeout = %v, want 5s", slackTimeout)
+	}
+	if mastodonTimeout != 5*time.Second {
+		t.Errorf("mastodonTimeout = %v, want 5s", mastodonTimeout)
+	}
+}
+
+// 各 sender は生成時に5秒 timeout を client へ適用する（SPECIFICATION.md 17.1）。
+func TestNewSenders_ApplyFiveSecondClientTimeout(t *testing.T) {
+	if got := NewSlackSender("t", "c").client.Timeout; got != 5*time.Second {
+		t.Errorf("slack client timeout = %v, want 5s", got)
+	}
+	if got := NewMastodonSender("https://m.example", "t").client.Timeout; got != 5*time.Second {
+		t.Errorf("mastodon client timeout = %v, want 5s", got)
+	}
+}
+
+// TestDefaultSlackURL_PointsToRealChatPostMessage は本番 Slack endpoint 定数を固定する（誤った endpoint へ送らない）。
+func TestDefaultSlackURL_PointsToRealChatPostMessage(t *testing.T) {
+	if defaultSlackURL != "https://slack.com/api/chat.postMessage" {
+		t.Errorf("defaultSlackURL = %q, want Slack chat.postMessage endpoint", defaultSlackURL)
+	}
+}
+
+// TestSlackSender_Non2xxStatusClassifiesHTTPError は 429/5xx を status code 付きで error に分類する。
+// Slack は通常 200+ok だが、HTTP層の過負荷/制限も status code で観測できるようにする（SPECIFICATION.md 18.1）。
+func TestSlackSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			srv := newRawSlackServer(t, status, "")
+			defer srv.Close()
+			slack := NewSlackSender("tkn", "C123")
+			slack.baseURL = srv.URL
+			err := slack.Send(context.Background(), "hi")
+			if err == nil {
+				t.Fatal("want error for non-2xx status")
+			}
+			want := fmt.Sprintf("slack http %d", status)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to classify %q", err, want)
+			}
+		})
+	}
+}
+
+// TestSlackSender_EmptyOrInvalidBodyReturnsDecodeError は 200 でも JSON 本文が空/不正なら
+// decode error として観測できるようにする（SPECIFICATION.md 18.1: 異常応答の分類）。
+func TestSlackSender_EmptyOrInvalidBodyReturnsDecodeError(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty", ""},
+		{"invalid_json", "not-json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newRawSlackServer(t, http.StatusOK, tc.body)
+			defer srv.Close()
+			slack := NewSlackSender("tkn", "C123")
+			slack.baseURL = srv.URL
+			err := slack.Send(context.Background(), "hi")
+			if err == nil || !strings.Contains(err.Error(), "decode slack response") {
+				t.Fatalf("want decode slack response error, got %v", err)
+			}
+		})
+	}
+}
+
+// TestSlackSender_TimeoutReturnsRequestError は client timeout 超過を request error として観測する。
+// テストを高速・決定性ありにするため client の timeout を短く上書きする（既定5秒の契約は別テストで固定済み）。
+func TestSlackSender_TimeoutReturnsRequestError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	slack := NewSlackSender("tkn", "C123")
+	slack.baseURL = srv.URL
+	slack.client = &http.Client{Timeout: 50 * time.Millisecond}
+	err := slack.Send(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("want timeout error")
+	}
+	if !strings.Contains(err.Error(), "slack request") {
+		t.Errorf("error must come from slack request path: %v", err)
+	}
+}
+
+// TestSlackSender_CancelledContextReturnsRequestError は context cancellation を request error として観測する。
+func TestSlackSender_CancelledContextReturnsRequestError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	slack := NewSlackSender("tkn", "C123")
+	slack.baseURL = srv.URL
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := slack.Send(ctx, "hi")
+	if err == nil {
+		t.Fatal("want error on cancelled context")
+	}
+	if !strings.Contains(err.Error(), "slack request") {
+		t.Errorf("error must come from slack request path: %v", err)
+	}
+}
+
+// TestSlackSender_RequestShape は POST・Bearer 認証・JSON Content-Type・payload(channel,text) という
+// 外部HTTP契約を検証する（実装内部でなく Slack API への観測可能な振る舞い）。
+func TestSlackSender_RequestShape(t *testing.T) {
+	var got struct {
+		method      string
+		auth        string
+		contentType string
+		body        map[string]string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.auth = r.Header.Get("Authorization")
+		got.contentType = r.Header.Get("Content-Type")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got.body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	slack := NewSlackSender("secret-token", "C-notice")
+	slack.baseURL = srv.URL
+	if err := slack.Send(context.Background(), "📚 新刊"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got.method != http.MethodPost {
+		t.Errorf("method = %q, want POST", got.method)
+	}
+	if got.auth != "Bearer secret-token" {
+		t.Errorf("Authorization = %q, want Bearer scheme (token must not appear in body)", got.auth)
+	}
+	if got.contentType != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want application/json; charset=utf-8", got.contentType)
+	}
+	if got.body["channel"] != "C-notice" || got.body["text"] != "📚 新刊" {
+		t.Errorf("payload = %+v, want channel+text", got.body)
+	}
+}
+
+// TestMastodonSender_Non2xxStatusClassifiesHTTPError は 429/5xx を status code 付きで error に分類する。
+func TestMastodonSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var form url.Values
+			srv := newMastodonServer(t, status, &form)
+			defer srv.Close()
+			masto := NewMastodonSender(srv.URL, "atoken")
+			err := masto.Send(context.Background(), "hi")
+			if err == nil {
+				t.Fatal("want error for non-2xx status")
+			}
+			want := fmt.Sprintf("mastodon http %d", status)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to classify %q", err, want)
+			}
+		})
+	}
+}
+
+// TestMastodonSender_TimeoutReturnsRequestError は client timeout 超過を request error として観測する。
+func TestMastodonSender_TimeoutReturnsRequestError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	masto := NewMastodonSender(srv.URL, "atoken")
+	masto.client = &http.Client{Timeout: 50 * time.Millisecond}
+	err := masto.Send(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("want timeout error")
+	}
+	if !strings.Contains(err.Error(), "mastodon request") {
+		t.Errorf("error must come from mastodon request path: %v", err)
+	}
+}
+
+// TestMastodonSender_CancelledContextReturnsRequestError は context cancellation を request error として観測する。
+func TestMastodonSender_CancelledContextReturnsRequestError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	masto := NewMastodonSender(srv.URL, "atoken")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := masto.Send(ctx, "hi")
+	if err == nil {
+		t.Fatal("want error on cancelled context")
+	}
+	if !strings.Contains(err.Error(), "mastodon request") {
+		t.Errorf("error must come from mastodon request path: %v", err)
+	}
+}
+
+// TestMastodonSender_RequestShapeAndPath は server 末尾スラッシュを正規化したうえで
+// POST {server}/api/v1/statuses へ、Bearer 認証・form-urlencoded・status+visibility を送る外部契約を検証する。
+func TestMastodonSender_RequestShapeAndPath(t *testing.T) {
+	var got struct {
+		method      string
+		path        string
+		auth        string
+		contentType string
+		form        url.Values
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.method = r.Method
+		got.path = r.URL.Path
+		got.auth = r.Header.Get("Authorization")
+		got.contentType = r.Header.Get("Content-Type")
+		_ = r.ParseForm()
+		got.form = r.PostForm
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// server に末尾スラッシュを付けて trimRight が効くことを同時に検証する（二重スラッシュ回避）。
+	masto := NewMastodonSender(srv.URL+"/", "secret-access")
+	if err := masto.Send(context.Background(), "📚 新刊"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got.method != http.MethodPost {
+		t.Errorf("method = %q, want POST", got.method)
+	}
+	if got.path != "/api/v1/statuses" {
+		t.Errorf("path = %q, want /api/v1/statuses (trailing slash on server must be trimmed)", got.path)
+	}
+	if got.auth != "Bearer secret-access" {
+		t.Errorf("Authorization = %q, want Bearer scheme", got.auth)
+	}
+	if got.contentType != "application/x-www-form-urlencoded" {
+		t.Errorf("Content-Type = %q, want application/x-www-form-urlencoded", got.contentType)
+	}
+	if got.form.Get("status") != "📚 新刊" || got.form.Get("visibility") != "public" {
+		t.Errorf("form = %+v, want status+visibility=public", got.form)
 	}
 }

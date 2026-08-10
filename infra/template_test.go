@@ -102,3 +102,46 @@ func TestTemplate_AlarmPermissionPrincipal(t *testing.T) {
 		t.Errorf("SourceArn must be set for confused-deputy protection")
 	}
 }
+
+// TestTemplate_CheckWorkerMappingRedeliverOnError は check-worker の SQS event source mapping が
+// BatchSize=1 であり partial batch response（FunctionResponseTypes）を持たないことを検証する。
+// handler は events.SQSEventResponse を返さず、失敗時に error を返して SQS へ再配信させる契約（SPECIFICATION.md 7.4）。
+// ReportBatchItemFailures を誤って再設定しないよう固定する回帰テスト。
+func TestTemplate_CheckWorkerMappingRedeliverOnError(t *testing.T) {
+	data, err := os.ReadFile("template.yaml")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	top := mappingFields(doc.Content[0])
+	resources := mappingFields(top["Resources"])
+
+	worker, ok := resources["CheckWorkerFunction"]
+	if !ok {
+		t.Fatal("CheckWorkerFunction resource missing")
+	}
+	workerProps := mappingFields(mappingFields(worker)["Properties"])
+	eventsNode, ok := workerProps["Events"]
+	if !ok {
+		t.Fatal("CheckWorkerFunction Events missing")
+	}
+	mapping, ok := mappingFields(eventsNode)["WorkQueue"]
+	if !ok {
+		t.Fatal("CheckWorkerFunction WorkQueue event missing")
+	}
+	mappingProps := mappingFields(mappingFields(mapping)["Properties"])
+
+	bs, ok := mappingProps["BatchSize"]
+	if !ok {
+		t.Fatal("CheckWorkerFunction WorkQueue BatchSize missing")
+	}
+	if bs.Value != "1" {
+		t.Errorf("BatchSize = %q, want 1", bs.Value)
+	}
+	if frt, ok := mappingProps["FunctionResponseTypes"]; ok {
+		t.Errorf("FunctionResponseTypes must not be set (handler returns error, not SQSEventResponse); got %v", seqItems(frt))
+	}
+}

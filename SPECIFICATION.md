@@ -310,6 +310,10 @@ S3の複数object更新をtransactionとして扱わない。job再実行時は�
 | `prev_index_paper_to_kindle.txt` | 旧スロット位置 | 新システムでは使用せず、削除もしない |
 | `prev_index_sale_checker.txt` | 旧スロット位置 | 新システムでは使用せず、削除もしない |
 
+`excluded_title_keywords.json`と`checker_configs.json`は`check-worker`がinvocationごとに読み込む必須読込objectである。これらは手動更新され得る可変設定のため、warm execution environmentの連続invocationでも毎回最新値を読み、前回の読込結果に固定しない。object不在（削除・rename相当を含む`ErrObjectNotFound`）、S3一時障害、JSON不正、想定する型ではない本文は、いずれも設定読込errorとしてLambda errorを返し、SQS job処理・Amazon取得を開始しない。読込失敗は`error_type=config_load`の`level=ERROR`構造化ログ1件へ集約し（§18）、個別Amazon error通知にはしない。
+
+`excluded_title_keywords.json`は文字列配列である。object本文として明示された空配列`[]`だけを「除外語なし」として許容し、object不在・JSONの`null`・文字列配列以外の型は設定読込errorとする。これは旧Go実装と本仕様が同objectを必須の取得契約として扱うためである。同objectが欠落した時に空へfallbackして処理を継続すると、検索結果の事前除外（§13.3）で除外語によるタイトル絞り込みが無効化され、除外すべき候補が`new_release_result`へ流入する。そのため不在を「除外語なし」と同一視せず、失敗とする。
+
 対象リストや取得結果をDynamoDBへ移さない。平常時の取得結果とエラー履歴を新たなS3オブジェクトへ保存せず、CloudWatch LogsとSQS DLQを使用する。
 
 ### 9.2 書籍JSON

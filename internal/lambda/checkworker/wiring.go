@@ -3,7 +3,6 @@ package checkworker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -153,18 +152,23 @@ func loadCheckerConfigs(ctx context.Context, store storage.ObjectStore, key stri
 }
 
 // loadExcludedKeywords は excluded_title_keywords.json（文字列配列）を読み取る。
-// object が存在しない場合は除外語なし（空）とする。
+// 当該 object は既存 S3 契約の必須読込 object である（SPECIFICATION.md 9.1）。
+// object 不在・rename 相当の ErrObjectNotFound・S3 一時障害・JSON 不正・文字列配列以外の型は
+// いずれも設定読込 error とし、呼出側で Lambda error へ転じて SQS job 処理・Amazon 取得を開始しない。
+// 例外は object 本文として明示された空配列 [] だけで、これだけを「除外語なし」として許容する。
+// JSON の null は配列ではなく文字列配列以外の型のため error とし、空配列と同一視しない。
 func loadExcludedKeywords(ctx context.Context, store storage.ObjectStore, key string) ([]string, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, storage.ErrObjectNotFound) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get %s: %w", key, err)
 	}
 	var keywords []string
 	if err := json.Unmarshal(obj.Body, &keywords); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	// Unmarshal は null を nil slice へ成功させるため、空配列 [] と区別して拒否する。
+	if keywords == nil {
+		return nil, fmt.Errorf("decode %s: excluded_title_keywords must be a JSON string array, got null", key)
 	}
 	return keywords, nil
 }

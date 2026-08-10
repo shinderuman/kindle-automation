@@ -39,12 +39,14 @@ func (enabledConfig) IsEnabled(_ context.Context, _ job.CheckType) (bool, error)
 
 type fakeSender struct {
 	called bool
+	calls  int
 	msg    string
 	err    error
 }
 
 func (s *fakeSender) Send(_ context.Context, msg string) error {
 	s.called = true
+	s.calls++
 	s.msg = msg
 	return s.err
 }
@@ -106,6 +108,10 @@ func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 	}
 	if !sender.called {
 		t.Errorf("error sender must be called for alarm event")
+	}
+	// 同一 Alarm 状態で通知を増やさない（SPECIFICATION.md 17.2）。1 event = 1 通知。
+	if sender.calls != 1 {
+		t.Errorf("sender calls = %d, want exactly 1 per alarm event", sender.calls)
 	}
 	if !strings.Contains(sender.msg, "kindle-automation-work-dlq") {
 		t.Errorf("notify message must include alarm name, got %q", sender.msg)
@@ -203,6 +209,77 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	}
 	if len(enq.jobs) != after1 {
 		t.Errorf("second call should not enqueue when disabled: before=%d after=%d", after1, len(enq.jobs))
+	}
+}
+
+// --- config 読込失敗・dispatch error 伝播 ---
+
+// failingConfigStore は checker_configs.json 読込失敗を模倣する ObjectStore stub。
+// checkerConfigReader.IsEnabled が S3 一時障害を dispatch へ伝播することを検証するため Get で必ず失敗する。
+type failingConfigStore struct{}
+
+func (failingConfigStore) Get(_ context.Context, _ string) (storage.Object, error) {
+	return storage.Object{}, errors.New("s3 transient: request timeout")
+}
+
+func (failingConfigStore) Put(_ context.Context, _ string, _ []byte, _ storage.PutOptions) error {
+	return nil
+}
+
+// Checker 設定の読込失敗（S3 Get error）は dispatch.Run へ伝播し HandleEvent の error になる。
+// 設定読込成功前に SQS 投入は行わない（SPECIFICATION.md 16/18.3）。
+func TestHandleEvent_CheckerConfigLoadFailurePropagates(t *testing.T) {
+	enq := &recordingEnqueuer{}
+	sched := &Scheduler{
+		Deps: dispatch.Dependencies{
+			ConfigReader:   checkerConfigReader{store: failingConfigStore{}, key: "checker_configs.json"},
+			Enqueuer:       enq,
+			UpcomingMerger: fakeMerger{},
+			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
+		},
+	}
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
+		t.Fatal("HandleEvent must propagate checker config load failure")
+	}
+	if len(enq.jobs) != 0 {
+		t.Errorf("must not enqueue on config load failure: %v", enq.jobs)
+	}
+}
+
+// enqueuer 失敗は dispatch.Run から HandleEvent へ error として伝播する（SPECIFICATION.md 7.3）。
+type failingEnqueuer struct{ err error }
+
+func (e *failingEnqueuer) EnqueueBatch(_ context.Context, _ []job.Job) error { return e.err }
+
+func TestHandleEvent_DispatchEnqueueFailurePropagates(t *testing.T) {
+	store := storage.NewMemStore()
+	sched := &Scheduler{
+		Deps: dispatch.Dependencies{
+			AsinListReader: asinListReader{store: store},
+			AuthorReader:   authorReader{store: store},
+			ConfigReader:   enabledConfig{},
+			Enqueuer:       &failingEnqueuer{err: errors.New("sqs throttled")},
+			UpcomingMerger: fakeMerger{},
+			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
+		},
+	}
+	// sale は対象空でも sale_finalize を投入するため、enqueuer 失敗が必ず発火する。
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
+		t.Fatal("HandleEvent must propagate enqueue failure")
+	}
+}
+
+// Logger 未設定でも decode 失敗時の error 伝播・結果は変わらない（SPECIFICATION.md 18 境界）。
+func TestHandleEvent_NilLoggerDoesNotChangeResult(t *testing.T) {
+	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, nil)
+	sched.Logger = nil
+	body := `{"version":1,"source":"scheduler","check_type":"bogus","scheduled_at":"2026-08-09T00:00:00Z"}`
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
+		t.Fatal("nil logger must not mask invalid schedule input error")
 	}
 }
 

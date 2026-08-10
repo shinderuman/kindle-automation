@@ -128,6 +128,24 @@ func TestNew_NoAddedFields(t *testing.T) {
 	}
 }
 
+// group 内の属性は replaceAttr の組込み field 書換え対象外となり、値をそのまま通す。
+// time/level/msg の書換えはトップレベル属性にだけ適用される（SPECIFICATION.md 18.1）。
+func TestNew_GroupedAttrsAreNotRewritten(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, slog.LevelInfo).WithGroup("detail")
+	logger.Info("e", "time", "raw", "msg", "raw", "level", "raw")
+
+	got := logLine(t, &buf)
+	detail, ok := got["detail"].(map[string]any)
+	if !ok {
+		t.Fatalf("detail group missing or wrong type: %v", got["detail"])
+	}
+	// group 内の time/msg/level は書換えられずそのまま残る（replaceAttr が groups>0 で素通しする）。
+	if detail["time"] != "raw" || detail["msg"] != "raw" || detail["level"] != "raw" {
+		t.Errorf("grouped built-in keys must not be rewritten: %v", detail)
+	}
+}
+
 func TestParseLevel(t *testing.T) {
 	cases := []struct {
 		in   string

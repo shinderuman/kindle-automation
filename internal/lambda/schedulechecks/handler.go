@@ -95,14 +95,14 @@ func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error 
 		Source string `json:"source"`
 	}
 	if err := json.Unmarshal(raw, &peek); err != nil {
-		s.logTerminal(ctx, "event decode failed", "event_decode_failed", "", err)
+		s.logTerminal(ctx, "event_decode_failed", "", err)
 		return fmt.Errorf("decode event source: %w", err)
 	}
 	switch peek.Source {
 	case sourceScheduler:
 		event, err := parseScheduleInput(raw)
 		if err != nil {
-			s.logTerminal(ctx, "schedule input invalid", "schedule_input_invalid", "", err)
+			s.logTerminal(ctx, "schedule_input_invalid", "", err)
 			return err
 		}
 		return s.HandleSchedule(ctx, event)
@@ -110,7 +110,7 @@ func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error 
 		return s.handleAlarmEvent(ctx, raw)
 	default:
 		err := fmt.Errorf("unknown event source %q", peek.Source)
-		s.logTerminal(ctx, "unknown event source", "unknown_event_source", peek.Source, err)
+		s.logTerminal(ctx, "unknown_event_source", peek.Source, err)
 		return err
 	}
 }
@@ -121,14 +121,14 @@ func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error 
 func (s *Scheduler) handleAlarmEvent(ctx context.Context, raw json.RawMessage) error {
 	alarmName, state, err := parseAlarmInput(raw)
 	if err != nil {
-		s.logTerminal(ctx, "alarm input invalid", "alarm_input_invalid", "", err)
+		s.logTerminal(ctx, "alarm_input_invalid", "", err)
 		return err
 	}
 	if state != AlarmStateAlarm {
 		// AlarmActions 経由なら通常 ALARM だが、OK/INSUFFICIENT_DATA では通知しない（SPECIFICATION.md 17.2）。
+		// event 名は replaceAttr が msg を "event" key へ map するため msg へ渡す（event attr の併用は重複 key になる）。
 		if s.Logger != nil {
-			s.Logger.LogAttrs(ctx, slog.LevelInfo, "alarm non-alarm state ignored",
-				slog.String("event", "alarm_state_ignored"),
+			s.Logger.LogAttrs(ctx, slog.LevelInfo, "alarm_state_ignored",
 				slog.String("alarm_name", alarmName),
 				slog.String("state", state),
 			)
@@ -139,18 +139,20 @@ func (s *Scheduler) handleAlarmEvent(ctx context.Context, raw json.RawMessage) e
 }
 
 // logTerminal は decode/validation 失敗など再試行無意味な terminal 起動を ERROR で記録する。
+// eventToken は SPECIFICATION.md 18.1 の固定 event 名として出力する分類トークン。
+// logging の replaceAttr が msg を "event" key へ map するため eventToken を msg へ渡し、
+// 別途 "event" attr を併用しない（併用すると event key が重複する）。
 // eventSource が空でなければ source field を添える。
-func (s *Scheduler) logTerminal(ctx context.Context, msg, event, eventSource string, err error) {
+func (s *Scheduler) logTerminal(ctx context.Context, eventToken, eventSource string, err error) {
 	if s.Logger == nil {
 		return
 	}
 	attrs := []slog.Attr{
-		slog.String("event", event),
 		slog.String("result", "terminal"),
 		slog.String("error", err.Error()),
 	}
 	if eventSource != "" {
 		attrs = append(attrs, slog.String("source", eventSource))
 	}
-	s.Logger.LogAttrs(ctx, slog.LevelError, msg, attrs...)
+	s.Logger.LogAttrs(ctx, slog.LevelError, eventToken, attrs...)
 }

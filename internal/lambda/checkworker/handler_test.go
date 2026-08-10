@@ -303,6 +303,61 @@ func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	}
 }
 
+// checker 設定は有効でも excluded_title_keywords.json が不在なら設定読込 error にする（SPECIFICATION.md 9.1）。
+// warm invocation で NRDeps.Config.ExcludedKeywords に前回の古い値が残っていても、それで処理を継続せず
+// 失敗する。object 不在は空 fallback せず error_type=config_load の ERROR 1件へ集約し、Amazon 取得は始めない。
+func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
+	saleF, nrF, paperF := retryableFetchers()
+	store := storage.NewMemStore()
+	store.Seed("checker_configs.json", testCheckerConfig)
+	// excluded_title_keywords.json は seed しない（object 不在・rename 相当）。
+	var buf bytes.Buffer
+	w := &Worker{
+		SaleDeps:                 sale.Dependencies{Fetcher: saleF},
+		NRDeps:                   newrelease.Dependencies{SearchFetcher: nrF, ProductFetcher: nrF},
+		PaperDeps:                papertokindle.Dependencies{PaperPageFetcher: paperF, KindlePageFetcher: paperF},
+		store:                    store,
+		checkerConfigKey:         "checker_configs.json",
+		excludedTitleKeywordsKey: "excluded_title_keywords.json",
+		Logger:                   logging.New(&buf, slog.LevelInfo),
+	}
+	// 前回の成功 invocation で残った古い除外語を模倣し、これが再利用されないことを検証する。
+	w.NRDeps.Config.ExcludedKeywords = []string{"stale-warm-value"}
+	body := mustEncode(t, job.Job{
+		Version: job.Version, JobID: "job-excl", Kind: job.KindNewReleaseSearch,
+		CheckType: job.CheckNewRelease, CycleID: "cycle-1", Target: job.Target{AuthorName: "作者"},
+	})
+	event := events.SQSEvent{Records: []events.SQSMessage{{
+		MessageId: "m1", Body: body,
+		Attributes: map[string]string{"ApproximateReceiveCount": "2"},
+	}}}
+
+	err := w.HandleSQSEvent(context.Background(), event)
+	if err == nil {
+		t.Fatal("HandleSQSEvent should fail when excluded_title_keywords.json is missing")
+	}
+	if !strings.Contains(err.Error(), "load variable config") {
+		t.Errorf("err = %v, want wrap of load variable config", err)
+	}
+	// config_load の ERROR ログは1件だけ（ErrorCount を複数増やさない）。
+	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+		t.Fatalf("ERROR log lines = %d, want 1", n)
+	}
+	m := parseLog(t, buf.Bytes())
+	if m["event"] != logging.EventJobError {
+		t.Errorf("event = %v, want %q", m["event"], logging.EventJobError)
+	}
+	if m["error_type"] != "config_load" {
+		t.Errorf("error_type = %v, want config_load", m["error_type"])
+	}
+	// 古い値で処理を継続せず、Amazon 取得は一切開始しない。
+	if saleF.calls != 0 || nrF.searchCalls != 0 || nrF.productCalls != 0 ||
+		paperF.paperCalls != 0 || paperF.kindleCalls != 0 {
+		t.Errorf("amazon fetchers must not be called when excluded object is missing: %d/%d/%d/%d/%d",
+			saleF.calls, nrF.searchCalls, nrF.productCalls, paperF.paperCalls, paperF.kindleCalls)
+	}
+}
+
 // 設定読込失敗かつ message decode も不能な状態でも ERROR ログを失わない。
 // 設定読込が先に失敗するため decode ログとは重複せず config_load の1件だけになる。
 func TestHandleSQSEvent_ConfigLoadFailureWithUndecodableMessage(t *testing.T) {

@@ -45,6 +45,87 @@ func TestValidate_RejectsNonPositiveThreshold(t *testing.T) {
 	}
 }
 
+// PointPercent・PriceChangeAmount も単独で0なら弾く（SPECIFICATION.md 16: 使用する閾値は正）。
+func TestValidate_RejectsNonPositivePointPercentAndPriceChange(t *testing.T) {
+	cases := []struct {
+		name   string
+		config SaleCheckerConfig
+	}{
+		{
+			name:   "PointPercent=0",
+			config: SaleCheckerConfig{Enabled: true, GistID: "g", GistFilename: "f", SaleThreshold: 100, PointPercent: 0, PriceChangeAmount: 100},
+		},
+		{
+			name:   "PriceChangeAmount=0",
+			config: SaleCheckerConfig{Enabled: true, GistID: "g", GistFilename: "f", SaleThreshold: 100, PointPercent: 20, PriceChangeAmount: 0},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := CheckerConfigs{SaleChecker: tc.config}
+			if err := cfg.Validate(); !errors.Is(err, ErrInvalidCheckerConfig) {
+				t.Fatalf("%s: want ErrInvalidCheckerConfig, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// NewRelease/PaperToKindle も Enabled なら GistID・GistFilename 両方が必要（SPECIFICATION.md 16）。
+func TestValidate_RejectsOtherEnabledCheckersWithoutGist(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  CheckerConfigs
+	}{
+		{name: "NewRelease without gist", cfg: CheckerConfigs{NewReleaseChecker: NewReleaseCheckerConfig{Enabled: true}}},
+		{name: "PaperToKindle without gist", cfg: CheckerConfigs{PaperToKindleChecker: PaperToKindleCheckerConfig{Enabled: true}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.cfg.Validate(); !errors.Is(err, ErrInvalidCheckerConfig) {
+				t.Fatalf("%s: want ErrInvalidCheckerConfig, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// GistID と GistFilename は片方だけ欠けても弾く（SPECIFICATION.md 16）。
+func TestValidate_RejectsPartialGist(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  CheckerConfigs
+	}{
+		{name: "GistID only", cfg: CheckerConfigs{SaleChecker: SaleCheckerConfig{Enabled: true, GistID: "g", GistFilename: "", SaleThreshold: 100, PointPercent: 20, PriceChangeAmount: 50}}},
+		{name: "GistFilename only", cfg: CheckerConfigs{SaleChecker: SaleCheckerConfig{Enabled: true, GistID: "", GistFilename: "f", SaleThreshold: 100, PointPercent: 20, PriceChangeAmount: 50}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.cfg.Validate(); !errors.Is(err, ErrInvalidCheckerConfig) {
+				t.Fatalf("%s: want ErrInvalidCheckerConfig, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// 全 Checker 無効なら Gist・閾値なしでも validation を通す（使用しないため）。
+func TestValidate_AllDisabledPasses(t *testing.T) {
+	cfg := CheckerConfigs{
+		SaleChecker:          SaleCheckerConfig{Enabled: false},
+		NewReleaseChecker:    NewReleaseCheckerConfig{Enabled: false},
+		PaperToKindleChecker: PaperToKindleCheckerConfig{Enabled: false},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("all-disabled config should pass: %v", err)
+	}
+}
+
+// 不正な型（SaleThreshold が文字列等）は decode error になる。
+func TestDecodeCheckerConfigs_TypeMismatch(t *testing.T) {
+	body := []byte(`{"SaleChecker":{"Enabled":true,"SaleThreshold":"not-a-number"}}`)
+	if _, err := DecodeCheckerConfigs(body); err == nil {
+		t.Fatal("want decode error for type mismatch")
+	}
+}
+
 func TestValidate_DisabledSaleSkipsThresholdCheck(t *testing.T) {
 	// Sale 無効なら閾値が 0 でも validation を通す（使用しないため）。
 	cfg := CheckerConfigs{SaleChecker: SaleCheckerConfig{Enabled: false}}
