@@ -191,7 +191,7 @@ func (w *Worker) refreshVariableConfig(ctx context.Context) error {
 // buildNotifier は SSM 秘密情報から Slack・Mastodon 両送信者を構築する。
 // 4値は上流の LoadSecrets で required（secure/plain 両方欠落・空値を起動エラー）として検査済みのため、
 // ここへ来る時点で全て非空。一部欠落を理由に送信先を黙って無効化せず、両送信先を必ず構築する
-// （レビュー指摘2: 必要値欠落での黙る adapter 無効化・正常起動を禁止）。
+// （必要値欠落での黙る adapter 無効化・正常起動を禁止）。
 func buildNotifier(secrets config.Secrets, logger *slog.Logger) *notification.Notifier {
 	slack := notification.NewSlackSender(secrets.SlackBotToken, secrets.SlackNoticeChannel)
 	mastodon := notification.NewMastodonSender(secrets.MastodonServer, secrets.MastodonAccessToken)

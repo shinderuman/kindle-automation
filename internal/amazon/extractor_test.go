@@ -573,16 +573,15 @@ func TestExtractProduct_ReleaseDateSlashForm(t *testing.T) {
 	}
 }
 
-// UserScriptに存在しない新規fallback候補 #detailBullets_feature_div から発売日を取り出せる
-// （SPECIFICATION.md 11.2。primary セレクタが空のときだけ試す）。
-func TestExtractProduct_ReleaseDateFallbackSelector(t *testing.T) {
-	const htmlSource = `<html><body>
-<div id="detailBullets_feature_div"><ul><li><span>発売日: 2026年8月28日</span></li></ul></div>
-</body></html>`
-	got := ExtractProduct(newDoc(t, htmlSource), "B0FX3X569X")
-	want := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+// 実HTML fixture: Kindle商品ページの発売日は primary selector
+// (#rpi-attribute-book_details-publication_date 配下の rpi-attribute-value span) で取得できる。
+// 期待値 2026/1/30 は fixture HTML 本文から直接読んだ値（selector 実装由来ではない）。
+// 未検証 fallback(#detailBullets_feature_div)へ依存しないことを維持する。
+func TestExtractProduct_RealFixture_ReleaseDate(t *testing.T) {
+	got := ExtractProduct(loadFixtureDoc(t, "product_B0FX3X569X.html"), "B0FX3X569X")
+	want := time.Date(2026, 1, 30, 0, 0, 0, 0, time.UTC)
 	if !got.HasReleaseDate || !got.ReleaseDate.Equal(want) {
-		t.Fatalf("ReleaseDate = %v (has=%v), want %v via fallback", got.ReleaseDate, got.HasReleaseDate, want)
+		t.Fatalf("ReleaseDate = %v (has=%v), want %v via primary selector", got.ReleaseDate, got.HasReleaseDate, want)
 	}
 }
 

@@ -10,9 +10,23 @@ vet:
 staticcheck:
 	staticcheck ./...
 
-# gofmt未適用ファイルを出力する。空であることが期待値。
+# gofmt未適用ファイルが1件でもあればパスを表示して非zero終了する。
+# 整形済み、またはGoファイル0件なら成功。gofmt自身のエラー（構文エラー等）も失敗にする。
 fmt:
-	@gofmt -l $$(rg --files -g '*.go')
+	@files=$$(rg --files -g '*.go'); \
+	if [ -z "$$files" ]; then \
+		exit 0; \
+	fi; \
+	unformatted=$$(gofmt -l $$files); \
+	if [ $$? -ne 0 ]; then \
+		echo "gofmtがエラーを検出した" 1>&2; \
+		exit 1; \
+	fi; \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt未適用ファイル:" 1>&2; \
+		printf '%s\n' "$$unformatted" 1>&2; \
+		exit 1; \
+	fi
 
 check: fmt test vet staticcheck
 

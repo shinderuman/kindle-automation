@@ -1,0 +1,19 @@
+# kindle-automation の SAM デプロイ設定（AGENTS.md §13）。
+# 安定したデプロイ設定をここへ集約し、scripts/deploy.sh を薄い wrapper にする。
+# 自前の package・change set 管理・state file は持たず、sam deploy 標準の
+# change set 確認プロンプトで人間が変更を確認してから適用する。
+#
+# profile と region は呼出時に必須（deploy.sh の --profile / --region）とし、
+# AWS default profile/region や samconfig の値へ暗黙依存しないためここへは置かない。
+# 成果物 S3 bucket・parameter overrides も環境・適用ごとに変わるため deploy.sh の
+# CLI 引数で渡し、ここへは固定しない。
+# SAM CLI の samconfig は version を数値（float）で要求する（文字列 "0.1" は
+# _version_sanity_check で却下され sam build/deploy が失敗するため、引用符なし）。
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "kindle-automation"
+capabilities = "CAPABILITY_IAM"
+# sam deploy が change set を作成・表示し、人間の確認後に同じ sam deploy で適用する。
+# 人間の確認なしに本番 stack へ反映されないようにするため既定で true とする。
+confirm_changeset = true

@@ -229,7 +229,7 @@ func TestHandleSQSEvent_RouteFailurePropagates(t *testing.T) {
 	}
 }
 
-// --- 可変設定読込失敗の構造化ログ（レビュー指摘4）---
+// --- 可変設定読込失敗の構造化ログ ---
 
 // failingConfigStore は Get で常に S3 一時障害を模倣した error を返す ObjectStore stub。
 // refreshVariableConfig の読込失敗ログと再試行 error 伝播を検証するため checker 設定読込を必ず失敗させる。
@@ -244,7 +244,7 @@ func (failingConfigStore) Put(_ context.Context, _ string, _ []byte, _ storage.P
 }
 
 // 設定読込失敗時も Lambda error を返して SQS 再試行させつつ、level=ERROR の job_error を1件だけ出す。
-// record 処理は設定読込成功前に開始せず、返却 error は保持される（SPECIFICATION.md 18.1/18.3、レビュー指摘4）。
+// record 処理は設定読込成功前に開始せず、返却 error は保持される（SPECIFICATION.md 18.1/18.3）。
 func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	var buf bytes.Buffer
@@ -492,7 +492,7 @@ func newCheckWorkerSecretGetter() *stubSecretGetter {
 }
 
 // check-worker が起動に必須とする secret key は商品通知込の6個。SLACK_ERROR_CHANNEL・
-// MASTODON_CLIENT_ID/SECRET 等、check-worker が使わない key は required に含めない（レビュー指摘2）。
+// MASTODON_CLIENT_ID/SECRET 等、check-worker が使わない key は required に含めない。
 func TestCheckWorkerRequiredSecretKeys(t *testing.T) {
 	want := []string{
 		config.KeyAmazonPartnerTag,
@@ -534,7 +534,7 @@ func TestCheckWorkerSecrets_AllPresentSucceedsAndOmitsUnnecessary(t *testing.T) 
 
 // 各 required key が1つでも SSM に存在しなければ起動エラー。Slack・Mastodon の片側だけ設定された
 // 部分設定（token だけ / channel だけ、server だけ / accessToken だけ）も全てここで捕捉される。
-// 部分設定を理由に adapter を黙って無効化して正常起動してはならない（レビュー指摘2）。
+// 部分設定を理由に adapter を黙って無効化して正常起動してはならない。
 func TestCheckWorkerSecrets_RequiredMissingErrors(t *testing.T) {
 	cases := []struct {
 		name string

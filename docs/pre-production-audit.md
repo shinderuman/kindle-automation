@@ -1,11 +1,50 @@
-# 本番稼働前監査結果と AWS 疎通 checklist
+# 本番開始前チェックリスト（リリースゲート）
 
-本番稼働前のローカル完了工程における `SPECIFICATION.md` 全項目監査の結果と、
-実 AWS 環境だけで完結する項目の疎通 checklist。業務仕様は `SPECIFICATION.md` を正とする。
+本書は現行コードと本番環境に対する本番開始前のチェックリスト（リリースゲート）である。
+業務仕様は `SPECIFICATION.md` を正とし、本書は検証項目と実行コマンドを示す。
+運用手順の詳細は `docs/operations.md`、本番 Lambda 構成は `AGENTS.md` §1 を参照。
 
-## 1. 監査サマリ（§1〜§27）
+## 1. ローカル品質ゲート（offline）
 
-実装済みかつ問題なしと確認した主な領域（証拠は該当ファイル）:
+デプロイ前に次を実行し、全て通過すること（`AGENTS.md` §12、`docs/operations.md` §1.1）。
+これらは実 AWS・Amazon・Slack・Mastodon・GitHub へアクセスしない offline 検証である（`AGENTS.md` §11）。
+
+```bash
+gofmt -l $(rg --files -g '*.go')
+go test ./...
+go vet ./...
+staticcheck ./...
+govulncheck ./...
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/schedule-checks
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
+```
+
+- `gofmt -l` の差分がないこと。
+- test / vet / staticcheck / govulncheck の error と warning が 0 件であること。
+- 提出前確認では `go test -race ./...` を使う。
+- 各 tool が未導入の場合は確認済み扱いせず、未実行理由を明示する（`AGENTS.md` §12）。
+
+## 2. live smoke（明示 opt-in、外部通信）
+
+`go test ./...` には含まれない、実 Amazon.co.jp へ接続する live smoke を置いている。
+build tag `livesmoke` を付けたときだけ compile され、通常の offline gate からは完全に除外される
+（`internal/amazon/live_smoke_test.go`、`AGENTS.md` §11）。
+
+```bash
+go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
+```
+
+- 役割: 実HTMLに対する selector 有効性・通信到達性・要求 ASIN 一致・Kindle 価格が正値 など、
+  変動しない安定構造だけを検証する。変動値（価格絶対値・ポイント・クーポンの有無と値）は固定 assert しない。
+- block/CAPTCHA や要件不満足時は分類結果と取得できなかった事実を報告し、assert を黙って弱めて通過させない。
+- 第三の本番 Lambda entrypoint は追加せず、production の `internal/amazon` 実装をそのまま通す。
+- 外部通信が必要なため CI・offline gate には含めず、任意実行とする。
+- 時点固定の観測結果（特定 commit・date での実行結果）を記録する場合は commit/date を明示し、
+  恒久的な gate 要件へ混ぜない。
+
+## 3. コード不変条件（仕様カバレッジ）
+
+現行コードが満たすべき不変条件。該当ファイルを実装の正として確認する。
 
 | SPEC 範囲 | 確認内容 | 主な確認先 |
 |---|---|---|
@@ -16,68 +55,58 @@
 | §9.5 / §10 | If-Match 条件付き書き込み, 412 時最大3回再 merge, Upcoming ETag 不変時のみ空配列化 | `internal/storage/merge.go`, `internal/storage/highlevel.go` |
 | §11.3 | 404/asin_mismatch/not_kindle/permanent 4xx=terminal, 403/429/5xx/timeout/CAPTCHA/body超過/構造欠落/解析失敗=retryable | `internal/amazon/client.go`, `internal/amazon/response.go`, 各 application |
 | §12.3 / §12.4 / §12.5 | セール4条件の独立性, 紙書籍価格不使用, セール成立時も MaxPrice/CurrentPrice 更新, 価格変動通知との排他 | `internal/domain/sale/sale.go`, `internal/domain/book/book.go`, `internal/application/sale/sale.go` |
+| §13.3 | 対象作者名と contributor 表記を正規化した完全名同士で完全一致比較する。空白トークン部分一致は行わず、姓だけ同一の別人を誤検出しない | `internal/application/newrelease/newrelease.go` |
 | §13 | 検索→result/detail の2段階, 検索 job は S3 保存・通知しない | `internal/application/newrelease/newrelease.go` |
 | §15 | S3 全体から Gist 再生成, gist_type ごとの決定 ID | `internal/gist/gist.go`, `internal/gist/markdown.go` |
 | §17.2 | Alarm 3種が ALARM 遷移時のみ schedule-checks 起動, OKActions なし | `infra/template.yaml`, `internal/lambda/schedulechecks/handler.go` |
 | §18.1 | 共通ログ field 一式, ErrorCount metric filter | `internal/lambda/checkworker/handler.go`, `infra/template.yaml` |
 | §19 | SSM secure→plain fallback, GetParametersByPath 不使用, IAM 関数別 | `internal/config/ssm.go`, `infra/template.yaml` |
 
-致命的な仕様不一致は検出されなかった。
+上記に違反する実装がないことを確認する。
 
-## 2. 本パスで修正した項目
+## 4. 既知の未決定・未検証項目
 
-| 項目 | SPEC | 修正内容 |
+| 項目 | SPEC | 現状と検証条件 |
 |---|---|---|
-| 新刊作者名一致判定 | §13.3 | `AuthorMatches` を「含む」(Contains) 判定へ修正。SPEC と既存Go実装(`isNameMatched`)が一致し、現行実装は完全一致へ逸脱していた。テスト追加。 |
-| body 超過時の HTTP 計測値 | §11.3 / §18.1 | body 8 MiB 超過を retryable 結果へ変換し `http_status`/`response_bytes` を保持。従来は空 `FetchResult` + error で計測値が 0 になった。テスト更新。 |
-| §22.2 fixture test の不足 | §22.2 | 検索発売日あり/なし, Kindleスウォッチ欠落, ポイントなし, CAPTCHA 由来明示を追加。実HTML不可分は最小合成fixtureで分類を保証。 |
-| govulncheck 標準ライブラリ脆弱性 | §12 / §23 | 13件(すべて go1.25.5 標準ライブラリ)を `toolchain go1.25.12` で解消。 |
-| `.golangci.yml` の §2 記載 | AGENTS.md §2 / §12 | §12 品質コマンドは golangci-lint を含まずファイルも不存在のため、§2 ツリーの `.golangci.yml` 行を削除し実態へ整合。 |
-| 切り替え backup/rollback の Versioning 方針 | §20.3 / §20.4 | backup prefix copy を廃止し、bucket Versioning=Enabled を前提に現 VersionId 記録→version 指定の選択的復元へ統一。Versioning 非 Enabled は切り替え中止。SPEC/operations/pre-production を整合。S3 書込契約(§9.5)は不変。 |
+| `SearchProduct.ItemType` 未使用 | §7.2 / §13.4 | 定義されるが値の enum が SPEC に未定義。現状 `IsKindle=true`(digital-text 固定)が同等情報を担い、非機能的影響はない。推測値の設定や schema 削除は仕様判断待ち。 |
+| 実HTML fixture の拡充 | §22.2 | 検索ページ/CAPTCHA/404等の実HTMLは現時点で test 環境に不存在。自動テストから Amazon へアクセスできないため最小合成fixture で代用中。取得後 `testdata/amazon` へ保存し合成fixture を実fixture へ置き換える。実HTML構造の検証は live smoke(§2) と実fixture 取得が条件。 |
 
-## 3. 判断待ち（ローカル修正可能だが仕様判断を保留）
+## 5. AWS 環境でのみ検証する項目
 
-| 項目 | SPEC | 現状と保留理由 |
-|---|---|---|
-| `SearchProduct.ItemType` 未使用 | §7.2 / §13.4 | `job.SearchProduct.ItemType` は定義されるが値の enum が SPEC に未定義で、現状 `IsKindle=true`(digital-text 固定)が同等情報を担う。非機能的影響なし。推測値の設定や schema 削除は仕様判断待ち。 |
-| 実HTML fixture の拡充 | §22.2 | 検索ページ/CAPTCHA/404等の実HTMLは test 環境に不存在。自動テストから Amazon へアクセスできないため、最小合成fixture で代用している。実HTML構造の検証は実fixture取得後。 |
+コード単体では完結しない項目。`SPECIFICATION.md` §20.3 切り替え手順・§24 step12 に沿って実施する。
 
-## 4. AWS 環境だけで必要な疎通 checklist
-
-コードでは完結しない項目。`SPECIFICATION.md` §20.3 切り替え手順・§24 step12 に沿って実施する。
-
-### 4.1 SAM デプロイ・CFn 検証
-- [ ] SAM CLI 導入後、`sam validate --profile <P> --region <R>` で template 妥当性確認（本工程では SAM CLI 未導入のため未実行）。
-- [ ] `./scripts/deploy.sh --stage build` → `package`（build 済み template を package）→ `changeset`（execute なし）で change set を作成し、内容を確認。
-- [ ] `--stage deploy` が changeset 段階で確認した同一 change set のみを execute すること（sam deploy で別 change set を作らない）。`scripts/deploy_test.sh` で stub 検証済み。
-- [ ] `--stage all` が build → package → changeset で停止し deploy しないこと（`scripts/deploy_test.sh` で stub 検証済み）。
+### 5.1 SAM デプロイ・CFn 検証
+- [ ] SAM CLI で `sam validate --profile <P> --region <R>` を実行し template 妥当性を確認する。
+- [ ] `./scripts/deploy.sh --stage build`（`--profile`/`--region` 必須）で sam build が成功すること。
+- [ ] `--stage deploy` が sam deploy の change set 確認プロンプトを表示し、確認後に同じ sam deploy で適用すること（`scripts/deploy_test.sh` で stub 検証済み）。
+- [ ] `--stage all` が sam build 後に sam deploy を実行すること（`scripts/deploy_test.sh` で stub 検証済み）。
 - [ ] SAM BuildMethod: makefile が両 Lambda の `bootstrap` を生成すること（ローカル Makefile target で生成済み、sam build での連結は AWS 側で確認）。
 - [ ] deploy 後、2 Log Group(保持30日), Work/DLQ FIFO, Scheduler DLQ Standard, MetricFilter→ErrorCount, Alarm 3種, Role 3種が作成されること。
 
-### 4.2 EventBridge Scheduler
+### 5.2 EventBridge Scheduler
 - [ ] Scheduler 実行時に `<aws.scheduler.scheduled-time>` が入力 JSON へ展開されること。
 - [ ] 同一 Scheduler 再試行で `cycle_id` が同一になること。
 - [ ] `SchedulersEnabled` default false で3 Scheduler が無効状態で作成されること。
 - [ ] Scheduler RetryPolicy(maxRetry=3, maxEventAge=240), Scheduler DLQ が設定どおりこと。
 
-### 4.3 SQS / S3 / SSM 実動作
+### 5.3 SQS / S3 / SSM 実動作
 - [ ] Work Queue の MessageGroupId `amazon-requests` 排他で Amazon リクエストが直列化されること。
 - [ ] maxReceiveCount=5 到達で DLQ へ移行すること。
 - [ ] S3 `If-Match` 条件付き書き込みで 412 発生時、最大3回再 merge されること（MemStore テスト済み、実S3で確認）。
 - [ ] SSM `/myapp/secure/{KEY}` → `ParameterNotFound` 時 `/myapp/plain/{KEY}` へ fallback すること。SecureString が customer managed KMS の場合は `kms:Decrypt` 追加要否を確認。
 
-### 4.4 Alarm → 通知連携
+### 5.4 Alarm → 通知連携
 - [ ] Work DLQ / Scheduler DLQ / Work Queue 滞留(7200秒) の各 Alarm が ALARM 遷移時に `schedule-checks` を起動すること。
 - [ ] 同じ Alarm 状態で通知が増殖しないこと。
 - [ ] OK 遷移では `schedule-checks` を起動しないこと。
 
-### 4.5 実 HTTP・外部API
-- [ ] Lambda 環境から Amazon.co.jp への到達性と、実HTMLに対する各 selector の有効性（検索発売日 `nth-child`, `#detailBullets_feature_div` fallback, CAPTCHA/access-denied marker）。実HTML fixture を取得し `testdata/amazon` へ保存して自動テストを補強する。
+### 5.5 実 HTTP・外部API
+- [ ] Lambda 環境から Amazon.co.jp への到達性と、実HTMLに対する各 selector の有効性（検索発売日 `nth-child`, CAPTCHA/access-denied marker）。実HTML構造の検証は live smoke(§2) と実fixture 取得後に完結する。
 - [ ] Slack/Mastodon/GitHub Gist API への実際の送信・更新。
 
-### 4.6 切り替え手順（§20.3）
+### 5.6 切り替え手順（§20.3）
 - [ ] Scheduler 無効状態で deploy。
-- [ ] 対象 bucket の Versioning が `Enabled` であることを確認（read-only）。`Suspended`/未設定なら切り替え中止。本監査時点では `codex-user` の権限不足（AccessDenied）で未確認。
+- [ ] 対象 bucket の Versioning が `Enabled` であることを確認（read-only）。`Suspended`/未設定なら切り替え中止。確認には `s3:GetBucketVersioning` 権限のある profile が必要（権限不足の profile では AccessDenied で確認できない）。
 - [ ] Versioning=Enabled を確認したら backup prefix copy は作らず、対象 object の現時点 VersionId を記録（docs/operations.md §5.0）。
 - [ ] 既存3 Checker の EventBridge trigger を無効化。
 - [ ] `migrate-maxprice` dry-run → apply（§20.2, docs/operations.md §5）。

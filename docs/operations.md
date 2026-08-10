@@ -15,10 +15,11 @@
 
 ## 1. デプロイ（前後確認）
 
-`scripts/deploy.sh` は build / package / changeset / deploy を分離する。
-`all` は build → package → changeset までで停止し、deploy は行わない。
-deploy 段階は sam deploy で別 change set を作らず、changeset 段階で作成して人間が確認した
-同一 change set を `execute-change-set` で適用するだけとする。
+`scripts/deploy.sh` は AWS SAM 標準フロー（sam build / sam deploy）の薄い wrapper である。
+build / deploy を個別に、または `all` で連続実行できる。
+deploy は sam deploy 自身の change set 確認プロンプト（`infra/samconfig.toml` の
+`confirm_changeset`）で人間が変更内容を確認してから、同じ sam deploy が適用する。
+自前の package・change set 管理・state file は持たない。
 default で `SchedulersEnabled=false`（Scheduler 無効）を想定する。
 
 ### 1.1 ローカル品質確認（デプロイ前に必須）
@@ -33,36 +34,25 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 
 `gofmt -l` が空、test / vet / staticcheck / govulncheck の error と warning が0件であることを確認する。
 
-### 1.2 build → package → change set 確認
+### 1.2 build
 
 ```bash
 ./scripts/deploy.sh --profile <P> --region <R> --stage build
-./scripts/deploy.sh --profile <P> --region <R> --stage package
-./scripts/deploy.sh --profile <P> --region <R> --stage changeset
 ```
 
-- `package` は `sam build` で生成した build 済み template（`.aws-sam/build/template.yaml`）を
-  package し、build 済み `bootstrap` を含めた成果物を S3 へ上げる。
-- `changeset` は change set を作成（execute なし）し、change set id を
-  `.aws-sam/changeset.state` へ保存する。deploy はこの id を使うため、
-  changeset と deploy は同一の working tree で行うこと。
+- `sam build` で Lambda バイナリ等を build し、build 済み template（`.aws-sam/template.yaml`）へ出力する。deploy はしない。
 
-change set 作成後、適用前に内容を確認する。id は `changeset` 段階の標準出力にも表示される。
-
-```bash
-aws cloudformation describe-change-set \
-  --change-set-name <ChangeSetId> --profile <P> --region <R>
-```
-
-### 1.3 deploy（適用）
+### 1.3 deploy（確認プロンプト付き適用）
 
 ```bash
 ./scripts/deploy.sh --profile <P> --region <R> --stage deploy
 ```
 
-deploy は 1.2 で確認した同一 change set のみを execute する。
-change set が無い、または状態が `CREATE_COMPLETE` 以外（失敗・未確認）のときは execute しない。
-変更を取り消したい場合は再度 `--stage changeset` を実行して新しい change set を作り直すこと。
+- `sam deploy` は build 済み template（`.aws-sam/template.yaml`）を適用する。`sam deploy` は build しないため、単体実行時は先に `--stage build` を実行すること（build 後に連続実行する場合は `--stage all`）。
+- `sam deploy` が change set を作成・表示し、確認後に同じ sam deploy が適用する。
+  安定設定（stack 名・`capabilities`・`confirm_changeset`）は `infra/samconfig.toml`。
+- 成果物 S3 bucket は `--s3-bucket BUCKET`、未指定時は `--resolve-s3`。
+- Parameter override は `--parameter-override K=V`（複数指定可）。
 
 ### 1.4 デプロイ後確認
 
@@ -178,7 +168,7 @@ aws s3api head-object --bucket <BUCKET> --key notified_asins.json    --profile <
 
 apply 後の戻しは、記録した VersionId からの選択的復元のみ許容する。配列全体の無条件上書きは禁止する（§4 ロールバック）。
 
-> 注: 本監査時点で `codex-user` profile は `s3:GetBucketVersioning` / `s3:GetLifecycleConfiguration` への権限がなく（AccessDenied）、bucket の Versioning と lifecycle 設定は未確認である。切り替え前に十分な権限のある profile で `Enabled` を確認すること。
+> 注: Versioning 確認には `s3:GetBucketVersioning`、lifecycle 確認には `s3:GetLifecycleConfiguration` 権限が必要で、権限の狭い profile では AccessDenied になる。切り替え前に十分な権限のある profile で `Enabled` を確認すること。
 
 ### 5.1 dry-run（既定）
 

@@ -173,7 +173,7 @@ func TestLogDecodeFailure_EmitsJobErrorWithDecodeType(t *testing.T) {
 }
 
 // 設定読込失敗は level=ERROR・event=job_error・error_type=config_load の構造化ログを1件だけ出す
-// （SPECIFICATION.md 18.1/18.3、レビュー指摘4）。識別子は最初の record から best-effort で埋まる。
+// （SPECIFICATION.md 18.1/18.3）。識別子は最初の record から best-effort で埋まる。
 func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -270,7 +270,7 @@ func TestLogConfigLoadFailure_UndecodableMessageStillLogs(t *testing.T) {
 	}
 }
 
-// raw body・HTML・token・秘密情報はログへ出さない（SPECIFICATION.md 18.1/19、レビュー指摘4）。
+// raw body・HTML・token・秘密情報はログへ出さない（SPECIFICATION.md 18.1/19）。
 func TestLogConfigLoadFailure_OmitsRawBodyAndSecrets(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}

@@ -165,12 +165,9 @@ func extractCoupon(doc *goquery.Document) (bool, string) {
 }
 
 // extractReleaseDate は発売日を UTC 00:00:00 へ正規化して返す。
+// 観測済み primary selector だけを使い、未検証の fallback は持たない。
 func extractReleaseDate(doc *goquery.Document) (time.Time, bool) {
-	text := textOf(doc, selectorReleaseDate)
-	if text == "" {
-		text = textOf(doc, selectorReleaseDateFallback)
-	}
-	return parseReleaseDateOptional(text)
+	return parseReleaseDateOptional(textOf(doc, selectorReleaseDate))
 }
 
 // extractSearchHit は検索結果1件から値を抽出する。

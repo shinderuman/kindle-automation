@@ -68,7 +68,7 @@ func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error
 func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) error {
 	// 可変 S3 設定を invocation ごとに最新へ反映する（cold start に固定しない）。
 	// 読込失敗時も record 処理は開始せず Lambda error で SQS 再試行させる既存挙動を維持しつつ、
-	// level=ERROR の job_error 構造化ログを1件残す（SPECIFICATION.md 18.1/18.3、レビュー指摘4）。
+	// level=ERROR の job_error 構造化ログを1件残す（SPECIFICATION.md 18.1/18.3）。
 	if err := w.refreshVariableConfig(ctx); err != nil {
 		w.logConfigLoadFailure(ctx, event, err)
 		return fmt.Errorf("load variable config: %w", err)
@@ -141,7 +141,7 @@ func (w *Worker) logDecodeFailure(ctx context.Context, record events.SQSMessage,
 }
 
 // logConfigLoadFailure は可変設定（checker_configs/excluded_title_keywords）の読込失敗を job_error として出す
-// （SPECIFICATION.md 18.1/18.3、レビュー指摘4）。設定読込は record 処理より前に行われるため job は未確定。
+// （SPECIFICATION.md 18.1/18.3）。設定読込は record 処理より前に行われるため job は未確定。
 // invocation 内の最初の record を best-effort で decode して識別子を埋め、decode 不能でもログ自体は失わない。
 // 値の無い http_status/duration_ms/response_bytes は既存契約に従い空・0 とする。raw body・HTML・token・
 // 秘密情報は出さない。読込失敗ごとに1回だけ呼ばれ、同一失敗で ERROR を複数出さない。

@@ -13,7 +13,7 @@
 //
 // 検証方針: 変動する値（クーポン・ポイントの有無・値・還元率、価格の絶対値）を固定 assert せず、
 // 通信成功・CAPTCHA/access denied でない・要求ASIN一致・タイトル取得・Kindle価格が正値、という
-// 安定した構造だけを検証する（USER_REQUEST）。Amazon 側の block/CAPTCHA が起きた場合は
+// 安定した構造だけを検証する。Amazon 側の block/CAPTCHA が起きた場合は
 // 分類結果と取得できなかった事実を報告し、要件を弱めて通過させない。
 package amazon
 
@@ -32,7 +32,9 @@ func liveSmokeClient() *Client {
 }
 
 // TestLiveSmoke_Product_B0FX3X569X は固定例のKindle商品ページを取得し、安定構造を検証する。
-// 価格は正値を要求するが、ポイントの値は固定 assert しない（USER_REQUEST）。
+// 新刊detail で必須の Kindleスウォッチ・発売日・contributor を通信/非block/ASIN/タイトル/正価格に加えて assert する。
+// 価格は正値を要求するが、ポイント・クーポンの値は固定 assert しない。
+// 実ページが要件を満たさない場合は事実を報告し、assert を黙って弱めない。
 func TestLiveSmoke_Product_B0FX3X569X(t *testing.T) {
 	const asin = "B0FX3X569X"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
@@ -57,15 +59,68 @@ func TestLiveSmoke_Product_B0FX3X569X(t *testing.T) {
 	if !info.CurrentPrice.Valid() || info.CurrentPrice.Yen() <= 0 {
 		t.Errorf("Kindle価格が取得できないか0円: CurrentPrice=%+v (0円として保存してはならない)", info.CurrentPrice)
 	}
+	if !info.HasKindleSwatch {
+		t.Errorf("HasKindleSwatch = false, want true (新刊detail でKindle版スウォッチが必須)")
+	}
+	if !info.HasReleaseDate || info.ReleaseDate.IsZero() {
+		t.Errorf("HasReleaseDate=%v ReleaseDate=%v, want 発売日取得済みかつ非zero (新刊detail 必須)",
+			info.HasReleaseDate, info.ReleaseDate)
+	}
+	if len(info.Contributors) == 0 {
+		t.Errorf("Contributors が空 (新刊detail で #bylineInfo a のcontributorが必須)")
+	}
 	// ポイント・クーポンは変動するため値・存在を固定 assert しない。観測値をログへ残すだけ。
 	t.Logf("B0FX3X569X 構造OK: title=%q kindlePrice=%.0f points=%d coupon=%v couponText=%q "+
-		"hasKindleSwatch=%v httpStatus=%d bytes=%d",
+		"hasKindleSwatch=%v hasReleaseDate=%v releaseDate=%v contributors=%d httpStatus=%d bytes=%d",
 		info.Title, info.CurrentPrice.Yen(), info.Points, info.Coupon, info.CouponText,
-		info.HasKindleSwatch, result.HTTPStatus, result.ResponseBytes)
+		info.HasKindleSwatch, info.HasReleaseDate, info.ReleaseDate, len(info.Contributors),
+		result.HTTPStatus, result.ResponseBytes)
+}
+
+// TestLiveSmoke_Product_4434361325_PaperToKindle は実紙商品ページからKindle版候補を確認する。
+// fixture(testdata/amazon/paper_4434361325.html)由来の ASIN を実HTTPで確認し、要求紙ASIN・タイトル・
+// 紙/Kindle両スウォッチ・KindleSwatchASIN が非空かつ紙ASINと不同であることを assert する。
+// 現時点で商品が使えない（block/状態変化等）場合は事実を報告し、根拠なく別ASINへ差し替えない。
+func TestLiveSmoke_Product_4434361325_PaperToKindle(t *testing.T) {
+	const paperASIN = "4434361325"
+	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
+	defer cancel()
+
+	result, err := liveSmokeClient().FetchProduct(ctx, paperASIN)
+	if err != nil {
+		t.Fatalf("FetchProduct %s returned transport error (block/timeout/通信失敗): %v", paperASIN, err)
+	}
+	if result.Category != CategoryOK {
+		t.Fatalf("FetchProduct %s Category=%s (HTTPStatus=%d bytes=%d): block/CAPTCHA/短い本文/要素欠落の可能性",
+			paperASIN, categoryName(result.Category), result.HTTPStatus, result.ResponseBytes)
+	}
+	info := result.Info
+	if info.ASIN != paperASIN {
+		t.Errorf("要求紙ASIN不一致: Info.ASIN=%q, want %s", info.ASIN, paperASIN)
+	}
+	if info.Title == "" {
+		t.Errorf("Title が取得できない(必須構造 #productTitle 欠落)")
+	}
+	if !info.HasPaperSwatch {
+		t.Errorf("HasPaperSwatch = false, want true (実紙商品ページで紙スウォッチが必須)")
+	}
+	if !info.HasKindleSwatch {
+		t.Errorf("HasKindleSwatch = false, want true (Paper→Kindle候補のKindle版スウォッチが必須)")
+	}
+	if info.KindleSwatchASIN == "" {
+		t.Errorf("KindleSwatchASIN が空 (Paper→KindleでKindle版ASINが必須)")
+	}
+	if info.KindleSwatchASIN == paperASIN {
+		t.Errorf("KindleSwatchASIN=%q が要求紙ASIN %s と一致(不同であること)", info.KindleSwatchASIN, paperASIN)
+	}
+	t.Logf("4434361325 構造OK: title=%q hasPaperSwatch=%v hasKindleSwatch=%v kindleSwatchASIN=%q "+
+		"httpStatus=%d bytes=%d",
+		info.Title, info.HasPaperSwatch, info.HasKindleSwatch, info.KindleSwatchASIN,
+		result.HTTPStatus, result.ResponseBytes)
 }
 
 // TestLiveSmoke_Product_B0CX8CD1XL_CouponObserve はクーポン解析の観測例を取得する。
-// クーポン不在でも失敗にしない（USER_REQUEST）。通信成功と要求ASINだけを検証する。
+// クーポン不在でも失敗にしない。通信成功と要求ASINだけを検証する。
 func TestLiveSmoke_Product_B0CX8CD1XL_CouponObserve(t *testing.T) {
 	const asin = "B0CX8CD1XL"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)

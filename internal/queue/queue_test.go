@@ -1,10 +1,15 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,17 +19,25 @@ import (
 )
 
 type stubSQS struct {
-	batches  [][]sqstypes.SendMessageBatchRequestEntry
-	failIDs  map[string]string // entry Id -> error message
-	failErr  error             // SendMessageBatch 自体のエラー
-	queueURL string
+	batches     [][]sqstypes.SendMessageBatchRequestEntry
+	failIDs     map[string]string // entry Id -> error message
+	failErr     error             // 毎回返す SendMessageBatch 自体のエラー
+	failOnCall  int               // failCallErr を返す呼び出し(0始まり)。負で無効。
+	failCallErr error             // 指定呼び出しだけ返すエラー
+	calls       int
+	queueURL    string
 }
 
 func (s *stubSQS) SendMessageBatch(_ context.Context, in *sqs.SendMessageBatchInput, _ ...func(*sqs.Options)) (*sqs.SendMessageBatchOutput, error) {
 	s.queueURL = aws.ToString(in.QueueUrl)
+	idx := s.calls
+	s.calls++
 	s.batches = append(s.batches, in.Entries)
 	if s.failErr != nil {
 		return nil, s.failErr
+	}
+	if s.failCallErr != nil && idx == s.failOnCall {
+		return nil, s.failCallErr
 	}
 	var failed []sqstypes.BatchResultErrorEntry
 	for _, e := range in.Entries {
@@ -122,4 +135,110 @@ func TestDeduplicationID_IsSHA256LowerHex(t *testing.T) {
 func sha256sum(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// TestEnqueueBatch_BoundariesAndOrder は 0/10/11/20/21 件の境界で batch 数が正しく、
+// 各 batch が10件以下で、入力順が MessageBody の並びで保存されることを検証する（SPECIFICATION.md 7.3）。
+func TestEnqueueBatch_BoundariesAndOrder(t *testing.T) {
+	cases := []struct {
+		n         int
+		wantBatch int
+		wantCall  int
+	}{
+		{0, 0, 0},
+		{10, 1, 1},
+		{11, 2, 2},
+		{20, 2, 2},
+		{21, 3, 3},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("n=%d", tc.n), func(t *testing.T) {
+			s := &stubSQS{}
+			enq := NewEnqueuer(s, "queue-url", nil)
+			jobs := make([]job.Job, tc.n)
+			for i := range jobs {
+				jobs[i] = sampleJob(fmt.Sprintf("id-%03d", i), job.KindSaleCheck)
+			}
+			if err := enq.EnqueueBatch(context.Background(), jobs); err != nil {
+				t.Fatalf("EnqueueBatch: %v", err)
+			}
+			if s.calls != tc.wantCall {
+				t.Errorf("calls = %d, want %d", s.calls, tc.wantCall)
+			}
+			if len(s.batches) != tc.wantBatch {
+				t.Errorf("batches = %d, want %d", len(s.batches), tc.wantBatch)
+			}
+			for i, b := range s.batches {
+				if len(b) > 10 {
+					t.Errorf("batch %d size = %d, max 10", i, len(b))
+				}
+			}
+			var got []string
+			for _, b := range s.batches {
+				for _, e := range b {
+					var jb struct {
+						JobID string `json:"job_id"`
+					}
+					if err := json.Unmarshal([]byte(aws.ToString(e.MessageBody)), &jb); err != nil {
+						t.Fatalf("unmarshal body: %v", err)
+					}
+					got = append(got, jb.JobID)
+				}
+			}
+			if len(got) != tc.n {
+				t.Errorf("enqueued = %d, want %d", len(got), tc.n)
+			}
+			for i := range got {
+				want := fmt.Sprintf("id-%03d", i)
+				if got[i] != want {
+					t.Errorf("order[%d] = %q, want %q", i, got[i], want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestEnqueueBatch_MidBatchFailureStopsAndReturnsError は2件目の batch が失敗したとき
+// 3件目を送信せず error を返すことを検証する（SPECIFICATION.md 7.3、AGENTS.md 4）。
+func TestEnqueueBatch_MidBatchFailureStopsAndReturnsError(t *testing.T) {
+	s := &stubSQS{failOnCall: 1, failCallErr: errors.New("batch 2 down")}
+	enq := NewEnqueuer(s, "queue-url", nil)
+	jobs := make([]job.Job, 25)
+	for i := range jobs {
+		jobs[i] = sampleJob(fmt.Sprintf("id-%03d", i), job.KindSaleCheck)
+	}
+	err := enq.EnqueueBatch(context.Background(), jobs)
+	if err == nil {
+		t.Fatal("want error when a mid batch fails")
+	}
+	// 25件は 10+10+5。2件目(呼び出し1)で失敗するため3件目は送信しない。
+	if s.calls != 2 {
+		t.Errorf("calls = %d, want stop after 2", s.calls)
+	}
+	if len(s.batches) != 2 {
+		t.Errorf("batches = %d, want 2", len(s.batches))
+	}
+}
+
+// TestSendBatch_LogsFailedEntries は logger 設定時に失敗 entry を構造化ログへ出力することを検証する。
+func TestSendBatch_LogsFailedEntries(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	s := &stubSQS{failIDs: map[string]string{"0": "boom"}}
+	enq := NewEnqueuer(s, "queue-url", logger)
+	err := enq.Enqueue(context.Background(), sampleJob("sale:c:B0LOGTEST01", job.KindSaleCheck))
+	if err == nil {
+		t.Fatal("want error for failed entry")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "sqs batch entry failed") {
+		t.Errorf("log missing entry-failed event: %s", out)
+	}
+	if !strings.Contains(out, "boom") {
+		t.Errorf("log missing entry message: %s", out)
+	}
+	if !strings.Contains(out, "InternalError") {
+		t.Errorf("log missing entry code: %s", out)
+	}
 }

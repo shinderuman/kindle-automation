@@ -3,6 +3,7 @@ package job
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,9 @@ func TestDecode(t *testing.T) {
 		{name: "未対応versionはUnsupportedVersion", data: `{"version":2,"kind":"sale_check"}`, wantErr: ErrUnsupportedVersion},
 		{name: "未知kindはUnknownKind", data: `{"version":1,"kind":"unknown"}`, wantErr: ErrUnknownKind},
 		{name: "必須field欠落はMissingField", data: `{"version":1,"kind":"sale_check","target":{}}`, wantErr: ErrMissingField},
+		{name: "version欠落はUnsupportedVersion", data: `{"kind":"sale_check","target":{"asin":"B0FX3X569X"}}`, wantErr: ErrUnsupportedVersion},
+		{name: "ASIN形式不正はInvalidASIN", data: `{"version":1,"kind":"sale_check","target":{"asin":"short"}}`, wantErr: ErrInvalidASIN},
+		{name: "new_release_resultのitem_type空はInvalidItemType", data: `{"version":1,"kind":"new_release_result","target":{"asin":"B0FX3X569X","author_name":"海李","product":{"asin":"B0FX3X569X","item_type":""}}}`, wantErr: ErrInvalidItemType},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -168,6 +172,42 @@ func TestEncodeOmitsUnusedTargetFields(t *testing.T) {
 			job:    validBaseJob(KindSaleCheck, Target{ASIN: "B0FX3X569X"}),
 			keys:   []string{"asin"},
 			extras: []string{"source_asin", "author_name", "product", "gist_type"},
+		},
+		{
+			name:   "sale_finalizeはtargetにfieldを出力しない",
+			job:    validBaseJob(KindSaleFinalize, Target{}),
+			keys:   nil,
+			extras: []string{"asin", "source_asin", "author_name", "product", "gist_type"},
+		},
+		{
+			name:   "new_release_searchはtargetにauthor_nameだけを出力する",
+			job:    validBaseJob(KindNewReleaseSearch, Target{AuthorName: "海李"}),
+			keys:   []string{"author_name"},
+			extras: []string{"asin", "source_asin", "product", "gist_type"},
+		},
+		{
+			name:   "new_release_resultはtargetにasinとauthor_nameとproductを出力する",
+			job:    validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李", Product: &SearchProduct{ASIN: "B0FX3X569X", ItemType: ItemTypeKindle}}),
+			keys:   []string{"asin", "author_name", "product"},
+			extras: []string{"source_asin", "gist_type"},
+		},
+		{
+			name:   "new_release_detailはtargetにasinとauthor_nameを出力する",
+			job:    validBaseJob(KindNewReleaseDetail, Target{ASIN: "B0FX3X569X", AuthorName: "海李"}),
+			keys:   []string{"asin", "author_name"},
+			extras: []string{"source_asin", "product", "gist_type"},
+		},
+		{
+			name:   "paper_to_kindle_checkはtargetにasinだけを出力する",
+			job:    validBaseJob(KindPaperToKindleCheck, Target{ASIN: "B0FX3X569X"}),
+			keys:   []string{"asin"},
+			extras: []string{"source_asin", "author_name", "product", "gist_type"},
+		},
+		{
+			name:   "paper_to_kindle_detailはtargetにasinとsource_asinを出力する",
+			job:    validBaseJob(KindPaperToKindleDetail, Target{ASIN: "B0FX3X569X", SourceASIN: "B0PAPER001"}),
+			keys:   []string{"asin", "source_asin"},
+			extras: []string{"author_name", "product", "gist_type"},
 		},
 		{
 			name:   "gist_updateはtargetにgist_typeだけを出力する",
@@ -246,5 +286,64 @@ func TestEncodeScheduledAtAsRFC3339(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"scheduled_at":"2026-07-23T00:00:00Z"`) {
 		t.Fatalf("Encode scheduled_at not RFC3339 UTC: %s", data)
+	}
+}
+
+// TestEncodeDecodeRoundTrip_AllKinds は全8 kindについて encode→decode→検証が成功し、
+// 各 field が往復で保存されることを検証する（SPECIFICATION.md 7.2）。
+func TestEncodeDecodeRoundTrip_AllKinds(t *testing.T) {
+	product := &SearchProduct{
+		ASIN: "B0FX3X569X", Title: "T", URL: "https://example.jp/u",
+		KindlePrice: 759, ReleaseDate: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		AuthorLabel: "海李", ItemType: ItemTypeKindle,
+	}
+	cases := []struct {
+		name string
+		job  Job
+	}{
+		{"sale_check", validBaseJob(KindSaleCheck, Target{ASIN: "B0FX3X569X"})},
+		{"sale_finalize", validBaseJob(KindSaleFinalize, Target{})},
+		{"new_release_search", validBaseJob(KindNewReleaseSearch, Target{AuthorName: "海李"})},
+		{"new_release_result", validBaseJob(KindNewReleaseResult, Target{ASIN: "B0FX3X569X", AuthorName: "海李", Product: product})},
+		{"new_release_detail", validBaseJob(KindNewReleaseDetail, Target{ASIN: "B0FX3X569X", AuthorName: "海李"})},
+		{"paper_to_kindle_check", validBaseJob(KindPaperToKindleCheck, Target{ASIN: "B0FX3X569X"})},
+		{"paper_to_kindle_detail", validBaseJob(KindPaperToKindleDetail, Target{ASIN: "B0FX3X569X", SourceASIN: "B0PAPER001"})},
+		{"gist_update", validBaseJob(KindGistUpdate, Target{GistType: "sale"})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := tc.job.Encode()
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			got, err := Decode(data)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("Validate after decode: %v", err)
+			}
+			if got.Version != tc.job.Version {
+				t.Errorf("Version = %d, want %d", got.Version, tc.job.Version)
+			}
+			if got.Kind != tc.job.Kind {
+				t.Errorf("Kind = %q, want %q", got.Kind, tc.job.Kind)
+			}
+			if got.JobID != tc.job.JobID {
+				t.Errorf("JobID = %q, want %q", got.JobID, tc.job.JobID)
+			}
+			if got.CycleID != tc.job.CycleID {
+				t.Errorf("CycleID = %q, want %q", got.CycleID, tc.job.CycleID)
+			}
+			if got.CheckType != tc.job.CheckType {
+				t.Errorf("CheckType = %q, want %q", got.CheckType, tc.job.CheckType)
+			}
+			if !got.ScheduledAt.Equal(tc.job.ScheduledAt) {
+				t.Errorf("ScheduledAt = %v, want %v", got.ScheduledAt, tc.job.ScheduledAt)
+			}
+			if !reflect.DeepEqual(got.Target, tc.job.Target) {
+				t.Errorf("Target = %+v, want %+v", got.Target, tc.job.Target)
+			}
+		})
 	}
 }

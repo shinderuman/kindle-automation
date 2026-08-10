@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# scripts/deploy_test.sh — deploy.sh の回帰テスト。
-# sam / aws / date を stub 化し、AWS・S3・実デプロイへ一切アクセスせずに
-# package 対象 template・changeset 作成引数・同一 change set の execute・
-# all の非 deploy・途中失敗時停止・状態不正時の非 execute を検証する。
+# scripts/deploy_test.sh — deploy.sh の引数構成回帰テスト。
+# sam を stub 化し、AWS・S3・実デプロイへ一切アクセスせずに、deploy.sh が
+# sam build / sam deploy を想定どおりの引数で呼ぶことと、必須引数・stage 分岐・
+# 途中失敗停止を検証する。SAM 標準 CLI 呼出しに対する最小の argument test とし、
+# 自前の change set/state file framework は再構築しない。
 # 実行: bash scripts/deploy_test.sh
 set -uo pipefail
 
@@ -12,9 +13,8 @@ PASS=0
 FAIL_COUNT=0
 ERRORS=0
 
-# stub が呼び出しを記録する log と、fake aws の内部状態 dir。各ケースで setup_root が再設定する。
+# stub が呼出を記録する log。各ケースで setup_root が再設定する。
 CALL_LOG=""
-AWS_FAKE_DIR=""
 ROOT=""
 RUN_RC=0
 
@@ -40,23 +40,6 @@ assert_not_contains() {
     fi
 }
 
-assert_var_contains() {
-    # <needle> <var-value> <description>
-    if [[ "$2" == *"$1"* ]]; then
-        echo "  ok: $3"
-    else
-        fail "expected value to contain [$1] — $3"
-    fi
-}
-
-assert_var_not_contains() {
-    if [[ "$2" == *"$1"* ]]; then
-        fail "expected value to NOT contain [$1] — $3"
-    else
-        echo "  ok: $3"
-    fi
-}
-
 assert_rc_zero() {
     if [[ "$RUN_RC" -eq 0 ]]; then
         echo "  ok: $1"
@@ -73,150 +56,60 @@ assert_rc_nonzero() {
     fi
 }
 
-assert_count_eq() {
-    # <needle> <expected> <file> <description>
-    local n
-    n=$(grep -cF -- "$1" "$3" 2>/dev/null || true)
-    if [[ "$n" -eq "$2" ]]; then
-        echo "  ok: $4 ($n)"
-    else
-        fail "expected $2 occurrence(s) of [$1] but got $n — $4"
-    fi
-}
-
 setup_root() {
     ROOT="$(mktemp -d)"
-    mkdir -p "$ROOT/scripts" "$ROOT/infra" "$ROOT/bin" "$ROOT/aws-fake"
+    mkdir -p "$ROOT/scripts" "$ROOT/infra" "$ROOT/bin"
     cp "$SCRIPT" "$ROOT/scripts/deploy.sh"
     chmod +x "$ROOT/scripts/deploy.sh"
     echo "AWSTemplateFormatVersion: '2010-09-09'" > "$ROOT/infra/template.yaml"
     CALL_LOG="$ROOT/call.log"
-    AWS_FAKE_DIR="$ROOT/aws-fake"
     : > "$CALL_LOG"
 
     cat > "$ROOT/bin/sam" <<'SAM_EOF'
 #!/usr/bin/env bash
 echo "sam :: $*" >> "$CALL_LOG"
-if [[ "${FAKE_SAM_BUILD_FAIL:-}" == "1" && "$1" == "build" ]]; then
-    echo "fake sam build failure" >&2
-    exit 1
-fi
-if [[ "${FAKE_SAM_PACKAGE_FAIL:-}" == "1" && "$1" == "package" ]]; then
-    echo "fake sam package failure" >&2
-    exit 1
-fi
-case "$1" in
+sub="$1"
+shift
+case "$sub" in
     build)
+        if [[ "${FAKE_SAM_BUILD_FAIL:-}" == "1" ]]; then
+            echo "fake sam build failure" >&2
+            exit 1
+        fi
+        # sam build --build-dir X は X/template.yaml を生成する（実機準拠）。
         build_dir=""
-        shift
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --build-dir) build_dir="$2"; shift 2 ;;
                 *) shift ;;
             esac
         done
-        mkdir -p "$build_dir/build"
-        echo "Resources: built" > "$build_dir/build/template.yaml"
+        if [[ -n "$build_dir" ]]; then
+            mkdir -p "$build_dir"
+            echo "Resources: built" > "$build_dir/template.yaml"
+        fi
         ;;
-    package)
-        out=""
-        shift
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --output-template-file) out="$2"; shift 2 ;;
-                *) shift ;;
-            esac
-        done
-        mkdir -p "$(dirname "$out")"
-        echo "packaged template" > "$out"
+    deploy)
+        if [[ "${FAKE_SAM_DEPLOY_FAIL:-}" == "1" ]]; then
+            echo "fake sam deploy failure" >&2
+            exit 1
+        fi
         ;;
     *)
-        echo "unexpected sam subcommand: $1" >&2
+        echo "unexpected sam subcommand: $sub" >&2
         exit 1
         ;;
 esac
 exit 0
 SAM_EOF
-
-    cat > "$ROOT/bin/aws" <<'AWS_EOF'
-#!/usr/bin/env bash
-echo "aws :: $*" >> "$CALL_LOG"
-sub="${2:-}"
-shift 2 2>/dev/null || true
-case "$sub" in
-    describe-stacks)
-        stack=""
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --stack-name) stack="$2"; shift 2 ;;
-                *) shift ;;
-            esac
-        done
-        if [[ -f "$AWS_FAKE_DIR/stack-exists-$stack" ]]; then
-            exit 0
-        fi
-        echo "Stack does not exist" >&2
-        exit 1
-        ;;
-    create-change-set)
-        csname=""
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --change-set-name) csname="$2"; shift 2 ;;
-                *) shift ;;
-            esac
-        done
-        id="arn:aws:cloudformation:us-east-1:123456789012:changeSet/${csname}/abc123"
-        echo "CREATE_COMPLETE" > "$AWS_FAKE_DIR/cs-${csname}"
-        echo "$id" > "$AWS_FAKE_DIR/id-${csname}"
-        echo "$id"
-        exit 0
-        ;;
-    wait)
-        if [[ "${FAKE_AWS_WAIT_FAIL:-}" == "1" ]]; then
-            exit 1
-        fi
-        exit 0
-        ;;
-    describe-change-set)
-        status="CREATE_COMPLETE"
-        if [[ -f "$AWS_FAKE_DIR/status-override" ]]; then
-            status="$(cat "$AWS_FAKE_DIR/status-override")"
-        fi
-        echo "$status"
-        exit 0
-        ;;
-    execute-change-set)
-        if [[ "${FAKE_AWS_EXECUTE_FAIL:-}" == "1" ]]; then
-            exit 1
-        fi
-        exit 0
-        ;;
-    *)
-        echo "unexpected aws subcommand: $sub" >&2
-        exit 1
-        ;;
-esac
-AWS_EOF
-
-    cat > "$ROOT/bin/date" <<'DATE_EOF'
-#!/usr/bin/env bash
-echo "20260810120000"
-DATE_EOF
-
     chmod +x "$ROOT/bin/"*
 }
 
 run_deploy() {
-    CALL_LOG="$CALL_LOG" AWS_FAKE_DIR="$AWS_FAKE_DIR" \
+    CALL_LOG="$CALL_LOG" \
         PATH="$ROOT/bin:$ORIG_PATH" \
         "$ROOT/scripts/deploy.sh" "$@" >/dev/null 2>&1
     RUN_RC=$?
-}
-
-read_state() {
-    # <key> <state-file>
-    grep -F "$1=" "$2" | head -1 | cut -d= -f2-
 }
 
 report() {
@@ -229,166 +122,145 @@ report() {
     fi
 }
 
-# T9: CLI 互換性。--help は成功、必須引数欠落・未知 stage は exit 2。
-t9_cli_compatibility() {
+# T1: CLI 互換性。--help は成功、必須引数欠落・未知 stage は exit 2。
+t1_cli_compatibility() {
     ERRORS=0
     setup_root
     run_deploy --help
     assert_rc_zero "--help は成功する"
-    run_deploy --stage build
-    assert_rc_nonzero "必須引数 (--profile/--region) 欠落で非零終了する"
-    # exit 2 を厳密に検証
-    CALL_LOG="$CALL_LOG" AWS_FAKE_DIR="$AWS_FAKE_DIR" \
-        PATH="$ROOT/bin:$ORIG_PATH" \
-        "$ROOT/scripts/deploy.sh" --stage build >/dev/null 2>&1
-    if [[ $? -eq 2 ]]; then echo "  ok: 必須引数欠落は exit 2"; else fail "必須引数欠落の exit code が 2 でない"; fi
+    run_deploy --profile p --region us-east-1
+    assert_rc_nonzero "必須 --stage 欠落で非零終了する"
     run_deploy --profile p --region us-east-1 --stage bogus
     if [[ "$RUN_RC" -eq 2 ]]; then echo "  ok: 未知 stage は exit 2"; else fail "未知 stage の exit code が 2 でない ($RUN_RC)"; fi
-    report "t9_cli_compatibility"
+    run_deploy --stage build
+    if [[ "$RUN_RC" -eq 2 ]]; then echo "  ok: --profile/--region 欠落は exit 2"; else fail "--profile/--region 欠落の exit code が 2 でない ($RUN_RC)"; fi
+    assert_not_contains "sam ::" "$CALL_LOG" "必須引数欠落時は sam を呼ばない"
+    report "t1_cli_compatibility"
 }
 
-# T1: package は build 済み template を --template-file で指定し、元 template を位置引数に渡さない。
-t1_package_uses_built_template() {
+# T2: build は sam build を決まった引数で呼び、build 済み template を出力する。
+t2_build_invokes_sam_build() {
     ERRORS=0
     setup_root
     run_deploy --profile p --region us-east-1 --stage build
     assert_rc_zero "build 成功"
-    run_deploy --profile p --region us-east-1 --stage package
-    assert_rc_zero "package 成功"
-    assert_contains ".aws-sam/build/template.yaml" "$CALL_LOG" "package が build 済み template を参照する"
-    assert_contains "--template-file" "$CALL_LOG" "package が --template-file で template を渡す"
-    pkg_line="$(grep '^sam :: package' "$CALL_LOG" || true)"
-    assert_var_not_contains "infra/template.yaml" "$pkg_line" "package 行に元 template が位置引数として無い"
-    report "t1_package_uses_built_template"
-}
-
-# T2: changeset は package 済み template で change set を作成し、state を保存する。
-t2_changeset_creates_change_set_and_state() {
-    ERRORS=0
-    setup_root
-    run_deploy --profile p --region us-east-1 --stage build
-    run_deploy --profile p --region us-east-1 --stage package
-    run_deploy --profile p --region us-east-1 --stage changeset
-    assert_rc_zero "changeset 成功"
-    assert_contains "create-change-set" "$CALL_LOG" "change set を作成する"
-    assert_contains ".aws-sam/packaged.yaml" "$CALL_LOG" "package 済み template で change set を作成する"
-    assert_contains "--change-set-name cs-kindle-automation-" "$CALL_LOG" "決定的な change set 名を指定する"
-    assert_contains "--stack-name kindle-automation" "$CALL_LOG" "stack 名を明示する"
-    state="$ROOT/.aws-sam/changeset.state"
-    if [[ -f "$state" ]]; then
-        echo "  ok: state file が存在する"
+    assert_contains "sam :: build" "$CALL_LOG" "sam build を呼ぶ"
+    assert_contains "infra/template.yaml" "$CALL_LOG" "build は source の infra/template.yaml を参照する"
+    assert_contains "--build-dir" "$CALL_LOG" "build は --build-dir で出力先を固定する"
+    assert_contains "infra/samconfig.toml" "$CALL_LOG" "build は samconfig.toml を参照する"
+    assert_contains "--profile p" "$CALL_LOG" "build は --profile を渡す"
+    assert_contains "--region us-east-1" "$CALL_LOG" "build は --region を渡す"
+    assert_not_contains "sam :: deploy" "$CALL_LOG" "build は deploy しない"
+    if [[ -f "$ROOT/.aws-sam/template.yaml" ]]; then
+        echo "  ok: build 済み template が .aws-sam/template.yaml へ生成される"
     else
-        fail "state file が無い: $state"
+        fail "build 済み template が無い: $ROOT/.aws-sam/template.yaml"
     fi
-    csid="$(read_state CHANGESET_ID "$state")"
-    assert_var_contains "arn:aws:cloudformation" "$csid" "state に change set id が保存されている"
-    report "t2_changeset_creates_change_set_and_state"
+    report "t2_build_invokes_sam_build"
 }
 
-# T3: deploy は changeset 段階で確認した同一 change set のみ execute し、sam deploy しない。
-t3_deploy_executes_same_changeset() {
+# T3: deploy は build 済み template (.aws-sam/template.yaml) を sam deploy へ渡し、
+#     source template (infra/template.yaml) は渡さない。bucket 未指定時は --resolve-s3。
+t3_deploy_uses_built_template() {
     ERRORS=0
     setup_root
     run_deploy --profile p --region us-east-1 --stage build
-    run_deploy --profile p --region us-east-1 --stage package
-    run_deploy --profile p --region us-east-1 --stage changeset
+    assert_rc_zero "build 成功"
     run_deploy --profile p --region us-east-1 --stage deploy
     assert_rc_zero "deploy 成功"
-    state="$ROOT/.aws-sam/changeset.state"
-    csid="$(read_state CHANGESET_ID "$state")"
-    assert_var_contains "arn:aws:cloudformation" "$csid" "state から change set id を取得できる"
-    assert_contains "$csid" "$CALL_LOG" "execute が state の同一 change set id を使う"
-    assert_contains "execute-change-set" "$CALL_LOG" "deploy は execute-change-set を呼ぶ"
-    assert_not_contains "sam deploy" "$CALL_LOG" "deploy は sam deploy で別 change set を作らない"
-    assert_count_eq "create-change-set" 1 "$CALL_LOG" "change set 作成は1回だけ（deploy では新規作成しない）"
-    report "t3_deploy_executes_same_changeset"
+    assert_contains "sam :: deploy" "$CALL_LOG" "sam deploy を呼ぶ"
+    assert_contains ".aws-sam/template.yaml" "$CALL_LOG" "deploy は build 済み template を参照する"
+    # deploy 行だけを抜き出し、source template を渡していないか検証する。
+    if grep '^sam :: deploy' "$CALL_LOG" | grep -qF 'infra/template.yaml'; then
+        fail "deploy が source template (infra/template.yaml) を渡している"
+    else
+        echo "  ok: deploy は source template を渡さない"
+    fi
+    assert_contains "infra/samconfig.toml" "$CALL_LOG" "deploy は samconfig.toml を参照する"
+    assert_contains "--stack-name kindle-automation" "$CALL_LOG" "deploy は stack 名を明示する"
+    assert_contains "--profile p" "$CALL_LOG" "deploy は --profile を渡す"
+    assert_contains "--region us-east-1" "$CALL_LOG" "deploy は --region を渡す"
+    assert_contains "--resolve-s3" "$CALL_LOG" "bucket 未指定時は --resolve-s3"
+    assert_not_contains "--s3-bucket" "$CALL_LOG" "bucket 未指定時は --s3-bucket を付けない"
+    report "t3_deploy_uses_built_template"
 }
 
-# T4: all は build → package → changeset までで停止し、execute しない。
-t4_all_does_not_deploy() {
+# T4: --s3-bucket 指定時は --s3-bucket を使い --resolve-s3 を付けない。
+t4_deploy_explicit_s3_bucket() {
+    ERRORS=0
+    setup_root
+    run_deploy --profile p --region us-east-1 --stage build
+    run_deploy --profile p --region us-east-1 --stage deploy --s3-bucket my-artifacts
+    assert_rc_zero "deploy 成功"
+    assert_contains "--s3-bucket my-artifacts" "$CALL_LOG" "--s3-bucket を渡す"
+    assert_not_contains "--resolve-s3" "$CALL_LOG" "--s3-bucket 指定時は --resolve-s3 を付けない"
+    report "t4_deploy_explicit_s3_bucket"
+}
+
+# T5: --parameter-override は sam deploy の --parameter-overrides へ渡す。
+t5_deploy_parameter_overrides() {
+    ERRORS=0
+    setup_root
+    run_deploy --profile p --region us-east-1 --stage build
+    run_deploy --profile p --region us-east-1 --stage deploy \
+        --parameter-override SchedulersEnabled=true --parameter-override LogLevel=DEBUG
+    assert_rc_zero "deploy 成功"
+    assert_contains "--parameter-overrides" "$CALL_LOG" "--parameter-overrides を渡す"
+    assert_contains "SchedulersEnabled=true" "$CALL_LOG" "1件目の override を渡す"
+    assert_contains "LogLevel=DEBUG" "$CALL_LOG" "2件目の override を渡す"
+    report "t5_deploy_parameter_overrides"
+}
+
+# T6: all は sam build 後に sam deploy を呼ぶ。
+t6_all_build_then_deploy() {
     ERRORS=0
     setup_root
     run_deploy --profile p --region us-east-1 --stage all
-    assert_rc_zero "all 成功（deploy 前提で停止）"
-    assert_contains "sam :: build" "$CALL_LOG" "all は build する"
-    assert_contains "sam :: package" "$CALL_LOG" "all は package する"
-    assert_contains "create-change-set" "$CALL_LOG" "all は change set を作成する"
-    assert_not_contains "execute-change-set" "$CALL_LOG" "all は execute しない"
-    report "t4_all_does_not_deploy"
+    assert_rc_zero "all 成功"
+    assert_contains "sam :: build" "$CALL_LOG" "all は sam build を呼ぶ"
+    assert_contains "sam :: deploy" "$CALL_LOG" "all は sam deploy を呼ぶ"
+    # build 行が deploy 行より先に現れること。
+    build_line=$(grep -nF "sam :: build" "$CALL_LOG" | head -1 | cut -d: -f1)
+    deploy_line=$(grep -nF "sam :: deploy" "$CALL_LOG" | head -1 | cut -d: -f1)
+    if [[ -n "$build_line" && -n "$deploy_line" && "$build_line" -lt "$deploy_line" ]]; then
+        echo "  ok: build が deploy より先に実行される"
+    else
+        fail "build が deploy より先でない (build=$build_line deploy=$deploy_line)"
+    fi
+    report "t6_all_build_then_deploy"
 }
 
-# T5: 途中失敗時は後続段階へ進まない（set -euo pipefail による停止）。
-t5_stops_on_mid_failure() {
+# T7: build 失敗時は all の後続 deploy へ進まない（set -e による停止）。
+t7_all_stops_on_build_failure() {
     ERRORS=0
     setup_root
-    CALL_LOG="$CALL_LOG" AWS_FAKE_DIR="$AWS_FAKE_DIR" \
-        PATH="$ROOT/bin:$ORIG_PATH" FAKE_SAM_BUILD_FAIL=1 \
+    CALL_LOG="$CALL_LOG" PATH="$ROOT/bin:$ORIG_PATH" FAKE_SAM_BUILD_FAIL=1 \
         "$ROOT/scripts/deploy.sh" --profile p --region us-east-1 --stage all >/dev/null 2>&1
     RUN_RC=$?
     assert_rc_nonzero "build 失敗で all 全体が非零終了する"
     assert_contains "sam :: build" "$CALL_LOG" "build は実行される"
-    assert_not_contains "sam :: package" "$CALL_LOG" "build 失敗後は package へ進まない"
-    assert_not_contains "create-change-set" "$CALL_LOG" "build 失敗後は change set 作成へ進まない"
-    assert_not_contains "execute-change-set" "$CALL_LOG" "build 失敗後は execute しない"
-    report "t5_stops_on_mid_failure"
+    assert_not_contains "sam :: deploy" "$CALL_LOG" "build 失敗後は deploy へ進まない"
+    report "t7_all_stops_on_build_failure"
 }
 
-# T6: change set が無い（state 不在）場合は execute しない。
-t6_deploy_without_changeset_refuses() {
+# T8: build 済み template が無い（build 未実行）場合は deploy せず非零終了する。
+t8_deploy_without_build_refuses() {
     ERRORS=0
     setup_root
-    run_deploy --profile p --region us-east-1 --stage build
-    run_deploy --profile p --region us-east-1 --stage package
     run_deploy --profile p --region us-east-1 --stage deploy
-    assert_rc_nonzero "state 不在で deploy は非零終了する"
-    assert_not_contains "execute-change-set" "$CALL_LOG" "change set 無しでは execute しない"
-    report "t6_deploy_without_changeset_refuses"
+    assert_rc_nonzero "build 済み template 無しで deploy は非零終了する"
+    assert_not_contains "sam :: deploy" "$CALL_LOG" "build 無しでは sam deploy を呼ばない"
+    report "t8_deploy_without_build_refuses"
 }
 
-# T7: change set の状態が不正（FAILED 等）の場合は execute しない。
-t7_deploy_invalid_status_refuses() {
-    ERRORS=0
-    setup_root
-    run_deploy --profile p --region us-east-1 --stage build
-    run_deploy --profile p --region us-east-1 --stage package
-    run_deploy --profile p --region us-east-1 --stage changeset
-    echo "FAILED" > "$AWS_FAKE_DIR/status-override"
-    run_deploy --profile p --region us-east-1 --stage deploy
-    assert_rc_nonzero "状態不正で deploy は非零終了する"
-    assert_not_contains "execute-change-set" "$CALL_LOG" "状態不正時は execute しない"
-    report "t7_deploy_invalid_status_refuses"
-}
-
-# T8: changeset 作成失敗（wait 失敗）時は state を破棄し、deploy 可能な change set を残さない。
-t8_changeset_failure_clears_state() {
-    ERRORS=0
-    setup_root
-    run_deploy --profile p --region us-east-1 --stage build
-    run_deploy --profile p --region us-east-1 --stage package
-    CALL_LOG="$CALL_LOG" AWS_FAKE_DIR="$AWS_FAKE_DIR" \
-        PATH="$ROOT/bin:$ORIG_PATH" FAKE_AWS_WAIT_FAIL=1 \
-        "$ROOT/scripts/deploy.sh" --profile p --region us-east-1 --stage changeset >/dev/null 2>&1
-    RUN_RC=$?
-    assert_rc_nonzero "wait 失敗で changeset は非零終了する"
-    state="$ROOT/.aws-sam/changeset.state"
-    if [[ -f "$state" ]]; then
-        fail "changeset 失敗時に state が残っている: $state"
-    else
-        echo "  ok: changeset 失敗時に state を破棄する"
-    fi
-    assert_not_contains "execute-change-set" "$CALL_LOG" "changeset 失敗時は execute しない"
-    report "t8_changeset_failure_clears_state"
-}
-
-t1_package_uses_built_template
-t2_changeset_creates_change_set_and_state
-t3_deploy_executes_same_changeset
-t4_all_does_not_deploy
-t5_stops_on_mid_failure
-t6_deploy_without_changeset_refuses
-t7_deploy_invalid_status_refuses
-t8_changeset_failure_clears_state
-t9_cli_compatibility
+t1_cli_compatibility
+t2_build_invokes_sam_build
+t3_deploy_uses_built_template
+t4_deploy_explicit_s3_bucket
+t5_deploy_parameter_overrides
+t6_all_build_then_deploy
+t7_all_stops_on_build_failure
+t8_deploy_without_build_refuses
 
 echo "-----------------------------------------"
 echo "deploy_test: PASS=$PASS FAIL=$FAIL_COUNT"

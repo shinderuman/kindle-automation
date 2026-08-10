@@ -205,7 +205,7 @@ func TestExcludedByKeywordAndYearMonth(t *testing.T) {
 }
 
 // TestAuthorMatches は contributor 境界を保持した []string を受け取り、
-// 正規化した完全名同士を比較することを検証する（SPECIFICATION.md 13.3, bug1）。
+// 正規化した完全名同士を比較することを検証する（SPECIFICATION.md 13.3）。
 // 空白トークン単位の部分一致は行わないため、姓だけ同一の別人を誤検出しない。
 func TestAuthorMatches(t *testing.T) {
 	if !AuthorMatches("海李", []string{"海李"}) {
@@ -228,7 +228,7 @@ func TestAuthorMatches(t *testing.T) {
 	if !AuthorMatches("やきいもほくほく", []string{"上原誠", "やきいもほくほく"}) {
 		t.Errorf("複数contributorのいずれかに完全一致する場合はtrue")
 	}
-	// bug1: 「山田 太郎」と対象「山田次郎」は姓だけ同じ別人。完全名が異なるためfalse。
+	// 「山田 太郎」と対象「山田次郎」は姓だけ同じ別人。完全名が異なるためfalse。
 	if AuthorMatches("山田次郎", []string{"山田 太郎"}) {
 		t.Errorf("空白入り別人（山田 太郎 vs 山田次郎）は姓部分一致でもfalse")
 	}

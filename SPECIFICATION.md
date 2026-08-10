@@ -430,7 +430,7 @@ HTTP 200だけでは成功としない。要求したページ種別に応じて
 | ASIN | `#ASIN, input[name='idx.asin'], input[name='ASIN.0'], input[name='titleID']`のvalue。取得できなければcanonical URLまたは最終URL |
 | Kindle版スウォッチ | `#tmm-grid-swatch-KINDLE` |
 | 紙書籍スウォッチ | `[id^='tmm-grid-swatch']:not([id$='KINDLE'])` |
-| 発売日 | UserScriptのOption+↑と同じ`#rpi-attribute-book_details-publication_date`配下。UserScriptはdirect-child形式(`> div.a-section.a-spacing-none.a-text-center.rpi-attribute-value > span`)を使用する。`#detailBullets_feature_div`内の発売日はUserScriptに存在しない新規fallback候補とする |
+| 発売日 | UserScriptのOption+↑と同じ`#rpi-attribute-book_details-publication_date`配下。UserScriptはdirect-child形式(`> div.a-section.a-spacing-none.a-text-center.rpi-attribute-value > span`)を使用する。実HTML fixtureで発売日取得を確認済みの primary セレクタのみ使い、未検証の fallback は持たない |
 | クーポンバッジ | `i.a-icon.a-icon-addon.newCouponBadge` |
 | クーポン文言 | `.couponLabelText` |
 

@@ -111,7 +111,7 @@ func TestFetchProduct_ShortBodyIsRetryable(t *testing.T) {
 func TestFetchProduct_MissingASINIsRetryable(t *testing.T) {
 	// #productTitle はあるが ASIN input・canonical link ともになく、最終URL path にも
 	// /dp/{ASIN} が無い200。対象ASINを canonical/final URL のいずれからも確認できないため
-	// 必須構造欠落の取得内容不足として再試行する（SPECIFICATION.md 11.3, bug1）。
+	// 必須構造欠落の取得内容不足として再試行する（SPECIFICATION.md 11.3）。
 	// 要求ASINを無条件に代入して検証を形骸化しない。
 	htmlBody := `<html><body><span id="productTitle">タイトル</span></body></html>`
 	c := newClientWithHTTPClient(amazonBase, &http.Client{

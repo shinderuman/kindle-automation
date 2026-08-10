@@ -19,7 +19,7 @@ func (f *nrSearchFetcher) FetchSearch(_ context.Context, _ string) (newrelease.S
 }
 
 // TestNewReleaseSearch_EmptyClassifiedAsSearchEmptyViaDTO は検索0件が本番DTO経路で
-// search_empty へ分類されることを検証する（bug5）。
+// search_empty へ分類されることを検証する。
 // amazon CategorySearchEmpty → toNewReleaseSearchResult → newrelease.SearchEmpty →
 // HandleNewReleaseSearch で retryable outcome かつ error_type=search_empty。
 func TestNewReleaseSearch_EmptyClassifiedAsSearchEmptyViaDTO(t *testing.T) {

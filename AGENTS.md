@@ -355,8 +355,8 @@ go build -o /dev/null .
 - Work Queueと2つのDLQはSSE-SQSを有効にする
 - IAM roleを2 Lambdaで共有しない
 - 既存S3 bucketそのものをstackの削除対象にしない
-- deploy scriptはbuild、package、change set確認、deployを分離する
-- deployは明示的なAWS profileとregionを要求し、default値へ暗黙依存しない
+- deploy scriptは AWS SAM 標準フロー（sam build / sam deploy）の薄い wrapper とし、自前の package・change set 管理・state file・CREATE/UPDATE 自己判定を持たない。sam deploy 自身の change set 確認プロンプトで人間が変更を確認してから同じ sam deploy が適用する。認証切れ・AccessDenied・一時AWS error を stack 不存在や CREATE へ fallback させる自作判定は置かない
+- 安定したデプロイ設定は `infra/samconfig.toml` へ集約する。deploy は明示的な AWS profile と region を呼出時に必須とし、AWS default profile/region や samconfig の profile/region へ暗黙依存しない
 - 移行scriptはdry-runを既定とし、applyを明示指定させる
 
 ## 14. PoCと生成物

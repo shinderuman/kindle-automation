@@ -21,10 +21,9 @@ const selectorCanonical = "link[rel='canonical']"
 const selectorBylineAuthors = "#bylineInfo a"
 
 // selectorReleaseDate は UserScript Option+↑ と同じ direct-child 形式の発売日セレクタ。
+// 実HTML fixture(product_B0FX3X569X)で#rpi-attribute-book_details-publication_date 配下の
+// 発売日が取得できることを確認済み。未検証の fallback は持たない。
 const selectorReleaseDate = "#rpi-attribute-book_details-publication_date > div.a-section.a-spacing-none.a-text-center.rpi-attribute-value > span"
-
-// selectorReleaseDateFallback は UserScript 群に存在しない新規 fallback 候補。実HTML fixtureで検証が必要。
-const selectorReleaseDateFallback = "#detailBullets_feature_div"
 
 // Kindle価格 第1層: KINDLEスウォッチ価格（KU等で0円になる）。
 const selectorKindleSwatchPrice = "#tmm-grid-swatch-KINDLE > span.a-button > span.a-button-inner > a.a-button-text > span.slot-price > span"

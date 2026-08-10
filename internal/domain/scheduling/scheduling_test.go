@@ -67,3 +67,23 @@ func TestDedupID(t *testing.T) {
 		t.Fatalf("DedupID must differ for different job_id")
 	}
 }
+
+// TestJobID_DiscriminatesByKindCycleTarget は kind/cycle/対象いずれかが違えば job_id が異なり、
+// 全体が同じ時だけ同一になることを検証する（SPECIFICATION.md 7.2）。
+func TestJobID_DiscriminatesByKindCycleTarget(t *testing.T) {
+	cycle := "sale:2026-07-23T00:00:00Z"
+	base := JobID("sale_check", cycle, "B0FX3X569X")
+
+	if JobID("sale_check", cycle, "B0FX3X569X") != base {
+		t.Fatalf("same inputs must yield same job_id")
+	}
+	if JobID("paper_to_kindle_check", cycle, "B0FX3X569X") == base {
+		t.Errorf("different kind must yield different job_id")
+	}
+	if JobID("sale_check", "sale:2026-07-23T02:00:00Z", "B0FX3X569X") == base {
+		t.Errorf("different cycle must yield different job_id")
+	}
+	if JobID("sale_check", cycle, "B0OTHER0001") == base {
+		t.Errorf("different target must yield different job_id")
+	}
+}

@@ -92,7 +92,7 @@ func TestToNewReleaseProductResult_EmptyPartnerTagOmitsTag(t *testing.T) {
 
 // TestToNewReleaseSearchResult_PropagatesIsKindleAndTaggedURL は検索カードの形式表示で判定した
 // IsKindle を dto がそのまま伝播すること（true/false とも）と保存用 tag 付き URL 構築を検証する
-// （SPECIFICATION.md 13.4, bug3）。IsKindle は形式表示由来の値のみを使い、URL由来で確定しない。
+// （SPECIFICATION.md 13.4）。IsKindle は形式表示由来の値のみを使い、URL由来で確定しない。
 func TestToNewReleaseSearchResult_PropagatesIsKindleAndTaggedURL(t *testing.T) {
 	r := amazon.SearchResult{
 		Category: amazon.CategoryOK,
