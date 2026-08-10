@@ -45,6 +45,10 @@ var AllSecretKeys = []string{
 // ErrSecretNotFound は secure/plain 両方に parameter がなかった（SPECIFICATION.md 19 step4）。
 var ErrSecretNotFound = errors.New("secret not found in secure or plain")
 
+// ErrSecretEmpty は required key の取得値が空だった（SPECIFICATION.md 19: 有効な値を取得できない）。
+// secure/plain いずれかに存在しても値が空文字なら required として成立しない。
+var ErrSecretEmpty = errors.New("secret value is empty")
+
 // Secrets は SSM から取得した秘密情報。各 adapter ぀配布される。
 type Secrets struct {
 	AmazonPartnerTag     string
@@ -67,8 +71,9 @@ type ParameterGetter interface {
 // LoadSecrets は required keys を /myapp/secure/{KEY}(WithDecryption) → /myapp/plain/{KEY} の順で
 // 必須取得し、optional keys を任意取得して Secrets を構築する（SPECIFICATION.md 19）。
 // 両方に存在する場合は secure 側を使用する。
-// required は両方になければ起動エラーとする。optional は存在しなければ空文字のままとし error としない
-// （Slack/Mastodon 等の任意通知先）。secure/plain 判定以外の SSM エラーは error として伝播する。
+// required は両方になければ起動エラーとする。加えて取得値が空文字（有効な値を取得できない）も起動エラーとする。
+// optional は存在しなければ空文字のままとし error としない（Slack/Mastodon 等の任意通知先）。
+// secure/plain 判定以外の SSM エラーは error として伝播する。
 // GetParametersByPath は使わず、必要な key だけを個別取得する。
 func LoadSecrets(ctx context.Context, getter ParameterGetter, required, optional []string) (Secrets, error) {
 	values := make(map[string]string, len(required)+len(optional))
@@ -76,6 +81,9 @@ func LoadSecrets(ctx context.Context, getter ParameterGetter, required, optional
 		v, err := loadOneSecret(ctx, getter, key)
 		if err != nil {
 			return Secrets{}, fmt.Errorf("load secret %s: %w", key, err)
+		}
+		if v == "" {
+			return Secrets{}, fmt.Errorf("load secret %s: %w", key, ErrSecretEmpty)
 		}
 		values[key] = v
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shinderuman/kindle-automation/internal/application/execution"
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
@@ -377,7 +378,8 @@ func TestDetail_EditionMismatchCasesReturnNil(t *testing.T) {
 		name string
 		info KindlePageInfo
 	}{
-		{name: "same_asin", info: KindlePageInfo{ASIN: "B0PAPER001", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: releaseDay}},
+		// 取得KindleページのASINが要求ASINと異なる（SPEC 14.3 候補URL/ASIN不一致）。asin_mismatch terminal。
+		{name: "asin_mismatch", info: KindlePageInfo{ASIN: "B0PAPER001", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: releaseDay}},
 		{name: "not_kindle", info: KindlePageInfo{ASIN: "B0KINDLE01", Title: "T", HasKindleSwatch: false}},
 		{name: "release_date_mismatch", info: KindlePageInfo{ASIN: "B0KINDLE01", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}},
 	}
@@ -646,5 +648,339 @@ func TestBuildPaperGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	// GistType は paper_to_kindle で不変（gist updater 契約）。
 	if priceInitA.Target.GistType != gistPaperID {
 		t.Errorf("GistType = %q, want %q", priceInitA.Target.GistType, gistPaperID)
+	}
+}
+
+// --- 取得分類と通信失敗の補完（check） ---
+
+// check job の Amazon 取得の通信失敗は fetch_error の retryable error にする（SPECIFICATION.md 11.3/18.1）。
+func TestCheck_FetchErrorIsRetryable(t *testing.T) {
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).err = errors.New("dial tcp: timeout")
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err == nil {
+		t.Fatal("fetch error must return error")
+	}
+	if oc.ErrorType != errorTypeFetchError {
+		t.Errorf("error_type = %q, want fetch_error", oc.ErrorType)
+	}
+	if oc.HTTPStatus != 0 || oc.ResponseBytes != 0 {
+		t.Errorf("fetch error must carry no HTTP metrics: status=%d bytes=%d", oc.HTTPStatus, oc.ResponseBytes)
+	}
+}
+
+// 未知の Category は unknown_category の retryable error にする（Amazon adapter の分類漏れ検知）。
+func TestCheck_UnknownCategoryIsError(t *testing.T) {
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: Category(99)}
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err == nil {
+		t.Fatal("unknown category must return error")
+	}
+	if oc.ErrorType != errorTypeUnknownCategory {
+		t.Errorf("error_type = %q, want unknown_category", oc.ErrorType)
+	}
+}
+
+// 取得した紙書籍ページのASINが要求ASINと異なる場合は asin_mismatch terminal とする（SPECIFICATION.md 11.3）。
+func TestCheck_PaperPageASINMismatchIsTerminal(t *testing.T) {
+	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
+	info.ASIN = "B0WRONG0001" // 要求 B0PAPER001 と異なる
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err != nil {
+		t.Fatalf("asin_mismatch is terminal, no error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypeAsinMismatch {
+		t.Errorf("result/error_type = %q/%q, want terminal/asin_mismatch", oc.Result, oc.ErrorType)
+	}
+	if len(deps.Enqueuer.(*fakeEnqueuer).jobs) != 0 {
+		t.Errorf("asin_mismatch must not enqueue")
+	}
+}
+
+// 恒久的 4xx は permanent_client_error terminal とする（SPECIFICATION.md 11.3）。対象は paper_books へ残す。
+func TestCheck_PermanentClientErrorIsTerminal(t *testing.T) {
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryPermanentClientError, HTTPStatus: 401}
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err != nil {
+		t.Fatalf("permanent client error is terminal: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != "permanent_client_error" {
+		t.Errorf("result/error_type = %q/%q, want terminal/permanent_client_error", oc.Result, oc.ErrorType)
+	}
+	if len(deps.Enqueuer.(*fakeEnqueuer).jobs) != 0 {
+		t.Errorf("permanent client error must not enqueue")
+	}
+}
+
+// 価格初期化で gist を投入する際の失敗は enqueue_failed の retryable error にする。
+// gist(251) が最初の Enqueue 呼び出しになる（旧レコードは価格未設定）。
+func TestCheck_GistEnqueueFailureAfterPriceInitIsError(t *testing.T) {
+	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
+	deps.Enqueuer.(*fakeEnqueuer).err = errors.New("sqs throttled")
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err == nil {
+		t.Fatal("gist enqueue failure must return error")
+	}
+	if oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("error_type = %q, want enqueue_failed", oc.ErrorType)
+	}
+}
+
+// 価格初期化済み（gist スキップ）で Kindle候補の detail 投入が失敗した場合は enqueue_failed の retryable error にする。
+// detail(266) が最初の Enqueue 呼び出しになる。
+func TestCheck_DetailEnqueueFailureIsError(t *testing.T) {
+	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
+	deps.PaperBooksStore.(*fakePaperBooksStore).updateOldBook.CurrentPrice = book.NewPrice(792) // 既に初期化済み
+	deps.Enqueuer.(*fakeEnqueuer).err = errors.New("sqs throttled")
+
+	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
+	if err == nil {
+		t.Fatal("detail enqueue failure must return error")
+	}
+	if oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("error_type = %q, want enqueue_failed", oc.ErrorType)
+	}
+}
+
+// SPEC 14.2: 紙書籍価格を取得できなくても、両スウォッチとKindle候補が確認できる場合は詳細確認を続ける。
+// 価格初期化も gist 投入も行わず、detail だけ投入する。
+func TestCheck_EnqueuesDetailWhenPaperPriceUnavailable(t *testing.T) {
+	info := PaperPageInfo{
+		ASIN: "B0PAPER001", Title: "紙タイトル", PaperPrice: book.UnknownPrice(),
+		HasPaperSwatch: true, HasKindleSwatch: true, KindleSwatchASIN: "B0KINDLE01",
+	}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
+	store := deps.PaperBooksStore.(*fakePaperBooksStore)
+
+	if _, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001")); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if store.updateCalled {
+		t.Errorf("paper price unavailable must not call price initialization")
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindPaperToKindleDetail {
+		t.Errorf("want 1 detail job only when paper price unavailable, got %+v", enq.jobs)
+	}
+	for i := range enq.jobs {
+		if enq.jobs[i].Kind == job.KindGistUpdate {
+			t.Errorf("gist must not be enqueued when price not initialized: %+v", enq.jobs)
+		}
+	}
+}
+
+// --- 取得分類と通信失敗の補完（detail） ---
+
+func TestDetail_FetchErrorIsRetryable(t *testing.T) {
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).err = errors.New("dial tcp: timeout")
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("fetch error must return error")
+	}
+	if oc.ErrorType != errorTypeFetchError {
+		t.Errorf("error_type = %q, want fetch_error", oc.ErrorType)
+	}
+}
+
+func TestDetail_RetryableReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: CategoryRetryable}
+
+	_, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("retryable must return error")
+	}
+	var re *ErrRetryableFetch
+	if !errors.As(err, &re) {
+		t.Fatalf("error must be ErrRetryableFetch, got %T", err)
+	}
+	// ASIN を含む構造化メッセージで、SQS 再配信時の対象特定に使えること（SPECIFICATION.md 18.1）。
+	if re.ASIN != "B0KINDLE01" || !strings.Contains(re.Error(), "B0KINDLE01") {
+		t.Errorf("ErrRetryableFetch must carry ASIN: ASIN=%q msg=%q", re.ASIN, re.Error())
+	}
+}
+
+// 404 と恒久 4xx は terminal（SPECIFICATION.md 11.3）。
+func TestDetail_NotFoundAndPermanentAreTerminal(t *testing.T) {
+	cases := []struct {
+		name     string
+		cat      Category
+		wantType string
+	}{
+		{name: "not_found", cat: CategoryNotFound, wantType: "not_found"},
+		{name: "permanent_client_error", cat: CategoryPermanentClientError, wantType: "permanent_client_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := baseDeps()
+			deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: tc.cat}
+			oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+			if err != nil {
+				t.Fatalf("terminal must return nil error: %v", err)
+			}
+			if oc.Result != execution.ResultTerminal || oc.ErrorType != tc.wantType {
+				t.Errorf("result/error_type = %q/%q, want terminal/%s", oc.Result, oc.ErrorType, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestDetail_UnknownCategoryIsError(t *testing.T) {
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: Category(99)}
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("unknown category must return error")
+	}
+	if oc.ErrorType != errorTypeUnknownCategory {
+		t.Errorf("error_type = %q, want unknown_category", oc.ErrorType)
+	}
+}
+
+// SPEC 14.3: Kindle候補ASINが紙書籍ASINと異なることを確認。同一ASINの場合は same_asin terminal。
+// 候補ページASINは要求ASINと一致（asin_mismatch(294)を通過）させ、kindleASIN == paperASIN で same_asin(298)へ。
+func TestDetail_SameAsinIsTerminal(t *testing.T) {
+	info := KindlePageInfo{ASIN: "B0PAPER001", Title: "T", HasKindleSwatch: true,
+		CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: releaseDay}
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: CategoryOK, Info: info}
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0PAPER001", "B0PAPER001"))
+	if err != nil {
+		t.Fatalf("same_asin is terminal, no error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypeSameAsin {
+		t.Errorf("result/error_type = %q/%q, want terminal/same_asin", oc.Result, oc.ErrorType)
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+		t.Errorf("same_asin must not save")
+	}
+}
+
+// 取得KindleページのASINが要求ASINと異なる場合は asin_mismatch terminal（候補URL/ASIN不一致、SPEC 14.3）。
+func TestDetail_AsinMismatchIsTerminal(t *testing.T) {
+	info := kindleInfo("B0WRONG0001") // 要求 B0KINDLE01 と異なる
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: CategoryOK, Info: info}
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err != nil {
+		t.Fatalf("asin_mismatch is terminal, no error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypeAsinMismatch {
+		t.Errorf("result/error_type = %q/%q, want terminal/asin_mismatch", oc.Result, oc.ErrorType)
+	}
+}
+
+// 紙書籍レコード読込失敗は store_failed の retryable error にする（SPECIFICATION.md 7.5 途中失敗）。
+func TestDetail_PaperBookLoadFailureIsError(t *testing.T) {
+	deps := baseDeps()
+	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: CategoryOK, Info: kindleInfo("B0KINDLE01")}
+	deps.PaperBooksStore.(*fakePaperBooksStore).paperErr = errors.New("s3 down")
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("paper book load failure must return error")
+	}
+	if oc.ErrorType != errorTypeStoreFailed {
+		t.Errorf("error_type = %q, want store_failed", oc.ErrorType)
+	}
+}
+
+// KnownState 取得失敗は known_state の retryable error にする（SPECIFICATION.md 14.4 step1/7.5）。
+func TestDetail_KnownStateFailureIsError(t *testing.T) {
+	deps := baseDeps()
+	deps.KnownStateQuerier.(*fakeKnownStateQuerier).err = errors.New("s3 down")
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("known state failure must return error")
+	}
+	if oc.ErrorType != errorTypeKnownState {
+		t.Errorf("error_type = %q, want known_state", oc.ErrorType)
+	}
+}
+
+// --- reconcile と副作用順序（SPECIFICATION.md 14.4/7.5） ---
+
+// 途中で S3 保存に失敗した場合でも、先行して成功した保存対象を失わない。
+// notified upsert 成功後に upcoming upsert が失敗した場合、notified は保存されたまま job を失敗させ、
+// 再実行で不足する upcoming だけを補う（SPECIFICATION.md 14.4 step2/7.5）。
+func TestApply_PartialFailurePreservesPriorSideEffects(t *testing.T) {
+	deps := baseDeps()
+	deps.UpcomingStore.(*fakeUpcomingStore).upsertErr = errors.New("s3 down")
+
+	oc, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001"))
+	if err == nil {
+		t.Fatal("upcoming upsert failure must return error for reconcile")
+	}
+	if oc.ErrorType != errorTypeUpcomingUpsert {
+		t.Errorf("error_type = %q, want upcoming_upsert", oc.ErrorType)
+	}
+	// notified は先行して保存済みのため対象を失わない。
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 1 {
+		t.Errorf("notified must be persisted before upcoming failure, got %d", len(deps.NotifiedStore.(*fakeNotifiedStore).upserts))
+	}
+	// 保存済み paper_books は失敗前のため削除されない。
+	if len(deps.PaperBooksStore.(*fakePaperBooksStore).deleted) != 0 {
+		t.Errorf("paper book must not be deleted before upcoming succeeds")
+	}
+}
+
+// 紙書籍価格をセール条件（MaxPrice）へ使わないことの構造的確認（SPECIFICATION.md 12.1/14）。
+// toBook は KindlePrice を CurrentPrice/MaxPrice へ設定し、PaperPrice は通知用だけで保存値へ入れない。
+func TestApply_SavedBookMaxPriceUsesKindlePriceNotPaper(t *testing.T) {
+	deps := baseDeps()
+	// 紙書籍レコードの価格（PaperPrice 由来候補）は Kindle 価格より高い。
+	deps.PaperBooksStore.(*fakePaperBooksStore).paperBook.CurrentPrice = book.NewPrice(792)
+
+	if _, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001")); err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	notified := deps.NotifiedStore.(*fakeNotifiedStore).upserts[0]
+	if !notified.MaxPrice.Valid() || notified.MaxPrice.Yen() != 759 {
+		t.Errorf("saved MaxPrice = %+v, want Kindle 759 (not paper 792)", notified.MaxPrice)
+	}
+	if !notified.CurrentPrice.Valid() || notified.CurrentPrice.Yen() != 759 {
+		t.Errorf("saved CurrentPrice = %+v, want Kindle 759", notified.CurrentPrice)
+	}
+}
+
+// 同一job重複配信（SQS少なくとも1回）でも、各副作用が idempotent に再実行され対象を失わない（SPECIFICATION.md 7.4/7.5）。
+func TestApply_IdempotentAcrossDuplicateDelivery(t *testing.T) {
+	deps := baseDeps()
+	j := detailJob("B0KINDLE01", "B0PAPER001")
+
+	if _, err := HandlePaperToKindleDetail(context.Background(), deps, j); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// 同じ KnownState（実S3は idempotent upsert/delete で同一状態）で再配信されたとみなし再実行。
+	if _, err := HandlePaperToKindleDetail(context.Background(), deps, j); err != nil {
+		t.Fatalf("duplicate delivery must reconcile without error: %v", err)
+	}
+	// gist job は決定的 job_id のため再投入も同じ job_id（FIFO dedup で冪等）。
+	jobs := deps.Enqueuer.(*fakeEnqueuer).jobs
+	if len(jobs) < 2 {
+		t.Fatalf("gist job enqueued on both runs, got %d", len(jobs))
+	}
+	if jobs[0].JobID != jobs[1].JobID {
+		t.Errorf("duplicate gist job_id must be identical for idempotent retry: %q vs %q", jobs[0].JobID, jobs[1].JobID)
 	}
 }

@@ -33,6 +33,7 @@
 | §22.2 fixture test の不足 | §22.2 | 検索発売日あり/なし, Kindleスウォッチ欠落, ポイントなし, CAPTCHA 由来明示を追加。実HTML不可分は最小合成fixtureで分類を保証。 |
 | govulncheck 標準ライブラリ脆弱性 | §12 / §23 | 13件(すべて go1.25.5 標準ライブラリ)を `toolchain go1.25.12` で解消。 |
 | `.golangci.yml` の §2 記載 | AGENTS.md §2 / §12 | §12 品質コマンドは golangci-lint を含まずファイルも不存在のため、§2 ツリーの `.golangci.yml` 行を削除し実態へ整合。 |
+| 切り替え backup/rollback の Versioning 方針 | §20.3 / §20.4 | backup prefix copy を廃止し、bucket Versioning=Enabled を前提に現 VersionId 記録→version 指定の選択的復元へ統一。Versioning 非 Enabled は切り替え中止。SPEC/operations/pre-production を整合。S3 書込契約(§9.5)は不変。 |
 
 ## 3. 判断待ち（ローカル修正可能だが仕様判断を保留）
 
@@ -47,7 +48,9 @@
 
 ### 4.1 SAM デプロイ・CFn 検証
 - [ ] SAM CLI 導入後、`sam validate --profile <P> --region <R>` で template 妥当性確認（本工程では SAM CLI 未導入のため未実行）。
-- [ ] `./scripts/deploy.sh --stage build/package/changeset` で change set を作成し、内容を確認。
+- [ ] `./scripts/deploy.sh --stage build` → `package`（build 済み template を package）→ `changeset`（execute なし）で change set を作成し、内容を確認。
+- [ ] `--stage deploy` が changeset 段階で確認した同一 change set のみを execute すること（sam deploy で別 change set を作らない）。`scripts/deploy_test.sh` で stub 検証済み。
+- [ ] `--stage all` が build → package → changeset で停止し deploy しないこと（`scripts/deploy_test.sh` で stub 検証済み）。
 - [ ] SAM BuildMethod: makefile が両 Lambda の `bootstrap` を生成すること（ローカル Makefile target で生成済み、sam build での連結は AWS 側で確認）。
 - [ ] deploy 後、2 Log Group(保持30日), Work/DLQ FIFO, Scheduler DLQ Standard, MetricFilter→ErrorCount, Alarm 3種, Role 3種が作成されること。
 
@@ -74,7 +77,8 @@
 
 ### 4.6 切り替え手順（§20.3）
 - [ ] Scheduler 無効状態で deploy。
-- [ ] 既存S3対象 object を日時付き backup prefix へコピー。
+- [ ] 対象 bucket の Versioning が `Enabled` であることを確認（read-only）。`Suspended`/未設定なら切り替え中止。本監査時点では `codex-user` の権限不足（AccessDenied）で未確認。
+- [ ] Versioning=Enabled を確認したら backup prefix copy は作らず、対象 object の現時点 VersionId を記録（docs/operations.md §5.0）。
 - [ ] 既存3 Checker の EventBridge trigger を無効化。
 - [ ] `migrate-maxprice` dry-run → apply（§20.2, docs/operations.md §5）。
 - [ ] 既知HTML fixture で新Lambda 確認。

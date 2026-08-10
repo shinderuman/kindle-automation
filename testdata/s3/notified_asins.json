@@ -1,0 +1,21 @@
+[
+    {
+        "ASIN": "B0NOTIFI001",
+        "Title": "通知済み未来1",
+        "ReleaseDate": "2026-12-31T00:00:00Z",
+        "CurrentPrice": 700,
+        "MaxPrice": 700,
+        "URL": "https://www.amazon.co.jp/dp/B0NOTIFI001?tag=aff-22",
+        "CreatedAt": "2026-06-01T00:00:00Z",
+        "NotifiedAt": "2026-06-02T00:00:00Z"
+    },
+    {
+        "ASIN": "B0NOTIFI002",
+        "Title": "通知済み未来2",
+        "ReleaseDate": "2026-11-30T00:00:00Z",
+        "CurrentPrice": 600,
+        "MaxPrice": 600,
+        "URL": "https://www.amazon.co.jp/dp/B0NOTIFI002",
+        "CreatedAt": "2026-05-01T00:00:00Z"
+    }
+]

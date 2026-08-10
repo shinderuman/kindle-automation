@@ -459,3 +459,103 @@ func TestAuthorFileStore_Authors_MissingObjectIsEmpty(t *testing.T) {
 		t.Errorf("want empty, got %+v", authors)
 	}
 }
+
+// findAuthorLatestRelease は authors.json から名前で作者を引き LatestReleaseDate を返す。
+func findAuthorLatestRelease(t *testing.T, s *AuthorFileStore, name string) time.Time {
+	t.Helper()
+	authors, err := s.Authors(context.Background())
+	if err != nil {
+		t.Fatalf("Authors: %v", err)
+	}
+	for _, a := range authors {
+		if a.Name == name {
+			return a.LatestReleaseDate
+		}
+	}
+	t.Fatalf("author %q not found", name)
+	return time.Time{}
+}
+
+// TestAuthorFileStore_UpdateLatestRelease_KeepsMaxDateRegardlessOfOrder は同一作者へ候補が複数回
+// 更新を掛ける際、呼び出し順に依存せず常に最も後の発売日を残すことを検証する（SPECIFICATION.md 13.5）。
+// 1検索の複数候補が別々の result/detail job から順不同で UpdateLatestRelease を呼んでも最大日付になる。
+func TestAuthorFileStore_UpdateLatestRelease_KeepsMaxDateRegardlessOfOrder(t *testing.T) {
+	const seedJSON = `[{"Name":"海李","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"旧作","LatestReleaseURL":"old"}]`
+	older := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	orders := []struct {
+		name  string
+		dates []time.Time
+	}{
+		{name: "古い順(older→newer)で呼んでもnewerが残る", dates: []time.Time{older, newer}},
+		{name: "新しい順(newer→older)で呼んでもnewerが残る", dates: []time.Time{newer, older}},
+	}
+	for _, tc := range orders {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewMemStore()
+			store.Seed("authors", seedJSON)
+			s := NewAuthorFileStore(store, "authors")
+
+			for _, d := range tc.dates {
+				if _, err := s.UpdateLatestRelease(context.Background(), "海李", d, "作", "u"); err != nil {
+					t.Fatalf("UpdateLatestRelease(%v): %v", d, err)
+				}
+			}
+			got := findAuthorLatestRelease(t, s, "海李")
+			if !got.Equal(newer) {
+				t.Errorf("LatestReleaseDate = %v, want %v (処理順に依存せず最大日付)", got, newer)
+			}
+		})
+	}
+}
+
+// TestAuthorFileStore_UpdateLatestRelease_AbsentAuthorNoReadd は authors.json にない作者
+// （手動消失）へ更新を掛けても changed=false かつ再追加しないことを検証する（SPECIFICATION.md 7.5）。
+func TestAuthorFileStore_UpdateLatestRelease_AbsentAuthorNoReadd(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("authors", `[{"Name":"別人","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"x","LatestReleaseURL":"y"}]`)
+	s := NewAuthorFileStore(store, "authors")
+
+	changed, err := s.UpdateLatestRelease(context.Background(), "不在作者", futureRelease, "新作", "u")
+	if err != nil {
+		t.Fatalf("UpdateLatestRelease: %v", err)
+	}
+	if changed {
+		t.Errorf("changed = true, want false for absent author")
+	}
+	authors, _ := s.Authors(context.Background())
+	if len(authors) != 1 {
+		t.Errorf("absent author must not be re-added: got %+v", authors)
+	}
+	for _, a := range authors {
+		if a.Name == "不在作者" {
+			t.Errorf("absent author was re-added: %+v", authors)
+		}
+	}
+}
+
+// TestBookFileStore_ApplyRetentionAndExists_Boundary は notified 保存期間の境界を
+// 既存Go仕様（ReleaseDate.After(now) = 厳密な将来）に合わせて検証する（SPECIFICATION.md 13.6/675）。
+// 発売日==now は将来ではないため除外され、now より1日後は保持される。
+func TestBookFileStore_ApplyRetentionAndExists_Boundary(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("notified", `[
+        {"ASIN":"B0EQULA0001","Title":"同時刻","ReleaseDate":"2026-08-09T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"},
+        {"ASIN":"B0NEXT00001","Title":"翌日","ReleaseDate":"2026-08-10T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"}
+    ]`)
+	s := NewBookFileStore(store, "notified")
+
+	// testNow = 2026-08-09T00:00:00Z。発売日==now は After(now) false で除外。
+	if _, err := s.ApplyRetentionAndExists(context.Background(), "B0EQULA0001", testNow); err != nil {
+		t.Fatalf("ApplyRetentionAndExists: %v", err)
+	}
+	obj, _ := store.Get(context.Background(), "notified")
+	body := string(obj.Body)
+	if strings.Contains(body, "B0EQULA0001") {
+		t.Errorf("発売日==now は保存期間適用で除外される: %s", body)
+	}
+	if !strings.Contains(body, "B0NEXT00001") {
+		t.Errorf("発売日が now より1日後は保持される: %s", body)
+	}
+}

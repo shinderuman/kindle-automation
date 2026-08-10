@@ -257,6 +257,34 @@ func TestValidateInvariants_DetectsCurrentPriceChange(t *testing.T) {
 	}
 }
 
+// TestMigrateObject_ApplyThenRerunNoChange は apply 後に再度 dry-run すると
+// changed=0 になる（再実行冪等性）ことを検証する（SPECIFICATION.md 20.2 一度だけ適用）。
+func TestMigrateObject_ApplyThenRerunNoChange(t *testing.T) {
+	ctx := context.Background()
+	before := []storage.BookRecord{
+		{Book: book.KindleBook{ASIN: "B000000001", CurrentPrice: book.NewPrice(759), MaxPrice: book.NewPrice(792)}},
+		{Book: book.KindleBook{ASIN: "B000000002", CurrentPrice: book.Price{}, MaxPrice: book.NewPrice(1500)}},
+	}
+	store := storage.NewMemStore()
+	store.Seed("unprocessed_asins.json", string(encodeBooks(t, before)))
+
+	if _, err := migrateObject(ctx, store, "unprocessed_asins.json", true); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	// 2回目は dry-run。MaxPrice==CurrentPrice になっているため changed=0。
+	rep, err := migrateObject(ctx, store, "unprocessed_asins.json", false)
+	if err != nil {
+		t.Fatalf("rerun dry-run: %v", err)
+	}
+	if rep.Changed != 0 {
+		t.Errorf("rerun changed = %d, want 0 (idempotent): %+v", rep.Changed, rep)
+	}
+	if rep.Total != 2 {
+		t.Errorf("rerun total = %d, want 2", rep.Total)
+	}
+}
+
 func TestSplitKeys(t *testing.T) {
 	cases := []struct {
 		in   string

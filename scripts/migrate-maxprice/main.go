@@ -6,6 +6,10 @@
 //
 // デフォルトは dry-run。-apply を明示指定した場合だけ S3 へ書き込む（AGENTS.md 13）。
 // 件数・ASIN 集合・CurrentPrice・他 field が変わらないことを適用前後に検証する。
+//
+// 切り替え前の backup は bucket Versioning=Enabled を前提に現 VersionId の記録で行い、
+// 本 CLI は backup prefix copy を作らない。rollback は記録した VersionId からの選択的復元とし、
+// 配列全体の無条件上書きは行わない（SPECIFICATION.md 20.3/20.4）。
 package main
 
 import (

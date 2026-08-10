@@ -1,0 +1,17 @@
+[
+    {
+        "Name": "作者A",
+        "URL": "https://www.amazon.co.jp/stores/作者A?tag=aff-22",
+        "LatestReleaseDate": "2026-12-31T00:00:00Z",
+        "LatestReleaseTitle": "最新作A",
+        "LatestReleaseURL": "https://www.amazon.co.jp/dp/B0NEWAAAAA?tag=aff-22",
+        "Memo": "手動メモ"
+    },
+    {
+        "Name": "作者B",
+        "URL": "https://www.amazon.co.jp/stores/作者B",
+        "LatestReleaseDate": "2025-01-01T00:00:00Z",
+        "LatestReleaseTitle": "最新作B",
+        "LatestReleaseURL": "https://www.amazon.co.jp/dp/B0OLDBBBBB"
+    }
+]

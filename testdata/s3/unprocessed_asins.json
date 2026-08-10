@@ -1,0 +1,21 @@
+[
+    {
+        "ASIN": "B0UNPROC001",
+        "Title": "セール対象1",
+        "ReleaseDate": "2026-11-01T00:00:00Z",
+        "CurrentPrice": 759,
+        "MaxPrice": 900,
+        "URL": "https://www.amazon.co.jp/dp/B0UNPROC001?tag=aff-22&linkCode=x",
+        "CreatedAt": "2026-07-17T00:00:00Z",
+        "Note": "手動追加"
+    },
+    {
+        "ASIN": "B0UNPROC002",
+        "Title": "セール対象2",
+        "ReleaseDate": "2026-08-01T00:00:00Z",
+        "CurrentPrice": 1200,
+        "MaxPrice": 1200,
+        "URL": "https://www.amazon.co.jp/dp/B0UNPROC002",
+        "CreatedAt": "2026-07-10T00:00:00Z"
+    }
+]

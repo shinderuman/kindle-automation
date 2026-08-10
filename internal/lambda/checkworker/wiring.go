@@ -27,17 +27,13 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// checkWorkerRequiredSecretKeys は check-worker Lambda が必須で必要な SSM secret key。
-// Amazon affiliate tag と Gist 更新 token は本処理に必須（SPECIFICATION.md 19）。
+// checkWorkerRequiredSecretKeys は check-worker Lambda が起動に必須な SSM secret key（SPECIFICATION.md 19）。
+// Amazon affiliate tag・Gist 更新 token に加え、商品通知で必ず使用する Slack notice・Mastodon の4値を
+// required とする。secure/plain いずれにも存在しないか空値なら LoadSecrets が起動エラーにする。
+// SLACK_ERROR_CHANNEL（schedule-checks 専用）・MASTODON_CLIENT_ID/SECRET（check-worker 不使用）は含めない。
 var checkWorkerRequiredSecretKeys = []string{
 	config.KeyAmazonPartnerTag,
 	config.KeyGitHubToken,
-}
-
-// checkWorkerOptionalSecretKeys は check-worker Lambda が任意で使用する SSM secret key。
-// Slack/Mastodon 通知は設定されていれば送信し、未設定なら送信しない。欠けても起動を妨げない。
-// SLACK_ERROR_CHANNEL は check-worker が使用しないため含めない（schedule-checks 専用）。
-var checkWorkerOptionalSecretKeys = []string{
 	config.KeySlackBotToken,
 	config.KeySlackNoticeChannel,
 	config.KeyMastodonServer,
@@ -78,7 +74,7 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 
 	store := storage.NewS3Store(s3Client, env.S3Bucket)
 
-	secrets, err := config.LoadSecrets(ctx, ssmClient, checkWorkerRequiredSecretKeys, checkWorkerOptionalSecretKeys)
+	secrets, err := config.LoadSecrets(ctx, ssmClient, checkWorkerRequiredSecretKeys, nil)
 	if err != nil {
 		return nil, fmt.Errorf("load secrets: %w", err)
 	}
@@ -192,15 +188,13 @@ func (w *Worker) refreshVariableConfig(ctx context.Context) error {
 	return nil
 }
 
-// buildNotifier は SSM 秘密情報から Slack・Mastodon 送信者を構築する。未設定の送信先は nil とし送信しない。
+// buildNotifier は SSM 秘密情報から Slack・Mastodon 両送信者を構築する。
+// 4値は上流の LoadSecrets で required（secure/plain 両方欠落・空値を起動エラー）として検査済みのため、
+// ここへ来る時点で全て非空。一部欠落を理由に送信先を黙って無効化せず、両送信先を必ず構築する
+// （レビュー指摘2: 必要値欠落での黙る adapter 無効化・正常起動を禁止）。
 func buildNotifier(secrets config.Secrets, logger *slog.Logger) *notification.Notifier {
-	var slack, mastodon notification.Sender
-	if secrets.SlackBotToken != "" && secrets.SlackNoticeChannel != "" {
-		slack = notification.NewSlackSender(secrets.SlackBotToken, secrets.SlackNoticeChannel)
-	}
-	if secrets.MastodonServer != "" && secrets.MastodonAccessToken != "" {
-		mastodon = notification.NewMastodonSender(secrets.MastodonServer, secrets.MastodonAccessToken)
-	}
+	slack := notification.NewSlackSender(secrets.SlackBotToken, secrets.SlackNoticeChannel)
+	mastodon := notification.NewMastodonSender(secrets.MastodonServer, secrets.MastodonAccessToken)
 	return notification.NewNotifier(slack, mastodon, logger)
 }
 

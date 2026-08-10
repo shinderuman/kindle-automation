@@ -188,6 +188,83 @@ func TestDecodeBooks_PreservesInvalidDateWithoutZeroing(t *testing.T) {
 	}
 }
 
+func TestEncodeAuthors_KeepsFieldOrder(t *testing.T) {
+	records := []AuthorRecord{{Author: book.Author{
+		Name: "海李", URL: "u",
+		LatestReleaseDate:  time.Date(2025, 12, 28, 0, 0, 0, 0, time.UTC),
+		LatestReleaseTitle: "最新作",
+		LatestReleaseURL:   "latest-url",
+	}}}
+	encoded, err := EncodeAuthors(records)
+	if err != nil {
+		t.Fatalf("EncodeAuthors: %v", err)
+	}
+	nameIdx := bytes.Index(encoded, []byte("\"Name\""))
+	urlIdx := bytes.Index(encoded, []byte("\"URL\""))
+	dateIdx := bytes.Index(encoded, []byte("\"LatestReleaseDate\""))
+	titleIdx := bytes.Index(encoded, []byte("\"LatestReleaseTitle\""))
+	latestURLIdx := bytes.Index(encoded, []byte("\"LatestReleaseURL\""))
+	if !(nameIdx < urlIdx && urlIdx < dateIdx && dateIdx < titleIdx && titleIdx < latestURLIdx) {
+		t.Errorf("author field order not preserved:\n%s", encoded)
+	}
+}
+
+// TestEncodeAuthors_RoundTripPreservesUnknownFields は作者レコードの未知 field 保持と
+// & 復元を検証する（SPECIFICATION.md 9.3/9.4）。book 側の契約検証と同等の保証を author にも適用する。
+func TestEncodeAuthors_RoundTripPreservesUnknownFields(t *testing.T) {
+	src := `[
+    {
+        "Name": "海李",
+        "URL": "https://www.amazon.co.jp/stores/海李?tag=x&y=z",
+        "LatestReleaseDate": "2025-12-28T00:00:00Z",
+        "LatestReleaseTitle": "最新作",
+        "LatestReleaseURL": "https://www.amazon.co.jp/dp/B0NEW?tag=x&y=z",
+        "Memo": "手動メモ"
+    }
+]`
+	records, err := DecodeAuthors([]byte(src))
+	if err != nil {
+		t.Fatalf("DecodeAuthors: %v", err)
+	}
+	if _, ok := records[0].Extra["Memo"]; !ok {
+		t.Errorf("unknown field Memo not kept after decode")
+	}
+	if records[0].Author.LatestReleaseURL != "https://www.amazon.co.jp/dp/B0NEW?tag=x&y=z" {
+		t.Errorf("LatestReleaseURL = %q", records[0].Author.LatestReleaseURL)
+	}
+	encoded, err := EncodeAuthors(records)
+	if err != nil {
+		t.Fatalf("EncodeAuthors: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte("tag=x&y=z")) {
+		t.Errorf("& not unescaped in author URL: %s", encoded)
+	}
+	if !bytes.Contains(encoded, []byte("手動メモ")) {
+		t.Errorf("unknown field Memo not kept after encode")
+	}
+}
+
+// TestDecodeAuthors_AcceptsLegacyDateFormats は author の LatestReleaseDate が
+// 旧形式（date-only/slash）を受容し RFC3339 へ正規化されることを検証する（SPECIFICATION.md 9.3）。
+func TestDecodeAuthors_AcceptsLegacyDateFormats(t *testing.T) {
+	src := `[{"Name":"海李","URL":"u","LatestReleaseDate":"2025/12/28","LatestReleaseTitle":"作","LatestReleaseURL":"u"}]`
+	records, err := DecodeAuthors([]byte(src))
+	if err != nil {
+		t.Fatalf("DecodeAuthors: %v", err)
+	}
+	want, _ := time.Parse("2006/01/02", "2025/12/28")
+	if !records[0].Author.LatestReleaseDate.Equal(want) {
+		t.Errorf("LatestReleaseDate = %v, want %v", records[0].Author.LatestReleaseDate, want)
+	}
+	encoded, err := EncodeAuthors(records)
+	if err != nil {
+		t.Fatalf("EncodeAuthors: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"LatestReleaseDate": "2025-12-28T00:00:00Z"`)) {
+		t.Errorf("LatestReleaseDate not RFC3339: %s", encoded)
+	}
+}
+
 func TestDecodeBooks_NullAndEmptyDateAreZero(t *testing.T) {
 	// null / 空文字は entity.Date と同じくゼロ値扱いとし、Extra へは入れない。
 	src := `[{"ASIN":"B0FX3X569X","Title":"T","ReleaseDate":null,"CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":""}]`

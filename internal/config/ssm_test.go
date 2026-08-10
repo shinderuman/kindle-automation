@@ -111,6 +111,40 @@ func TestLoadSecrets_RequiredMissingErrors(t *testing.T) {
 	}
 }
 
+// required key の取得値が空文字の場合は起動エラー（有効な値を取得できない、SPECIFICATION.md 19）。
+// secure 側へ空値が入っている場合も fallback せず required 不成立として弾く。
+func TestLoadSecrets_RequiredEmptyErrors(t *testing.T) {
+	g := &stubGetter{values: map[string]string{
+		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
+		secureSSMPath + "/" + KeyGitHubToken:      "",
+	}}
+	_, err := LoadSecrets(context.Background(), g,
+		[]string{KeyAmazonPartnerTag, KeyGitHubToken}, nil)
+	if err == nil {
+		t.Fatal("LoadSecrets should fail when a required key value is empty")
+	}
+	if !errors.Is(err, ErrSecretEmpty) {
+		t.Errorf("err = %v, want wrap of ErrSecretEmpty", err)
+	}
+}
+
+// optional key の取得値が空文字の場合は許容し、空文字のまま保持する（任意通知先の未設定相当）。
+func TestLoadSecrets_OptionalEmptyAllowed(t *testing.T) {
+	g := &stubGetter{values: map[string]string{
+		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
+		secureSSMPath + "/" + KeySlackBotToken:    "",
+	}}
+	secrets, err := LoadSecrets(context.Background(), g,
+		[]string{KeyAmazonPartnerTag},
+		[]string{KeySlackBotToken})
+	if err != nil {
+		t.Fatalf("LoadSecrets with empty optional: %v", err)
+	}
+	if secrets.SlackBotToken != "" {
+		t.Errorf("empty optional SlackBotToken = %q, want empty", secrets.SlackBotToken)
+	}
+}
+
 // optional key は SSM に存在しなくても起動を妨げない（任意通知先の未設定）。存在すれば値が入る。
 func TestLoadSecrets_OptionalMissingSucceeds(t *testing.T) {
 	g := &stubGetter{values: map[string]string{

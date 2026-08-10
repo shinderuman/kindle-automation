@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shinderuman/kindle-automation/internal/application/execution"
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
@@ -59,14 +60,18 @@ func (f *fakeProductFetcher) FetchProduct(_ context.Context, _ string) (ProductR
 
 type fakeNotifiedStore struct {
 	exists          bool
+	existsErr       error
 	alreadyNotified bool
+	retentionErr    error
 	upserts         []book.KindleBook
 	upsertErr       error
 }
 
-func (s *fakeNotifiedStore) Exists(_ context.Context, _ string) (bool, error) { return s.exists, nil }
+func (s *fakeNotifiedStore) Exists(_ context.Context, _ string) (bool, error) {
+	return s.exists, s.existsErr
+}
 func (s *fakeNotifiedStore) ApplyRetentionAndExists(_ context.Context, _ string, _ time.Time) (bool, error) {
-	return s.alreadyNotified, nil
+	return s.alreadyNotified, s.retentionErr
 }
 func (s *fakeNotifiedStore) Upsert(_ context.Context, b book.KindleBook) error {
 	if s.upsertErr != nil {
@@ -664,5 +669,416 @@ func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	}
 	if candA.Target.GistType != gistNewRelID {
 		t.Errorf("GistType = %q, want %q", candA.Target.GistType, gistNewRelID)
+	}
+}
+
+// --- retryable / terminal 分類の混同防止（SPECIFICATION.md 11.3, 13.4）---
+
+// TestHandleNewReleaseSearch_SearchEmptyReturnsRetryableError は検索0件が search_empty の
+// 再試行可能エラーになることを検証する（SPECIFICATION.md 11.3, 507）。
+// terminal ではなく retryable（Lambda error → SQS 再配信）でなければならない。
+func TestHandleNewReleaseSearch_SearchEmptyReturnsRetryableError(t *testing.T) {
+	deps := baseDeps()
+	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchEmpty, HTTPStatus: 200, ResponseBytes: 7}
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("search empty must return retryable error")
+	}
+	if oc.Result != execution.ResultError {
+		t.Errorf("result = %v, want error (retryable)", oc.Result)
+	}
+	if oc.ErrorType != errorTypeSearchEmpty {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeSearchEmpty)
+	}
+	if oc.HTTPStatus != 200 || oc.ResponseBytes != 7 {
+		t.Errorf("HTTPStatus=%d ResponseBytes=%d, want 200/7", oc.HTTPStatus, oc.ResponseBytes)
+	}
+}
+
+// TestHandleNewReleaseSearch_FetchErrorReturnsError は FetchSearch の通信/decode エラーが
+// fetch_error の retryable になることを検証する（SPECIFICATION.md 11.3 通信失敗）。
+func TestHandleNewReleaseSearch_FetchErrorReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.SearchFetcher.(*fakeSearchFetcher).err = errors.New("dns failure")
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("fetch error must return error")
+	}
+	if oc.Result != execution.ResultError {
+		t.Errorf("result = %v, want error", oc.Result)
+	}
+	if oc.ErrorType != errorTypeFetchError {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeFetchError)
+	}
+}
+
+// TestHandleNewReleaseSearch_RetryableCategoryReturnsErrRetryableFetch は SearchRetryable が
+// 型付き ErrRetryableFetch を返すことを検証する（分類の混同防止）。
+func TestHandleNewReleaseSearch_RetryableCategoryReturnsErrRetryableFetch(t *testing.T) {
+	deps := baseDeps()
+	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchRetryable, HTTPStatus: 503}
+
+	_, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("retryable category must return error")
+	}
+	var re *ErrRetryableFetch
+	if !errors.As(err, &re) {
+		t.Errorf("error must be ErrRetryableFetch, got %T", err)
+	}
+}
+
+// TestHandleNewReleaseSearch_UnknownCategoryReturnsError は未知の検索分類が
+// unknown_category error になることを検証する（分類欠陥の表面化）。
+func TestHandleNewReleaseSearch_UnknownCategoryReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchCategory(99)}
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("unknown category must return error")
+	}
+	if oc.ErrorType != errorTypeUnknownCategory {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeUnknownCategory)
+	}
+}
+
+// TestHandleNewReleaseSearch_EnqueueFailureReturnsError は候補 job 投入失敗が
+// enqueue_failed で起動全体を失敗させることを検証する（SPECIFICATION.md 524）。
+// 後続候補の投入は保証せず、失敗対象を失わず error を返す。
+func TestHandleNewReleaseSearch_EnqueueFailureReturnsError(t *testing.T) {
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.Enqueuer.(*fakeEnqueuer).err = errors.New("sqs down")
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("enqueue failure must return error")
+	}
+	if oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeEnqueueFailed)
+	}
+}
+
+// TestHandleNewReleaseResult_MissingProductReturnsError は result job の product 欠落が
+// missing_product で失敗することを検証する（job 投入側の schema 違反防御）。
+func TestHandleNewReleaseResult_MissingProductReturnsError(t *testing.T) {
+	deps := baseDeps()
+	// product を持たない result job。
+	j := job.Job{Version: job.Version, JobID: "r", Kind: job.KindNewReleaseResult,
+		CheckType: job.CheckNewRelease, CycleID: "nr:c",
+		Target: job.Target{ASIN: "B0FX3X569X", AuthorName: "海李"}}
+
+	oc, err := HandleNewReleaseResult(context.Background(), deps, j)
+	if err == nil {
+		t.Fatal("missing product must return error")
+	}
+	if oc.ErrorType != errorTypeMissingProduct {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeMissingProduct)
+	}
+}
+
+// TestHandleNewReleaseDetail_DateUnavailableIsRetryable は商品詳細で発売日を取得できない場合が
+// 解析失敗の retryable になることを検証する（SPECIFICATION.md 13.4, 11.3 522）。
+// terminal ではなく retryable で再試行しなければならない。
+func TestHandleNewReleaseDetail_DateUnavailableIsRetryable(t *testing.T) {
+	info := ProductInfo{
+		ASIN: "B0FX3X569X", Title: "T", HasKindleSwatch: true,
+		CurrentPrice: book.NewPrice(800), HasReleaseDate: false,
+	}
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductOK, Info: info}
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err == nil {
+		t.Fatal("date unavailable must be retryable error")
+	}
+	if oc.Result != execution.ResultError {
+		t.Errorf("result = %v, want error (retryable)", oc.Result)
+	}
+	if oc.ErrorType != errorTypeDateUnavailable {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeDateUnavailable)
+	}
+}
+
+// TestHandleNewReleaseDetail_PermanentClientErrorIsTerminal は恒久 4xx が terminal になり、
+// error_type=permanent_client_error で対象をリストへ残すことを検証する（SPECIFICATION.md 11.3 517）。
+// not_found と区別し、retryable と混同しない。
+func TestHandleNewReleaseDetail_PermanentClientErrorIsTerminal(t *testing.T) {
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductPermanentClientError, HTTPStatus: 400}
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err != nil {
+		t.Fatalf("terminal must return nil error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal {
+		t.Errorf("result = %v, want terminal", oc.Result)
+	}
+	if oc.ErrorType != "permanent_client_error" {
+		t.Errorf("error_type = %q, want permanent_client_error", oc.ErrorType)
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+		t.Errorf("terminal must not save")
+	}
+}
+
+// TestHandleNewReleaseDetail_NotFoundIsTerminal は 404/商品不存在が not_found terminal になることを検証する。
+func TestHandleNewReleaseDetail_NotFoundIsTerminal(t *testing.T) {
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductNotFound, HTTPStatus: 404}
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err != nil {
+		t.Fatalf("terminal must return nil error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal {
+		t.Errorf("result = %v, want terminal", oc.Result)
+	}
+	if oc.ErrorType != "not_found" {
+		t.Errorf("error_type = %q, want not_found", oc.ErrorType)
+	}
+}
+
+// TestHandleNewReleaseDetail_ExcludedKeywordAndYearMonthAreTerminal は商品詳細で除外キーワード・
+// 年月タイトルに該当する候補が excluded terminal になることを検証する（SPECIFICATION.md 13.4/13.3）。
+func TestHandleNewReleaseDetail_ExcludedKeywordAndYearMonthAreTerminal(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+	}{
+		{name: "除外キーワードはexcluded terminal", title: "除外タイトル"},
+		{name: "年月パターンはexcluded terminal", title: "2026年8月号"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := ProductInfo{
+				ASIN: "B0FX3X569X", Title: tc.title, HasKindleSwatch: true,
+				CurrentPrice: book.NewPrice(800), ReleaseDate: futureDate, HasReleaseDate: true,
+				Contributors: []string{"海李"},
+			}
+			deps := baseDeps()
+			deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductOK, Info: info}
+
+			oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+			if err != nil {
+				t.Fatalf("excluded must return nil error: %v", err)
+			}
+			if oc.Result != execution.ResultTerminal {
+				t.Errorf("result = %v, want terminal", oc.Result)
+			}
+			if oc.ErrorType != errorTypeExcluded {
+				t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeExcluded)
+			}
+			if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+				t.Errorf("excluded must not save")
+			}
+		})
+	}
+}
+
+// TestHandleNewReleaseDetail_FetchErrorReturnsError は FetchProduct の通信エラーが
+// fetch_error の retryable になることを検証する（SPECIFICATION.md 11.3 通信失敗）。
+func TestHandleNewReleaseDetail_FetchErrorReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).err = errors.New("timeout")
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err == nil {
+		t.Fatal("fetch error must return error")
+	}
+	if oc.ErrorType != errorTypeFetchError {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeFetchError)
+	}
+}
+
+// TestHandleNewReleaseDetail_RetryableCategoryReturnsErrRetryableFetch は商品ページ取得の
+// retryable 分類（403/429/5xx/CAPTCHA/構造欠落）が型付き ErrRetryableFetch になることを検証する
+// （SPECIFICATION.md 11.3）。terminal や解析失敗と混同しない。
+func TestHandleNewReleaseDetail_RetryableCategoryReturnsErrRetryableFetch(t *testing.T) {
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductRetryable, HTTPStatus: 503}
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err == nil {
+		t.Fatal("retryable category must return error")
+	}
+	if oc.Result != execution.ResultError {
+		t.Errorf("result = %v, want error (retryable)", oc.Result)
+	}
+	if oc.ErrorType != errorTypeFetchRetryable {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeFetchRetryable)
+	}
+	var re *ErrRetryableFetch
+	if !errors.As(err, &re) {
+		t.Errorf("error must be ErrRetryableFetch, got %T", err)
+	}
+	if re.Error() == "" {
+		t.Errorf("ErrRetryableFetch.Error() must be non-empty")
+	}
+}
+
+// TestHandleNewReleaseDetail_UnknownCategoryReturnsError は未知の商品分類が
+// unknown_category error になることを検証する（分類欠陥の表面化）。
+func TestHandleNewReleaseDetail_UnknownCategoryReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductCategory(99)}
+
+	oc, err := HandleNewReleaseDetail(context.Background(), deps, detailJob("B0FX3X569X", "海李"))
+	if err == nil {
+		t.Fatal("unknown category must return error")
+	}
+	if oc.ErrorType != errorTypeUnknownCategory {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeUnknownCategory)
+	}
+}
+
+// --- 候補振り分け境界（SPECIFICATION.md 13.4）---
+
+// TestHandleNewReleaseSearch_RoutesNonKindleAndInvalidPriceToDetail は検索結果で Kindle確定 or
+// 正のKindle価格 or 発売日 のいずれかを確定できない候補が new_release_detail へ回されることを検証する。
+// これらは result へ進めず、商品ページで再確認する（SPECIFICATION.md 13.4, 234）。
+func TestHandleNewReleaseSearch_RoutesNonKindleAndInvalidPriceToDetail(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(h *SearchHit)
+	}{
+		{name: "非Kindle(種別不明)はdetailへ", mutate: func(h *SearchHit) { h.IsKindle = false }},
+		{name: "Kindle価格不正はdetailへ", mutate: func(h *SearchHit) { h.KindlePrice = book.UnknownPrice() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit := completeHit("B0FX3X569X")
+			tc.mutate(&hit)
+			fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{hit}}}
+			deps := baseDeps()
+			deps.SearchFetcher = fetcher
+
+			if _, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李")); err != nil {
+				t.Fatalf("HandleNewReleaseSearch: %v", err)
+			}
+			enq := deps.Enqueuer.(*fakeEnqueuer)
+			if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindNewReleaseDetail {
+				t.Fatalf("want 1 detail job, got %+v", enq.jobs)
+			}
+			if enq.jobs[0].Target.Product != nil {
+				t.Errorf("detail job must not carry product")
+			}
+		})
+	}
+}
+
+// TestHandleNewReleaseSearch_NotifiedExistsErrorPropagates は事前除外での notified 存在判定エラーが
+// 投入失敗として伝播し失敗対象を失わないことを検証する（SPECIFICATION.md 13.3, 524）。
+func TestHandleNewReleaseSearch_NotifiedExistsErrorPropagates(t *testing.T) {
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.NotifiedStore.(*fakeNotifiedStore).existsErr = errors.New("s3 get failed")
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("notified exists error must propagate")
+	}
+	if oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeEnqueueFailed)
+	}
+}
+
+// --- 純粋関数: 発売日境界・正規化・役割表記（SPECIFICATION.md 13.3, 13.6）---
+
+// TestIsFutureRelease_Boundary は ReleaseDate.After(now) の境界を検証する（SPECIFICATION.md 13.6）。
+// 発売日==now は将来ではないため false、発売日が now より1日後なら true。
+// これにより「ReleaseDateの時刻が処理時刻以前なら新刊予定として通知しない」境界を固定する。
+func TestIsFutureRelease_Boundary(t *testing.T) {
+	now := fixedClock()
+	if IsFutureRelease(now, now) {
+		t.Errorf("release == now must not be future (After is strict)")
+	}
+	equalMidday := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	if !IsFutureRelease(equalMidday, now) {
+		t.Errorf("release later same day must be future")
+	}
+	nextDay := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	if !IsFutureRelease(nextDay, now) {
+		t.Errorf("release next day must be future")
+	}
+}
+
+// TestNormalizeAuthorName_EmptyAndMixedSpaces は空文字と半角/全角スペース混入を検証する。
+func TestNormalizeAuthorName_EmptyAndMixedSpaces(t *testing.T) {
+	if got := NormalizeAuthorName(""); got != "" {
+		t.Errorf("empty = %q, want empty", got)
+	}
+	if got := NormalizeAuthorName(" 海　李 "); got != "海李" {
+		t.Errorf("mixed leading/trailing spaces = %q, want 海李", got)
+	}
+}
+
+// TestAuthorMatches_FullWidthRoleParenAndEmptyAuthor は全角役割括弧（著）の除去と、
+// 対象作者名空の false を検証する（SPECIFICATION.md 13.3）。役割の半角/全角を問わない。
+func TestAuthorMatches_FullWidthRoleParenAndEmptyAuthor(t *testing.T) {
+	if !AuthorMatches("海李", []string{"海李（著）"}) {
+		t.Errorf("全角役割括弧（著）を除去したcontributorと一致する場合はtrue")
+	}
+	if !AuthorMatches("海李", []string{"海李（イラスト）"}) {
+		t.Errorf("全角役割括弧（イラスト）を除去しても一致する場合はtrue")
+	}
+	if AuthorMatches("", []string{"海李"}) {
+		t.Errorf("対象作者名空はfalse")
+	}
+}
+
+// --- 副作用順序: 保存失敗時の通知抑制・retention/authorStore error（SPECIFICATION.md 13.6）---
+
+// TestApplyCandidate_UpcomingFailureSkipsNotify は upcoming 保存失敗時に通知しないことを検証する。
+// 通知は notified と upcoming の両方の S3 保存成功後（SPECIFICATION.md 13.6 手順5-7の順序）。
+func TestApplyCandidate_UpcomingFailureSkipsNotify(t *testing.T) {
+	deps := baseDeps()
+	deps.UpcomingStore.(*fakeUpcomingStore).upsertErr = errors.New("s3 conflict")
+
+	if _, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X"))); err == nil {
+		t.Fatal("upcoming failure must return error")
+	}
+	// upcoming 保存失敗時は通知しない（保存成功後のみ通知）。
+	if deps.Notifier.(*fakeNotifier).called {
+		t.Errorf("must not notify when upcoming save failed")
+	}
+	// notified は upcoming の前に保存されるため成功している。
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 1 {
+		t.Errorf("notified must be saved before upcoming")
+	}
+}
+
+// TestApplyCandidate_RetentionFailureReturnsError は notified 保存期間適用の読み直し失敗が
+// retention error になることを検証する（SPECIFICATION.md 13.6 手順1-3）。
+func TestApplyCandidate_RetentionFailureReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.NotifiedStore.(*fakeNotifiedStore).retentionErr = errors.New("s3 get failed")
+
+	oc, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X")))
+	if err == nil {
+		t.Fatal("retention failure must return error")
+	}
+	if oc.ErrorType != errorTypeRetention {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeRetention)
+	}
+}
+
+// TestApplyCandidate_AuthorStoreFailureReturnsError は Author 最新作更新失敗が
+// author_store error になり後続へ進まないことを検証する（SPECIFICATION.md 13.5）。
+func TestApplyCandidate_AuthorStoreFailureReturnsError(t *testing.T) {
+	deps := baseDeps()
+	deps.AuthorStore.(*fakeAuthorStore).err = errors.New("authors.json conflict")
+
+	oc, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X")))
+	if err == nil {
+		t.Fatal("author store failure must return error")
+	}
+	if oc.ErrorType != errorTypeAuthorStore {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeAuthorStore)
 	}
 }

@@ -326,6 +326,33 @@ func TestHandleSaleCheck_UpdatesPriceHistory(t *testing.T) {
 	}
 }
 
+// セール不成立かつ価格変動も閾値未満のとき、通知せずとも価格履歴を正しく更新する（SPEC 12.3/12.5/12.6）。
+// CurrentPrice は今回価格へ更新し、MaxPrice は過去最高を維持する。
+func TestHandleSaleCheck_SubThresholdChangeUpdatesStateWithoutNotify(t *testing.T) {
+	info := okInfo("B0FX3X569X", 870) // 900→870 は差30で PriceChangeAmount(100) 未満
+	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
+	store := &fakeStore{oldBook: existingBook("B0FX3X569X", 900), applied: true}
+	notifier := &fakeNotifier{}
+	d := deps(fetcher, store, notifier)
+
+	oc, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X"))
+	if err != nil {
+		t.Fatalf("HandleSaleCheck: %v", err)
+	}
+	if notifier.called {
+		t.Errorf("must not notify when no sale and sub-threshold change")
+	}
+	if !store.updated.CurrentPrice.Valid() || store.updated.CurrentPrice.Yen() != 870 {
+		t.Errorf("CurrentPrice = %+v, want 870 (updated even without notify)", store.updated.CurrentPrice)
+	}
+	if !store.updated.MaxPrice.Valid() || store.updated.MaxPrice.Yen() != 900 {
+		t.Errorf("MaxPrice = %+v, want 900 (kept on sub-threshold drop)", store.updated.MaxPrice)
+	}
+	if oc.Result != execution.ResultCompleted {
+		t.Errorf("outcome result = %q, want completed", oc.Result)
+	}
+}
+
 func TestHandleSaleFinalize_EnqueuesSaleGistUpdate(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	d := Dependencies{Enqueuer: enq}

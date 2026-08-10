@@ -995,8 +995,10 @@ MaxPrice = CurrentPrice
 
 ### 20.3 切り替え手順
 
+前提: 対象S3 bucket の Versioning が `Enabled` であること。`Suspended` や未設定の場合は本番切り替えを行わない（§20.4 の version 指定 rollback が成立しないため）。Versioning=Enabled なら backup prefix への object copy は作らず、切り替え直前の各 object の現時点 VersionId を記録して rollback 基準にする。
+
 1. 新しいSAMリソースをScheduler無効状態でデプロイする
-2. 既存S3対象オブジェクトを日時付きbackup prefixへコピーする
+2. bucket の Versioning が `Enabled` であることを確認する。Enabled でなければ切り替えを中止する。Enabled なら対象 object（`authors.json`、`paper_books_asins.json`、`unprocessed_asins.json`、`upcoming_asins.json`、`notified_asins.json`）の現時点 VersionId を記録し、backup prefix への copy は行わない
 3. 既存の新刊・セール・紙書籍CheckerのEventBridge triggerを無効にする
 4. `MaxPrice`初期化パッチをdry-runし、変更件数を確認する
 5. パッチを実行し、JSON schema、ASIN集合、価格差分を再検証する
@@ -1008,12 +1010,14 @@ MaxPrice = CurrentPrice
 
 ### 20.4 ロールバック
 
+rollback は §20.3 step2 で記録した VersionId を基準とする。切り替え後に発生した手動編集を盲目的に上書きしないため、配列全体の無条件上書きは行わず、object ごとに復元要否を判断する。
+
 1. 新SchedulerとSQS event source mappingを無効にする
 2. 旧3 Checkerのtriggerを再有効化する
-3. S3 backupと現行データを比較する
-4. 切り替え後の手動追加を失わないよう、必要なレコードだけを選択的に復元する
+3. 対象 object ごとに、記録した VersionId の内容と現行データを比較する
+4. 新システムだけが変更した部分のみ、記録した旧 version の内容へ選択的に戻す。切り替え後に手動で追加・変更・削除されたレコードは保持する
 
-S3 backupを配列全体で無条件に上書きしてロールバックしない。
+S3 backupを配列全体で無条件に上書きしてロールバックしない。Versioning が `Enabled` でない場合は version 指定での選択的復元ができないため、切り替えへ進まない（§20.3 前提）。
 
 ## 21. PoCで確認済みの事実
 

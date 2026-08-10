@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -308,5 +309,389 @@ func TestMergeUpcoming_SavesSortOrder(t *testing.T) {
 	want := []string{"B0NEW", "B0MID", "B0OLD"}
 	if !asinsEqual(asinOrder(records), want) {
 		t.Errorf("order = %v, want %v\n%s", asinOrder(records), want, obj.Body)
+	}
+}
+
+// failStore は Get/Put で固定の非前提不一致 error を返す検証用 store。
+// Get error と Put 非412 error が retry されず即時伝播することを検証する（SPECIFICATION.md 9.5 error 分類）。
+type failStore struct {
+	getErr   error
+	putErr   error
+	getCalls int
+	putCalls int
+	lastOpts PutOptions
+}
+
+func (s *failStore) Get(_ context.Context, _ string) (Object, error) {
+	s.getCalls++
+	if s.getErr != nil {
+		return Object{}, s.getErr
+	}
+	return Object{Body: []byte("[]"), ETag: "etag-fail"}, nil
+}
+
+func (s *failStore) Put(_ context.Context, _ string, _ []byte, opts PutOptions) error {
+	s.putCalls++
+	s.lastOpts = opts
+	if s.putErr != nil {
+		return s.putErr
+	}
+	return nil
+}
+
+// ctxErrStore は context の取消/超過を store 層が表面化した場合の検証用 store。
+// MemStore は ctx を無視するため、ctx.Err() を伝える store で cancel 伝播を検証する。
+type ctxErrStore struct{}
+
+func (s *ctxErrStore) Get(ctx context.Context, _ string) (Object, error) {
+	if err := ctx.Err(); err != nil {
+		return Object{}, err
+	}
+	return Object{Body: []byte("[]"), ETag: ""}, nil
+}
+
+func (s *ctxErrStore) Put(ctx context.Context, _ string, _ []byte, _ PutOptions) error {
+	return ctx.Err()
+}
+
+// keyedGetErrStore は指定 key の Get だけ固定 error を返し、他は MemStore へ委譲する。
+// MergeUpcoming で特定 object の Get 失敗時の挙動（upcoming を消去しない等）を検証する。
+type keyedGetErrStore struct {
+	*MemStore
+	failKey string
+	getErr  error
+}
+
+func (s *keyedGetErrStore) Get(ctx context.Context, key string) (Object, error) {
+	if key == s.failKey && s.getErr != nil {
+		return Object{}, s.getErr
+	}
+	return s.MemStore.Get(ctx, key)
+}
+
+// manualConflictStore は unprocessed の初回 Put 直前に手動追加レコードを紛れ込ませ
+// ETag を変えて 412 を起こす。retry で再読込した本文に手動追加が残ることを検証する。
+type manualConflictStore struct {
+	*MemStore
+	conflicted bool
+}
+
+func (s *manualConflictStore) Put(ctx context.Context, key string, body []byte, opts PutOptions) error {
+	if key == "unprocessed" && !s.conflicted {
+		// 既存 unprocessed へ手動で1件追加された（ETag 変更）状態を再現する。
+		s.Seed("unprocessed", `[{"ASIN":"B0MANUAL001","Title":"手動","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"}]`)
+		s.conflicted = true
+		// 呼び出し元の If-Match は旧 ETag のため前提不一致になる。
+		return ErrPreconditionFailed
+	}
+	return s.MemStore.Put(ctx, key, body, opts)
+}
+
+// errMutateFailure は即時伝播テストで「retry で再呼び出しされない」ことを確認するための固有 error。
+var errMutateFailure = errors.New("mutate failure sentinel")
+
+// TestMutateBooks_GetErrorNotRetried は Get の非 NotFound error を retry せず即時返すことを検証する。
+func TestMutateBooks_GetErrorNotRetried(t *testing.T) {
+	store := &failStore{getErr: errMutateFailure}
+	err := mutateBooks(context.Background(), store, "k", 3, func(records []BookRecord) ([]BookRecord, error) {
+		t.Fatal("mutate must not run when Get fails")
+		return records, nil
+	})
+	if !errors.Is(err, errMutateFailure) {
+		t.Errorf("err = %v, want sentinel", err)
+	}
+	if store.getCalls != 1 {
+		t.Errorf("getCalls = %d, want 1 (Get error must not retry)", store.getCalls)
+	}
+}
+
+// TestMutateBooks_PutErrorNotPreconditionNotRetried は Put の非412 error を retry せず即時返すことを検証する。
+func TestMutateBooks_PutErrorNotPreconditionNotRetried(t *testing.T) {
+	store := &failStore{putErr: errMutateFailure}
+	err := mutateBooks(context.Background(), store, "k", 3, func(records []BookRecord) ([]BookRecord, error) {
+		return append(records, BookRecord{Book: book.KindleBook{ASIN: "B0FX3X569X"}}), nil
+	})
+	if !errors.Is(err, errMutateFailure) {
+		t.Errorf("err = %v, want sentinel", err)
+	}
+	if store.putCalls != 1 {
+		t.Errorf("putCalls = %d, want 1 (non-412 Put error must not retry)", store.putCalls)
+	}
+}
+
+// TestMutateBooks_ContextCancelPropagates は ctx 取消時に store が ctx.Err() を返せば
+// mutateBooks がそれを retry/握り潰しせず伝播することを検証する。
+func TestMutateBooks_ContextCancelPropagates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := mutateBooks(ctx, &ctxErrStore{}, "k", 3, func(records []BookRecord) ([]BookRecord, error) {
+		t.Fatal("mutate must not run when ctx cancelled before Get")
+		return records, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// optsCaptureStore は MemStore へ委譲しつつ Put に渡された opts を記録する。
+// 既存 object 更新で必ず If-Match が設定される（無条件上書き経路がない）ことを検証する。
+type optsCaptureStore struct {
+	*MemStore
+	lastOpts PutOptions
+	putCalls int
+}
+
+func (s *optsCaptureStore) Put(ctx context.Context, key string, body []byte, opts PutOptions) error {
+	s.lastOpts = opts
+	s.putCalls++
+	return s.MemStore.Put(ctx, key, body, opts)
+}
+
+// TestMutateBooks_AlwaysUsesIfMatchOnExistingObject は既存 object の更新で
+// If-Match が空でない（無条件上書きでない）ことを回帰検証する（SPECIFICATION.md 9.5）。
+func TestMutateBooks_AlwaysUsesIfMatchOnExistingObject(t *testing.T) {
+	store := &optsCaptureStore{MemStore: NewMemStore()}
+	seedBook(store.MemStore, "k", book.KindleBook{ASIN: "B0TARGET001", Title: "旧"})
+	obj, _ := store.Get(context.Background(), "k")
+
+	_, err := UpdateOneBook(context.Background(), store, "k", "B0TARGET001", func(b book.KindleBook) book.KindleBook {
+		b.Title = "新"
+		return b
+	})
+	if err != nil {
+		t.Fatalf("UpdateOneBook: %v", err)
+	}
+	if store.putCalls != 1 {
+		t.Errorf("putCalls = %d, want 1", store.putCalls)
+	}
+	if store.lastOpts.IfMatch == "" {
+		t.Errorf("IfMatch empty on existing object (unconditional overwrite path): %+v", store.lastOpts)
+	}
+	if store.lastOpts.IfMatch != obj.ETag {
+		t.Errorf("IfMatch = %q, want object ETag %q", store.lastOpts.IfMatch, obj.ETag)
+	}
+	if store.lastOpts.IfNoneMatch != "" {
+		t.Errorf("IfNoneMatch must be empty on existing object: %+v", store.lastOpts)
+	}
+}
+
+// TestMutateBooks_NewObjectUsesIfNoneMatch は object 非存在時は If-None-Match: * で新規作成し、
+// 無条件上書き経路にならないことを検証する（SPECIFICATION.md 9.5）。
+func TestMutateBooks_NewObjectUsesIfNoneMatch(t *testing.T) {
+	store := &optsCaptureStore{MemStore: NewMemStore()}
+	err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{ASIN: "B0FX3X569X"}})
+	if err != nil {
+		t.Fatalf("UpsertBookRecord: %v", err)
+	}
+	if store.lastOpts.IfNoneMatch != "*" {
+		t.Errorf("IfNoneMatch = %q, want * for new object", store.lastOpts.IfNoneMatch)
+	}
+	if store.lastOpts.IfMatch != "" {
+		t.Errorf("IfMatch must be empty for new object: %+v", store.lastOpts)
+	}
+}
+
+func TestMergeUpcoming_EmptyUpcomingAddsNothing(t *testing.T) {
+	store := NewMemStore()
+	seedBook(store, "unprocessed", book.KindleBook{ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	// upcoming は空配列。
+	store.Seed("upcoming", `[]`)
+
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	if added != 0 {
+		t.Errorf("added = %d, want 0 for empty upcoming", added)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if len(records) != 1 || records[0].Book.ASIN != "A" {
+		t.Errorf("unprocessed changed unexpectedly: %+v", records)
+	}
+}
+
+func TestMergeUpcoming_EmptyUnprocessedTakesAllUpcoming(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("unprocessed", `[]`)
+	seedBook(store, "upcoming",
+		book.KindleBook{ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)},
+		book.KindleBook{ASIN: "C", Title: "c", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)},
+	)
+
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	if added != 2 {
+		t.Errorf("added = %d, want 2", added)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if findBookIndex(records, "B") == -1 || findBookIndex(records, "C") == -1 {
+		t.Errorf("upcoming B/C not merged into empty unprocessed: %+v", records)
+	}
+}
+
+func TestMergeUpcoming_BothEmptyIsNoOp(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("unprocessed", `[]`)
+	store.Seed("upcoming", `[]`)
+
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	if added != 0 {
+		t.Errorf("added = %d, want 0", added)
+	}
+}
+
+// TestMergeUpcoming_RetriesOnUnprocessedConflict は unprocessed の Put が 412 になっても
+// 最新本文を再読込して merge を最大3回やり直すことを検証する（SPECIFICATION.md 9.5/10）。
+func TestMergeUpcoming_RetriesOnUnprocessedConflict(t *testing.T) {
+	store := &flakyStore{MemStore: NewMemStore(), conflicts: 2, conflictKey: "unprocessed"}
+	seedBook(store.MemStore, "unprocessed", book.KindleBook{
+		ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	seedBook(store.MemStore, "upcoming", book.KindleBook{
+		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	if added != 1 {
+		t.Errorf("added = %d, want 1 (B)", added)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if findBookIndex(records, "B") == -1 {
+		t.Errorf("upcoming B not merged after retry: %+v", records)
+	}
+}
+
+// TestMergeUpcoming_KeepsManualUnprocessedDuringRetry は retry 中に unprocessed へ
+// 手動追加されたレコードが、再 merge で失われずに残ることを検証する（SPECIFICATION.md 9.4/10）。
+func TestMergeUpcoming_KeepsManualUnprocessedDuringRetry(t *testing.T) {
+	store := &manualConflictStore{MemStore: NewMemStore()}
+	seedBook(store.MemStore, "unprocessed", book.KindleBook{
+		ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	seedBook(store.MemStore, "upcoming", book.KindleBook{
+		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	if added != 1 {
+		t.Errorf("added = %d, want 1 (B)", added)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	// 処理中に紛れ込んだ手動追加 B0MANUAL001 と、upcoming 由来 B が両方残る。
+	if findBookIndex(records, "B0MANUAL001") == -1 {
+		t.Errorf("手動追加レコードが retry で失われた: %+v", records)
+	}
+	if findBookIndex(records, "B") == -1 {
+		t.Errorf("upcoming B not merged: %+v", records)
+	}
+}
+
+// TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming は unprocessed の Get が
+// 非 NotFound error のとき、upcoming を消去せず error を返すことを検証する（部分失敗の安全性）。
+func TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming(t *testing.T) {
+	store := &keyedGetErrStore{MemStore: NewMemStore(), failKey: "unprocessed", getErr: errMutateFailure}
+	seedBook(store.MemStore, "unprocessed", book.KindleBook{ASIN: "A"})
+	seedBook(store.MemStore, "upcoming", book.KindleBook{ASIN: "B"})
+
+	_, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if !errors.Is(err, errMutateFailure) {
+		t.Errorf("err = %v, want sentinel", err)
+	}
+	// upcoming は消去されず残る。
+	upcomingObj, _ := store.Get(context.Background(), "upcoming")
+	records, _ := DecodeBooks(upcomingObj.Body)
+	if len(records) != 1 || records[0].Book.ASIN != "B" {
+		t.Errorf("upcoming must not be cleared on unprocessed Get failure: %+v", records)
+	}
+}
+
+// TestMergeUpcoming_UpcomingGetErrorReturns は upcoming の Get が非 NotFound error のとき
+// 即座に error を返すことを検証する。
+func TestMergeUpcoming_UpcomingGetErrorReturns(t *testing.T) {
+	store := &keyedGetErrStore{MemStore: NewMemStore(), failKey: "upcoming", getErr: errMutateFailure}
+
+	_, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if !errors.Is(err, errMutateFailure) {
+		t.Errorf("err = %v, want sentinel", err)
+	}
+}
+
+// TestMergeUpcoming_RerunIsIdempotent は2回目実行で added=0 となり、
+// unprocessed の内容が安定することを検証する（再実行安全性、SPECIFICATION.md 7.5）。
+func TestMergeUpcoming_RerunIsIdempotent(t *testing.T) {
+	store := NewMemStore()
+	seedBook(store, "unprocessed", book.KindleBook{
+		ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	seedBook(store, "upcoming", book.KindleBook{
+		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+
+	first, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("first MergeUpcoming: %v", err)
+	}
+	if first != 1 {
+		t.Fatalf("first added = %d, want 1", first)
+	}
+	// 2回目: upcoming は空配列化済みのため added=0。
+	second, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("second MergeUpcoming: %v", err)
+	}
+	if second != 0 {
+		t.Errorf("second added = %d, want 0 (idempotent)", second)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if len(records) != 2 {
+		t.Errorf("unprocessed len = %d, want 2 (stable on rerun)", len(records))
+	}
+}
+
+// alwaysPreconditionStore は Put が常に前提不一致を返す検証用 store。
+// clearUpcomingIfUnchanged の clear Put が 412 でも error にせず added を返すことを検証する。
+type alwaysPreconditionStore struct {
+	*MemStore
+}
+
+func (s *alwaysPreconditionStore) Put(_ context.Context, _ string, _ []byte, _ PutOptions) error {
+	return ErrPreconditionFailed
+}
+
+// TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded は upcoming の clear Put が
+// 412 になった場合でも error にせず added を返し、upcoming を無理に消去しないことを検証する。
+func TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded(t *testing.T) {
+	store := &alwaysPreconditionStore{MemStore: NewMemStore()}
+	seedBook(store.MemStore, "upcoming", book.KindleBook{ASIN: "C"})
+	obj, _ := store.Get(context.Background(), "upcoming")
+
+	added, err := clearUpcomingIfUnchanged(context.Background(), store, "upcoming", obj.ETag, 1)
+	if err != nil {
+		t.Fatalf("clearUpcomingIfUnchanged on clear 412: %v", err)
+	}
+	if added != 1 {
+		t.Errorf("added = %d, want 1 (clear conflict must not lose added count)", added)
+	}
+	// clear Put が失敗したため upcoming は元のままで残る。
+	upcomingObj, _ := store.Get(context.Background(), "upcoming")
+	records, _ := DecodeBooks(upcomingObj.Body)
+	if len(records) != 1 {
+		t.Errorf("upcoming must remain when clear Put fails: %+v", records)
 	}
 }

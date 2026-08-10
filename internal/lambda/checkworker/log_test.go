@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,166 @@ func TestLogDecodeFailure_EmitsJobErrorWithDecodeType(t *testing.T) {
 	}
 	if m["error"] != "invalid json" {
 		t.Errorf("error = %v, want invalid json", m["error"])
+	}
+}
+
+// 設定読込失敗は level=ERROR・event=job_error・error_type=config_load の構造化ログを1件だけ出す
+// （SPECIFICATION.md 18.1/18.3、レビュー指摘4）。識別子は最初の record から best-effort で埋まる。
+func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
+	var buf bytes.Buffer
+	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
+	body := mustEncode(t, job.Job{
+		Version: job.Version, JobID: "job-1", Kind: job.KindSaleCheck,
+		CheckType: job.CheckSale, CycleID: "cycle-1", Target: job.Target{ASIN: "B0FX3X569X"},
+	})
+	event := events.SQSEvent{Records: []events.SQSMessage{{
+		MessageId: "m1", Body: body,
+		Attributes: map[string]string{"ApproximateReceiveCount": "2"},
+	}}}
+
+	w.logConfigLoadFailure(context.Background(), event, errors.New("get checker_configs.json: s3 timeout"))
+
+	// ERROR ログは1行だけ（同一失敗で ErrorCount を複数増やさない）。
+	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+		t.Fatalf("log lines = %d, want 1", n)
+	}
+	m := parseLog(t, buf.Bytes())
+	if m["event"] != logging.EventJobError {
+		t.Errorf("event = %v, want %q", m["event"], logging.EventJobError)
+	}
+	if m["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", m["level"])
+	}
+	if m["result"] != execution.ResultError {
+		t.Errorf("result = %v, want error", m["result"])
+	}
+	if m["error_type"] != "config_load" {
+		t.Errorf("error_type = %v, want config_load", m["error_type"])
+	}
+	// 識別子は最初の record から best-effort 取得される。
+	if m["job_id"] != "job-1" {
+		t.Errorf("job_id = %v, want job-1", m["job_id"])
+	}
+	if m["cycle_id"] != "cycle-1" {
+		t.Errorf("cycle_id = %v, want cycle-1", m["cycle_id"])
+	}
+	if m["check_type"] != "sale" {
+		t.Errorf("check_type = %v, want sale", m["check_type"])
+	}
+	if m["target"] != "B0FX3X569X" {
+		t.Errorf("target = %v, want B0FX3X569X", m["target"])
+	}
+	if m["receive_count"] != float64(2) {
+		t.Errorf("receive_count = %v, want 2", m["receive_count"])
+	}
+	// 値の無い field は既存契約に従い http_status 空・数値0。
+	if m["http_status"] != "" {
+		t.Errorf("http_status = %v, want empty", m["http_status"])
+	}
+	if m["duration_ms"] != float64(0) {
+		t.Errorf("duration_ms = %v, want 0", m["duration_ms"])
+	}
+	if m["response_bytes"] != float64(0) {
+		t.Errorf("response_bytes = %v, want 0", m["response_bytes"])
+	}
+	if m["error"] != "get checker_configs.json: s3 timeout" {
+		t.Errorf("error = %v, want s3 timeout message", m["error"])
+	}
+}
+
+// message が decode 不能でもログ自体を失わない。識別子は空になるが receive_count は属性から埋まる。
+func TestLogConfigLoadFailure_UndecodableMessageStillLogs(t *testing.T) {
+	var buf bytes.Buffer
+	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
+	event := events.SQSEvent{Records: []events.SQSMessage{{
+		MessageId: "m1", Body: "not-json",
+		Attributes: map[string]string{"ApproximateReceiveCount": "4"},
+	}}}
+
+	w.logConfigLoadFailure(context.Background(), event, errors.New("load variable config"))
+
+	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+		t.Fatalf("log lines = %d, want 1 (ログ自体を失わない)", n)
+	}
+	m := parseLog(t, buf.Bytes())
+	if m["event"] != logging.EventJobError {
+		t.Errorf("event = %v, want %q", m["event"], logging.EventJobError)
+	}
+	if m["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", m["level"])
+	}
+	// decode 不能なら識別子は空。
+	if m["job_id"] != "" || m["cycle_id"] != "" || m["check_type"] != "" || m["target"] != "" {
+		t.Errorf("decoded identifiers must be empty for undecodable body: %+v", m)
+	}
+	// receive_count は SQS 属性由来のため decode 非依存で埋まる。
+	if m["receive_count"] != float64(4) {
+		t.Errorf("receive_count = %v, want 4", m["receive_count"])
+	}
+	if m["error_type"] != "config_load" {
+		t.Errorf("error_type = %v, want config_load", m["error_type"])
+	}
+}
+
+// raw body・HTML・token・秘密情報はログへ出さない（SPECIFICATION.md 18.1/19、レビュー指摘4）。
+func TestLogConfigLoadFailure_OmitsRawBodyAndSecrets(t *testing.T) {
+	var buf bytes.Buffer
+	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
+	// body に秘密らしき値と raw 構造を仕込み、かつ decode 失敗させる（識別子は空になる）。
+	secretBody := `{"version":1,"job_id":"leak","kind":"sale_check","check_type":"sale","cycle_id":"leak-cycle","target":{"asin":"SECRET-TOKEN-XYZ"}}`
+	event := events.SQSEvent{Records: []events.SQSMessage{{
+		MessageId: "m1", Body: secretBody,
+	}}}
+
+	// job.Decode は通る本文だが、設定読込失敗ログの error 本文に秘密を含めないよう、
+	// 呼び出し側の error とは別に body 内の秘密がログ文字列へ漏れないことを検証する。
+	w.logConfigLoadFailure(context.Background(), event, errors.New("get checker_configs.json: connection reset"))
+
+	out := buf.String()
+	for _, secret := range []string{"SECRET-TOKEN-XYZ", "leak-cycle"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("log must not contain raw body value %q: %s", secret, out)
+		}
+	}
+}
+
+// Logger が未設定でも panic せず何も出さない（sibling の logJobResult/logDecodeFailure と同じ null-guard）。
+func TestLogConfigLoadFailure_NilLoggerIsNoOp(t *testing.T) {
+	w := &Worker{Logger: nil}
+	event := events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: "not-json"}}}
+	// panic せず呼び出し元へ戻ることだけを検証する。
+	w.logConfigLoadFailure(context.Background(), event, errors.New("load variable config"))
+}
+
+// bestEffortLogFields は record 無し・decode 成功・decode 失敗を安全に扱う。
+func TestBestEffortLogFields(t *testing.T) {
+	// record 無しは全て空・0。
+	jobID, cycleID, checkType, target, recv := bestEffortLogFields(events.SQSEvent{})
+	if jobID != "" || cycleID != "" || checkType != "" || target != "" || recv != 0 {
+		t.Errorf("empty event = (%q,%q,%q,%q,%d), want empties/0", jobID, cycleID, checkType, target, recv)
+	}
+
+	// decode 成功は識別子と receive_count を返す。
+	body := mustEncode(t, job.Job{
+		Version: job.Version, JobID: "j9", Kind: job.KindGistUpdate,
+		CheckType: job.CheckSale, CycleID: "c9", Target: job.Target{GistType: "sale"},
+	})
+	_, _, _, tgt, rc := bestEffortLogFields(events.SQSEvent{Records: []events.SQSMessage{{
+		Body: body, Attributes: map[string]string{"ApproximateReceiveCount": "5"},
+	}}})
+	if tgt != "sale" {
+		t.Errorf("target = %q, want sale", tgt)
+	}
+	if rc != 5 {
+		t.Errorf("receive_count = %d, want 5", rc)
+	}
+
+	// decode 失敗は識別子空・receive_count は属性から。
+	_, _, _, _, rc2 := bestEffortLogFields(events.SQSEvent{Records: []events.SQSMessage{{
+		Body: "garbage", Attributes: map[string]string{"ApproximateReceiveCount": "6"},
+	}}})
+	if rc2 != 6 {
+		t.Errorf("receive_count on decode failure = %d, want 6", rc2)
 	}
 }
 

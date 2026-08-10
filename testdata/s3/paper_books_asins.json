@@ -1,0 +1,21 @@
+[
+    {
+        "ASIN": "B0PAPER0001",
+        "Title": "紙書籍1",
+        "ReleaseDate": "2026-10-01T00:00:00Z",
+        "CurrentPrice": 0,
+        "MaxPrice": 0,
+        "URL": "https://www.amazon.co.jp/dp/B0PAPER0001?tag=aff-22",
+        "CreatedAt": "2026-07-17T00:00:00Z",
+        "ManualFlag": true
+    },
+    {
+        "ASIN": "B0PAPER0002",
+        "Title": "紙書籍2",
+        "ReleaseDate": "2026-09-01T00:00:00Z",
+        "CurrentPrice": 0,
+        "MaxPrice": 0,
+        "URL": "https://www.amazon.co.jp/dp/B0PAPER0002",
+        "CreatedAt": "2026-07-17T00:00:00Z"
+    }
+]

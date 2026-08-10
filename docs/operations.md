@@ -16,6 +16,9 @@
 ## 1. デプロイ（前後確認）
 
 `scripts/deploy.sh` は build / package / changeset / deploy を分離する。
+`all` は build → package → changeset までで停止し、deploy は行わない。
+deploy 段階は sam deploy で別 change set を作らず、changeset 段階で作成して人間が確認した
+同一 change set を `execute-change-set` で適用するだけとする。
 default で `SchedulersEnabled=false`（Scheduler 無効）を想定する。
 
 ### 1.1 ローカル品質確認（デプロイ前に必須）
@@ -38,7 +41,13 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 ./scripts/deploy.sh --profile <P> --region <R> --stage changeset
 ```
 
-change set 作成後、適用前に内容を確認する。
+- `package` は `sam build` で生成した build 済み template（`.aws-sam/build/template.yaml`）を
+  package し、build 済み `bootstrap` を含めた成果物を S3 へ上げる。
+- `changeset` は change set を作成（execute なし）し、change set id を
+  `.aws-sam/changeset.state` へ保存する。deploy はこの id を使うため、
+  changeset と deploy は同一の working tree で行うこと。
+
+change set 作成後、適用前に内容を確認する。id は `changeset` 段階の標準出力にも表示される。
 
 ```bash
 aws cloudformation describe-change-set \
@@ -50,6 +59,10 @@ aws cloudformation describe-change-set \
 ```bash
 ./scripts/deploy.sh --profile <P> --region <R> --stage deploy
 ```
+
+deploy は 1.2 で確認した同一 change set のみを execute する。
+change set が無い、または状態が `CREATE_COMPLETE` 以外（失敗・未確認）のときは execute しない。
+変更を取り消したい場合は再度 `--stage changeset` を実行して新しい change set を作り直すこと。
 
 ### 1.4 デプロイ後確認
 
@@ -117,13 +130,19 @@ DLQ message の Scheduler 入力 JSON（`SPECIFICATION.md` §6 形式）から�
 
 ## 4. ロールバック（`SPECIFICATION.md` §20.4）
 
+rollback は §5.0 で記録した VersionId を基準とする。切り替え後に発生した手動編集を
+盲目的に上書きしないため、配列全体の無条件上書きは行わず object ごとに復元要否を判断する。
+
 1. 新 Scheduler 3つと SQS event source mapping を無効にする。
 2. 旧3 Checker（既存新刊・セール・紙書籍）の EventBridge trigger を再有効化する。
-3. S3 backup と現行データを比較する。
-4. 切り替え後の手動追加を失わないよう、必要なレコードだけを選択的に復元する。
+3. 対象 object ごとに、記録した VersionId の内容と現行データを比較する。
+   該当 version の本文は `aws s3api get-object --version-id <V>` で読み出せる。
+4. 新システムだけが変更した部分のみ、記録した旧 version の内容へ選択的に戻す。
+   切り替え後に手動で追加・変更・削除されたレコードは保持する。
 
 S3 backup を配列全体で無条件に上書きしてロールバックしない。
-手動追加レコードは条件付き書き込みでは検出できないため、選択的復元で保護する。
+手動追加レコードは条件付き書き込みでは検出できないため、version の差分比較と選択的復元で保護する。
+Versioning が `Enabled` でない場合は version 指定の復元ができず、切り替え前提（§5.0）を満たさない。
 
 ---
 
@@ -139,10 +158,27 @@ UserScript の Option+↑ で生成された既存 MaxPrice には紙書籍価�
 
 `paper_books_asins.json` はセール価格履歴ではないため対象外。
 
-### 5.0 事前 backup（dry-run の前必須, `SPECIFICATION.md` §20.3 step2）
+### 5.0 Versioning 確認と VersionId 記録（dry-run の前必須, `SPECIFICATION.md` §20.3 step2）
 
-dry-run / apply の前に、上記3 object を日時付き backup prefix へ copy する。
-apply 後の戻しは選択的復元のみ許容し、配列全体の無条件上書きは禁止する（§4 ロールバック）。
+対象 bucket の Versioning が `Enabled` であることを前提とする。`Suspended` や未設定の場合は
+本番切り替えへ進めない（version 指定での選択的 rollback が成立しないため）。
+
+Versioning=Enabled なら backup prefix への object copy は作らない。代わりに、対象3 object の
+現時点 VersionId を記録し rollback 基準にする。
+
+```bash
+# Versioning 確認（read-only）。出力の Status が Enabled であること。
+aws s3api get-bucket-versioning --bucket <BUCKET> --profile <P> --region <R>
+
+# 各 object の現時点 VersionId を記録する（cutover 直前）。
+aws s3api head-object --bucket <BUCKET> --key unprocessed_asins.json --profile <P> --region <R> --query VersionId
+aws s3api head-object --bucket <BUCKET> --key upcoming_asins.json    --profile <P> --region <R> --query VersionId
+aws s3api head-object --bucket <BUCKET> --key notified_asins.json    --profile <P> --region <R> --query VersionId
+```
+
+apply 後の戻しは、記録した VersionId からの選択的復元のみ許容する。配列全体の無条件上書きは禁止する（§4 ロールバック）。
+
+> 注: 本監査時点で `codex-user` profile は `s3:GetBucketVersioning` / `s3:GetLifecycleConfiguration` への権限がなく（AccessDenied）、bucket の Versioning と lifecycle 設定は未確認である。切り替え前に十分な権限のある profile で `Enabled` を確認すること。
 
 ### 5.1 dry-run（既定）
 

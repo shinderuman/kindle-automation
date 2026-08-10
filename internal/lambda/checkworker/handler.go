@@ -67,7 +67,10 @@ func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error
 // decode・業務処理の失敗は error として返し Lambda 経由で SQS へ再配信させる（SPECIFICATION.md 7.2/12）。
 func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) error {
 	// 可変 S3 設定を invocation ごとに最新へ反映する（cold start に固定しない）。
+	// 読込失敗時も record 処理は開始せず Lambda error で SQS 再試行させる既存挙動を維持しつつ、
+	// level=ERROR の job_error 構造化ログを1件残す（SPECIFICATION.md 18.1/18.3、レビュー指摘4）。
 	if err := w.refreshVariableConfig(ctx); err != nil {
+		w.logConfigLoadFailure(ctx, event, err)
 		return fmt.Errorf("load variable config: %w", err)
 	}
 	for _, record := range event.Records {
@@ -135,6 +138,47 @@ func (w *Worker) logDecodeFailure(ctx context.Context, record events.SQSMessage,
 		slog.String("sqs_message_id", record.MessageId),
 		slog.String("error", err.Error()),
 	)
+}
+
+// logConfigLoadFailure は可変設定（checker_configs/excluded_title_keywords）の読込失敗を job_error として出す
+// （SPECIFICATION.md 18.1/18.3、レビュー指摘4）。設定読込は record 処理より前に行われるため job は未確定。
+// invocation 内の最初の record を best-effort で decode して識別子を埋め、decode 不能でもログ自体は失わない。
+// 値の無い http_status/duration_ms/response_bytes は既存契約に従い空・0 とする。raw body・HTML・token・
+// 秘密情報は出さない。読込失敗ごとに1回だけ呼ばれ、同一失敗で ERROR を複数出さない。
+func (w *Worker) logConfigLoadFailure(ctx context.Context, event events.SQSEvent, err error) {
+	if w.Logger == nil {
+		return
+	}
+	jobID, cycleID, checkType, target, recv := bestEffortLogFields(event)
+	w.Logger.LogAttrs(ctx, slog.LevelError, logging.EventJobError,
+		slog.String("check_type", checkType),
+		slog.String("job_id", jobID),
+		slog.String("cycle_id", cycleID),
+		slog.String("target", target),
+		slog.Int("receive_count", recv),
+		slog.String("result", execution.ResultError),
+		slog.String("error_type", "config_load"),
+		slog.String("http_status", ""),
+		slog.Int("duration_ms", 0),
+		slog.Int("response_bytes", 0),
+		slog.String("aws_request_id", requestID(ctx)),
+		slog.String("error", err.Error()),
+	)
+}
+
+// bestEffortLogFields は設定読込失敗ログへ埋める識別子を invocation 内の最初の record から best-effort で取り出す。
+// 設定読込は record 処理より前のため job は未確定。decode 不能・record 無しの場合は識別子を空（receive_count は0）
+// とし、呼び出し側は識別子が空でもログ自体を失わない。raw body は返さず識別子だけを返す。
+func bestEffortLogFields(event events.SQSEvent) (jobID, cycleID, checkType, target string, recv int) {
+	if len(event.Records) == 0 {
+		return "", "", "", "", 0
+	}
+	record := event.Records[0]
+	j, err := job.Decode([]byte(record.Body))
+	if err != nil {
+		return "", "", "", "", receiveCount(record)
+	}
+	return j.JobID, j.CycleID, string(j.CheckType), targetOf(j), receiveCount(record)
 }
 
 // levelEventFor は結果分類と job kind から level と固定イベント名を決める。
