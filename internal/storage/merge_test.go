@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -117,6 +119,7 @@ func TestUpdateOneBook_KeepsUnknownFields(t *testing.T) {
 
 func TestUpsertBookRecord_IdempotentNoDuplication(t *testing.T) {
 	store := NewMemStore()
+	store.Seed("k", `[]`)
 	target := BookRecord{Book: book.KindleBook{ASIN: "B0FX3X569X", Title: "T1"}}
 
 	if err := UpsertBookRecord(context.Background(), store, "k", target); err != nil {
@@ -475,19 +478,20 @@ func TestMutateBooks_AlwaysUsesIfMatchOnExistingObject(t *testing.T) {
 	}
 }
 
-// TestMutateBooks_NewObjectUsesIfNoneMatch は object 非存在時は If-None-Match: * で新規作成し、
-// 無条件上書き経路にならないことを検証する（SPECIFICATION.md 9.5）。
-func TestMutateBooks_NewObjectUsesIfNoneMatch(t *testing.T) {
+// TestMutateBooks_MissingObjectErrors は必須 object が存在しない場合に空配列へ fallback せず
+// If-None-Match: * で新規作成もせず、Get error を返すことを検証する（SPECIFICATION.md 9.1/9.5）。
+// 汎用 store が object 欠落を暗黙に空配列化・新規作成しない回帰保護。
+func TestMutateBooks_MissingObjectErrors(t *testing.T) {
 	store := &optsCaptureStore{MemStore: NewMemStore()}
 	err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{ASIN: "B0FX3X569X"}})
-	if err != nil {
-		t.Fatalf("UpsertBookRecord: %v", err)
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
-	if store.lastOpts.IfNoneMatch != "*" {
-		t.Errorf("IfNoneMatch = %q, want * for new object", store.lastOpts.IfNoneMatch)
+	if store.putCalls != 0 {
+		t.Errorf("putCalls = %d, want 0 (object 欠落時は書込んではいけない)", store.putCalls)
 	}
-	if store.lastOpts.IfMatch != "" {
-		t.Errorf("IfMatch must be empty for new object: %+v", store.lastOpts)
+	if _, err := store.Get(context.Background(), "k"); !errors.Is(err, ErrObjectNotFound) {
+		t.Errorf("object must not be created on missing: %v", err)
 	}
 }
 
@@ -693,5 +697,199 @@ func TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded(t *testing.T) {
 	records, _ := DecodeBooks(upcomingObj.Body)
 	if len(records) != 1 {
 		t.Errorf("upcoming must remain when clear Put fails: %+v", records)
+	}
+}
+
+// dedupExtraOf は対象 ASIN のレコードから Extra の指定 key だけを取り出す（保持検証用）。
+func dedupExtraOf(t *testing.T, records []BookRecord, asin, key string) json.RawMessage {
+	t.Helper()
+	idx := findBookIndex(records, asin)
+	if idx == -1 {
+		t.Fatalf("ASIN %s not found", asin)
+	}
+	return records[idx].Extra[key]
+}
+
+// countASIN は records 内の指定 ASIN 出現数を返す（重複残存検出用）。
+func countASIN(records []BookRecord, asin string) int {
+	n := 0
+	for _, r := range records {
+		if r.Book.ASIN == asin {
+			n++
+		}
+	}
+	return n
+}
+
+// TestUpsertBookRecord_DedupsExistingDuplicateASINs は upsert 前から同一 ASIN が重複していた入力に対し、
+// 保存後に BookRecord 単位で ASIN 重複排除されることを検証する（SPECIFICATION.md 9.2）。
+// 最初の出現レコードの Extra を含む全情報を保持し、別 ASIN は追加される。
+func TestUpsertBookRecord_DedupsExistingDuplicateASINs(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("k", `[
+        {"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"},
+        {"ASIN":"B0DUP0000001","Title":"second","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"second"},
+        {"ASIN":"B0KEEP000001","Title":"keep","ReleaseDate":"2026-02-02T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-02-02T00:00:00Z"}
+    ]`)
+
+	if err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0NEW0000001", Title: "new", ReleaseDate: time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC),
+	}}); err != nil {
+		t.Fatalf("UpsertBookRecord: %v", err)
+	}
+	obj, _ := store.Get(context.Background(), "k")
+	records, _ := DecodeBooks(obj.Body)
+
+	if got := countASIN(records, "B0DUP0000001"); got != 1 {
+		t.Errorf("duplicate ASIN count = %d, want 1 (保存後に重複排除)", got)
+	}
+	// 最初の出現（Memo=first）の Extra が保持され、2件目（Memo=second）は失われる。
+	if !bytes.Equal(dedupExtraOf(t, records, "B0DUP0000001", "Memo"), []byte(`"first"`)) {
+		t.Errorf("first occurrence Extra not kept: %s", obj.Body)
+	}
+	// 別 ASIN はそのまま残り、新規 ASIN は追加される。
+	if findBookIndex(records, "B0KEEP000001") == -1 || findBookIndex(records, "B0NEW0000001") == -1 {
+		t.Errorf("other ASINs lost: %+v", asinOrder(records))
+	}
+	if len(records) != 3 {
+		t.Errorf("len = %d, want 3 (dup 1件 + keep + new): %s", len(records), obj.Body)
+	}
+}
+
+// TestUpsertBookRecord_UpdatesFirstAndDropsDuplicateOnTargetUpsert は対象 ASIN 自体が重複している場合、
+// 最初の出現を更新して2件目以降を排除することを検証する。CreatedAt は最初の出現を保持する。
+func TestUpsertBookRecord_UpdatesFirstAndDropsDuplicateOnTargetUpsert(t *testing.T) {
+	store := NewMemStore()
+	original := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.Seed("k", `[
+        {"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"},
+        {"ASIN":"B0DUP0000001","Title":"second","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-02-02T00:00:00Z","Memo":"second"}
+    ]`)
+
+	if err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0DUP0000001", Title: "更新", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC),
+	}}); err != nil {
+		t.Fatalf("UpsertBookRecord: %v", err)
+	}
+	obj, _ := store.Get(context.Background(), "k")
+	records, _ := DecodeBooks(obj.Body)
+
+	if got := countASIN(records, "B0DUP0000001"); got != 1 {
+		t.Errorf("duplicate ASIN count = %d, want 1", got)
+	}
+	idx := findBookIndex(records, "B0DUP0000001")
+	if records[idx].Book.Title != "更新" {
+		t.Errorf("title = %q, want 更新", records[idx].Book.Title)
+	}
+	// CreatedAt は最初の出現を保持し、upsert 側の値で上書きしない（SPECIFICATION.md 9.2/9.4）。
+	if !records[idx].Book.CreatedAt.Equal(original) {
+		t.Errorf("CreatedAt = %v, want %v (最初の出現を保持)", records[idx].Book.CreatedAt, original)
+	}
+	// Extra も最初の出現を保持する。
+	if !bytes.Equal(records[idx].Extra["Memo"], []byte(`"first"`)) {
+		t.Errorf("first Extra not kept: %s", obj.Body)
+	}
+}
+
+// dupConflictStore は初回 Put 直前に同一 ASIN を2件含む最新本文を seed して 412 を起こす。
+// retry で再読込した本文に重複がある場合でも保存前に重複排除されることを検証するための store。
+type dupConflictStore struct {
+	*MemStore
+	conflicted bool
+}
+
+func (s *dupConflictStore) Put(ctx context.Context, key string, body []byte, opts PutOptions) error {
+	if key == "k" && !s.conflicted {
+		s.Seed("k", `[
+            {"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"},
+            {"ASIN":"B0DUP0000001","Title":"second","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"second"}
+        ]`)
+		s.conflicted = true
+		return ErrPreconditionFailed
+	}
+	return s.MemStore.Put(ctx, key, body, opts)
+}
+
+// TestMutateBooks_ConflictRetryDedupesLatestBody は ETag 競合で読み直した最新本文に同一 ASIN 重複が
+// ある場合でも、保存前に BookRecord 単位で重複排除されることを検証する（SPECIFICATION.md 9.2/9.5）。
+func TestMutateBooks_ConflictRetryDedupesLatestBody(t *testing.T) {
+	store := &dupConflictStore{MemStore: NewMemStore()}
+	store.Seed("k", `[{"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"}]`)
+
+	if err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0NEW0000001", Title: "new", ReleaseDate: time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC),
+	}}); err != nil {
+		t.Fatalf("UpsertBookRecord: %v", err)
+	}
+	obj, _ := store.Get(context.Background(), "k")
+	records, _ := DecodeBooks(obj.Body)
+
+	if got := countASIN(records, "B0DUP0000001"); got != 1 {
+		t.Errorf("duplicate ASIN count = %d, want 1 (競合後の最新本文重複も排除)", got)
+	}
+	if !bytes.Equal(dedupExtraOf(t, records, "B0DUP0000001", "Memo"), []byte(`"first"`)) {
+		t.Errorf("first occurrence Extra not kept after retry: %s", obj.Body)
+	}
+	if findBookIndex(records, "B0NEW0000001") == -1 {
+		t.Errorf("upsert target lost after retry: %+v", asinOrder(records))
+	}
+}
+
+// TestMergeUpcoming_DedupsWithinUnprocessed は unprocessed 側に同一 ASIN 重複がある場合でも
+// 統合保存後に重複排除されることを検証する（SPECIFICATION.md 9.2/10）。
+func TestMergeUpcoming_DedupsWithinUnprocessed(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("unprocessed", `[
+        {"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"},
+        {"ASIN":"B0DUP0000001","Title":"second","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"second"}
+    ]`)
+	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0NEW", Title: "new", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)})
+
+	if _, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3); err != nil {
+		t.Fatalf("MergeUpcoming: %v", err)
+	}
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+
+	if got := countASIN(records, "B0DUP0000001"); got != 1 {
+		t.Errorf("duplicate ASIN count = %d, want 1", got)
+	}
+	if !bytes.Equal(dedupExtraOf(t, records, "B0DUP0000001", "Memo"), []byte(`"first"`)) {
+		t.Errorf("first occurrence Extra not kept: %s", obj.Body)
+	}
+	if findBookIndex(records, "B0NEW") == -1 {
+		t.Errorf("upcoming B0NEW not merged: %+v", asinOrder(records))
+	}
+}
+
+// TestMergeUpcoming_MissingUnprocessedErrors は unprocessed が存在しない場合に空配列へ fallback せず
+// error を返し新規作成もしないことを検証する（SPECIFICATION.md 9.1）。
+func TestMergeUpcoming_MissingUnprocessedErrors(t *testing.T) {
+	store := NewMemStore()
+	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0NEW", Title: "new", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)})
+
+	_, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
+	if _, err := store.Get(context.Background(), "unprocessed"); !errors.Is(err, ErrObjectNotFound) {
+		t.Errorf("unprocessed must not be created on missing: %v", err)
+	}
+	upcomingObj, _ := store.Get(context.Background(), "upcoming")
+	if strings.TrimSpace(string(upcomingObj.Body)) == "[]" {
+		t.Errorf("upcoming must not be cleared when unprocessed is missing: %s", upcomingObj.Body)
+	}
+}
+
+// TestMergeUpcoming_MissingUpcomingErrors は upcoming が存在しない場合に空配列へ fallback せず
+// error を返すことを検証する（SPECIFICATION.md 9.1）。upcoming は空配列状態だけを正常とする。
+func TestMergeUpcoming_MissingUpcomingErrors(t *testing.T) {
+	store := NewMemStore()
+	seedBook(store, "unprocessed", book.KindleBook{ASIN: "B0A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+
+	_, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
 }

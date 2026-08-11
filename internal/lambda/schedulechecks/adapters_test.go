@@ -2,6 +2,7 @@ package schedulechecks
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
@@ -25,13 +26,27 @@ func TestAsinListReader_DecodesASINs(t *testing.T) {
 	}
 }
 
-func TestAsinListReader_MissingObjectIsEmpty(t *testing.T) {
-	asins, err := asinListReader{store: storage.NewMemStore()}.LoadAsins(context.Background(), "missing.json")
-	if err != nil {
-		t.Fatalf("LoadAsins missing object should be empty, got err: %v", err)
+// TestAsinListReader_MissingObjectErrors は必須 object 欠落時に空配列へ fallback せず
+// error を返すことを検証する（SPECIFICATION.md 9.1）。対象0件の job 投入・Gist 再生成へ進まない。
+func TestAsinListReader_MissingObjectErrors(t *testing.T) {
+	_, err := asinListReader{store: storage.NewMemStore()}.LoadAsins(context.Background(), "missing.json")
+	if err == nil {
+		t.Fatal("LoadAsins on missing object should error, got nil")
 	}
-	if len(asins) != 0 {
-		t.Errorf("asins = %v, want empty", asins)
+	if !errors.Is(err, storage.ErrObjectNotFound) {
+		t.Errorf("err = %v, want wrap of storage.ErrObjectNotFound", err)
+	}
+}
+
+// TestAuthorReader_MissingObjectErrors は authors.json 欠落時に空配列へ fallback せず
+// error を返すことを検証する（SPECIFICATION.md 9.1）。作者0件の周回へ進まない。
+func TestAuthorReader_MissingObjectErrors(t *testing.T) {
+	_, err := authorReader{store: storage.NewMemStore()}.LoadAuthorNames(context.Background(), "authors.json")
+	if err == nil {
+		t.Fatal("LoadAuthorNames on missing object should error, got nil")
+	}
+	if !errors.Is(err, storage.ErrObjectNotFound) {
+		t.Errorf("err = %v, want wrap of storage.ErrObjectNotFound", err)
 	}
 }
 

@@ -17,17 +17,16 @@ const defaultMergeRetries = 3
 // 再追加せず正常終点とする（SPECIFICATION.md 7.2 target_removed）。
 var ErrTargetRemoved = errors.New("target removed")
 
-// mutateBooks は Get → mutate → Put(If-Match) を行い、412 で最新本文を読み直して再試行する。
-// maxRetry は再試行回数。obj が存在しない場合は空配列とし新規作成（If-None-Match: *）にする。
+// mutateBooks は Get → mutate → dedup+sort → Put(If-Match) を行い、412 で最新本文を読み直して再試行する。
+// maxRetry は再試行回数。対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、
+// ErrObjectNotFound を含む全ての Get error を呼出側へ返し、空配列への fallback や
+// If-None-Match: * による暗黙の新規作成は行わない。
 func mutateBooks(ctx context.Context, store ObjectStore, key string, maxRetry int, mutate func([]BookRecord) ([]BookRecord, error)) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		obj, err := store.Get(ctx, key)
 		if err != nil {
-			if !errors.Is(err, ErrObjectNotFound) {
-				return fmt.Errorf("get %s: %w", key, err)
-			}
-			obj = Object{Body: []byte("[]"), ETag: ""}
+			return fmt.Errorf("get %s: %w", key, err)
 		}
 		records, err := DecodeBooks(obj.Body)
 		if err != nil {
@@ -37,16 +36,12 @@ func mutateBooks(ctx context.Context, store ObjectStore, key string, maxRetry in
 		if err != nil {
 			return err
 		}
-		next = sortBookRecords(next)
+		next = dedupAndSortBookRecords(next)
 		body, err := EncodeBooks(next)
 		if err != nil {
 			return fmt.Errorf("encode %s: %w", key, err)
 		}
-		opts := PutOptions{IfMatch: obj.ETag}
-		if obj.ETag == "" {
-			opts = PutOptions{IfNoneMatch: "*"}
-		}
-		if err := store.Put(ctx, key, body, opts); err != nil {
+		if err := store.Put(ctx, key, body, PutOptions{IfMatch: obj.ETag}); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) && attempt < maxRetry {
 				lastErr = err
 				continue
@@ -101,10 +96,7 @@ func UpsertBookRecord(ctx context.Context, store ObjectStore, key string, target
 func MergeUpcoming(ctx context.Context, store ObjectStore, unprocessedKey, upcomingKey string, maxRetry int) (int, error) {
 	upcomingObj, err := store.Get(ctx, upcomingKey)
 	if err != nil {
-		if !errors.Is(err, ErrObjectNotFound) {
-			return 0, fmt.Errorf("get upcoming %s: %w", upcomingKey, err)
-		}
-		upcomingObj = Object{Body: []byte("[]"), ETag: ""}
+		return 0, fmt.Errorf("get upcoming %s: %w", upcomingKey, err)
 	}
 	upcomingStartETag := upcomingObj.ETag
 	upcomingRecs, err := DecodeBooks(upcomingObj.Body)
@@ -116,26 +108,19 @@ func MergeUpcoming(ctx context.Context, store ObjectStore, unprocessedKey, upcom
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		unprocessedObj, err := store.Get(ctx, unprocessedKey)
 		if err != nil {
-			if !errors.Is(err, ErrObjectNotFound) {
-				return 0, fmt.Errorf("get unprocessed %s: %w", unprocessedKey, err)
-			}
-			unprocessedObj = Object{Body: []byte("[]"), ETag: ""}
+			return 0, fmt.Errorf("get unprocessed %s: %w", unprocessedKey, err)
 		}
 		unprocessedRecs, err := DecodeBooks(unprocessedObj.Body)
 		if err != nil {
 			return 0, fmt.Errorf("decode unprocessed %s: %w", unprocessedKey, err)
 		}
 		added := countAdded(upcomingRecs, unprocessedRecs)
-		merged := sortBookRecords(mergePreferFirst(unprocessedRecs, upcomingRecs))
+		merged := dedupAndSortBookRecords(mergePreferFirst(unprocessedRecs, upcomingRecs))
 		body, err := EncodeBooks(merged)
 		if err != nil {
 			return 0, fmt.Errorf("encode unprocessed %s: %w", unprocessedKey, err)
 		}
-		opts := PutOptions{IfMatch: unprocessedObj.ETag}
-		if unprocessedObj.ETag == "" {
-			opts = PutOptions{IfNoneMatch: "*"}
-		}
-		if err := store.Put(ctx, unprocessedKey, body, opts); err != nil {
+		if err := store.Put(ctx, unprocessedKey, body, PutOptions{IfMatch: unprocessedObj.ETag}); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) && attempt < maxRetry {
 				lastErr = err
 				continue
@@ -224,13 +209,15 @@ func findBookIndex(records []BookRecord, asin string) int {
 	return -1
 }
 
-// sortBookRecords は書籍レコードを SPECIFICATION.md 9.2 の並び順
-// （発売日降順・同日の場合はタイトル昇順）へ整える。domain book.SortBooks と同じ比較で
-// 安定ソートし、各レコードの Extra（未知 field）と他レコードを崩さず新しいスライスを返す。
-// 重複 ASIN の削除は行わず入力レコードを全件保持して並べ替えるだけとする
-// （手動追加レコードと未知 field の保持、SPECIFICATION.md 9.4）。
-func sortBookRecords(records []BookRecord) []BookRecord {
-	sorted := append([]BookRecord(nil), records...)
+// dedupAndSortBookRecords は ASIN 重複排除後に SPECIFICATION.md 9.2 の並び順
+// （発売日降順・同日の場合はタイトル昇順）へ整える。同じ ASIN は最初の出現を優先し、
+// そのレコードの Extra（未知 field）を含む全情報を保持する（SPECIFICATION.md 9.2, 9.4）。
+// domain book.DedupBooks と同じ規則だが BookRecord 単位で処理し Extra を失わない。
+// 4つの書籍JSONすべての書込経路（mutateBooks・MergeUpcoming）で保存前に必ず適用し、
+// 保存後の本文へ同一 ASIN の重複が残らないようにする。
+func dedupAndSortBookRecords(records []BookRecord) []BookRecord {
+	deduped := dedupBookRecords(records)
+	sorted := append([]BookRecord(nil), deduped...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if !sameBookDay(sorted[i].Book.ReleaseDate, sorted[j].Book.ReleaseDate) {
 			return sorted[i].Book.ReleaseDate.After(sorted[j].Book.ReleaseDate)
@@ -238,6 +225,27 @@ func sortBookRecords(records []BookRecord) []BookRecord {
 		return sorted[i].Book.Title < sorted[j].Book.Title
 	})
 	return sorted
+}
+
+// dedupBookRecords は ASIN で重複排除する。同じ ASIN は最初の出現を優先し、
+// そのレコードの Extra（未知 field）を含む全情報を保持する（SPECIFICATION.md 9.2）。
+// ASIN が空のレコードは重複排除の判定対象にできず、そのまま残す。
+// domain book.DedupBooks と同じ規則だが BookRecord 単位で処理し Extra を失わない。
+func dedupBookRecords(records []BookRecord) []BookRecord {
+	seen := make(map[string]struct{})
+	out := make([]BookRecord, 0, len(records))
+	for _, r := range records {
+		if r.Book.ASIN == "" {
+			out = append(out, r)
+			continue
+		}
+		if _, exists := seen[r.Book.ASIN]; exists {
+			continue
+		}
+		seen[r.Book.ASIN] = struct{}{}
+		out = append(out, r)
+	}
+	return out
 }
 
 // sameBookDay は2つの時刻が同じ UTC 暦日かを返す（domain book.sameDay と同等）。

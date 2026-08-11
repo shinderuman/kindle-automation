@@ -68,6 +68,8 @@ func newScheduler(store storage.ObjectStore, enq *recordingEnqueuer, sender *fak
 // Scheduler イベントは decode → dispatch.Run へ。空対象の Sale でも sale_finalize を1件投入する。
 func TestHandleEvent_SchedulerRouteDispatches(t *testing.T) {
 	store := storage.NewMemStore()
+	// unprocessed_asins.json は存在必須（SPECIFICATION.md 9.1）。空配列で seed し sale 周回を通す。
+	store.Seed("unprocessed_asins.json", `[]`)
 	enq := &recordingEnqueuer{}
 	sched := newScheduler(store, enq, nil)
 	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
@@ -180,6 +182,8 @@ func TestHandleAlarm_NoSenderSucceeds(t *testing.T) {
 func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	store := storage.NewMemStore()
 	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`)
+	// unprocessed_asins.json は存在必須（SPECIFICATION.md 9.1）。sale 周回が LoadAsins で失敗しないよう空配列で seed。
+	store.Seed("unprocessed_asins.json", `[]`)
 	enq := &recordingEnqueuer{}
 	sched := &Scheduler{
 		Deps: dispatch.Dependencies{
@@ -255,6 +259,9 @@ func (e *failingEnqueuer) EnqueueBatch(_ context.Context, _ []job.Job) error { r
 
 func TestHandleEvent_DispatchEnqueueFailurePropagates(t *testing.T) {
 	store := storage.NewMemStore()
+	// unprocessed_asins.json は存在必須（SPECIFICATION.md 9.1）。sale は対象空でも sale_finalize を投入するため
+	// enqueuer 失敗を発火させる。object 欠落で LoadAsins が先に失敗しないよう空配列で seed。
+	store.Seed("unprocessed_asins.json", `[]`)
 	sched := &Scheduler{
 		Deps: dispatch.Dependencies{
 			AsinListReader: asinListReader{store: store},

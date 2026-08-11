@@ -10,6 +10,7 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/application/execution"
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 	domainsale "github.com/shinderuman/kindle-automation/internal/domain/sale"
+	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
@@ -376,6 +377,27 @@ func TestHandleSaleFinalize_EnqueuesSaleGistUpdate(t *testing.T) {
 	}
 	if job.AmazonRequests(gist.Kind) != 0 {
 		t.Errorf("gist_update must not access Amazon")
+	}
+}
+
+// TestBuildGistJob_DiscriminatorIsDeterministic は Sale 用 gist job_id の決定性を検証する
+// （SPECIFICATION.md 7.2/15）。sale_finalize は1周1回で Gist は S3 全体から再生成するため
+// discriminator は cycleID+gist_type で十分（最終状態が常に勝つ）。同一 cycle の再試行は同一 job_id で
+// 冪等、異なる cycle は別 job_id となる。SQS FIFO の MessageDeduplicationId は job_id の SHA-256。
+func TestBuildGistJob_DiscriminatorIsDeterministic(t *testing.T) {
+	j := job.Job{Version: job.Version, JobID: "f", Kind: job.KindSaleFinalize, CheckType: job.CheckSale, CycleID: "sale:2026-07-23T00:00:00Z"}
+	first := buildGistJob(j, "sale")
+	// 同一 cycle の再試行（SQS 再配信）は同一 job_id で冪等。
+	if buildGistJob(j, "sale").JobID != first.JobID {
+		t.Errorf("sale gist job_id is not deterministic")
+	}
+	if scheduling.DedupID(buildGistJob(j, "sale").JobID) != scheduling.DedupID(first.JobID) {
+		t.Errorf("sale gist dedup id is not deterministic")
+	}
+	// 異なる cycle は別 job_id（5分 dedup で前周に吸われない）。
+	other := job.Job{Version: job.Version, JobID: "f2", Kind: job.KindSaleFinalize, CheckType: job.CheckSale, CycleID: "sale:2026-07-24T00:00:00Z"}
+	if buildGistJob(other, "sale").JobID == first.JobID {
+		t.Errorf("different cycle must differ: %s", first.JobID)
 	}
 }
 

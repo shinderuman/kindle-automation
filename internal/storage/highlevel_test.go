@@ -59,6 +59,7 @@ func TestBookFileStore_UpdateOneBook_TargetRemoved(t *testing.T) {
 
 func TestBookFileStore_Upsert_IdempotentAndMerges(t *testing.T) {
 	store := NewMemStore()
+	store.Seed("k", `[]`)
 	s := NewBookFileStore(store, "k")
 	first := book.KindleBook{ASIN: "B0FX3X569X", Title: "初版", ReleaseDate: futureRelease, CreatedAt: testNow}
 
@@ -104,6 +105,7 @@ func TestBookFileStore_Upsert_KeepsExtra(t *testing.T) {
 
 func TestBookFileStore_Upsert_PreservesCreatedAt(t *testing.T) {
 	store := NewMemStore()
+	store.Seed("k", `[]`)
 	s := NewBookFileStore(store, "k")
 	original := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	first := book.KindleBook{ASIN: "B0FX3X569X", Title: "初版", ReleaseDate: futureRelease, CreatedAt: original}
@@ -219,6 +221,32 @@ func TestBookFileStore_Book(t *testing.T) {
 	}
 }
 
+// TestBookFileStore_Book_MissingObjectErrors は object 欠落時に ok=false ではなく error を返し、
+// ASIN 不存在と object 欠落を区別することを検証する（SPECIFICATION.md 9.1）。
+func TestBookFileStore_Book_MissingObjectErrors(t *testing.T) {
+	s := NewBookFileStore(NewMemStore(), "k")
+	_, ok, err := s.Book(context.Background(), "B0FX3X569X")
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
+	if ok {
+		t.Errorf("ok = true, want false on missing object")
+	}
+}
+
+// TestBookFileStore_Exists_MissingObjectErrors は object 欠落時に exists=false ではなく error を返すことを検証する。
+// papertokindle/newrelease が KnownState や事前除外で exists=false を誤って信じないようにする（SPECIFICATION.md 9.1）。
+func TestBookFileStore_Exists_MissingObjectErrors(t *testing.T) {
+	s := NewBookFileStore(NewMemStore(), "k")
+	exists, err := s.Exists(context.Background(), "B0FX3X569X")
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
+	if exists {
+		t.Errorf("exists = true, want false on missing object")
+	}
+}
+
 func TestBookFileStore_RetriesOnConflict(t *testing.T) {
 	store := &flakyStore{MemStore: NewMemStore(), conflicts: 2, conflictKey: "k"}
 	store.Seed("k", `[]`)
@@ -297,7 +325,8 @@ func TestKnownStateQuerier(t *testing.T) {
 	seedBook(store, "notified", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "paper", book.KindleBook{ASIN: "B0PAPER001"})
-	// unprocessed は空
+	// unprocessed は空配列として存在（存在必須 object、SPECIFICATION.md 9.1）
+	store.Seed("unprocessed", `[]`)
 
 	q := NewKnownStateQuerier(store, "notified", "upcoming", "unprocessed", "paper")
 	state, err := q.KnownState(context.Background(), "B0KINDLE01", "B0PAPER001")
@@ -318,17 +347,51 @@ func TestKnownStateQuerier(t *testing.T) {
 	}
 }
 
-func TestBookFileStore_DoesNotReaddManualDelete(t *testing.T) {
+// TestKnownStateQuerier_MissingObjectErrors は必須 object いずれかが欠落した場合、
+// exists=false でなく error を返し、object 欠落と ASIN 不存在を区別することを検証する（SPECIFICATION.md 9.1）。
+// papertokindle は KnownState 全 false を手動削除扱いするため、欠落時の誤判定を防ぐ。
+func TestKnownStateQuerier_MissingObjectErrors(t *testing.T) {
 	store := NewMemStore()
-	// paper_books に B0PAPER001 はない（手動削除済み）
+	seedBook(store, "notified", book.KindleBook{ASIN: "B0KINDLE01"})
+	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0KINDLE01"})
+	seedBook(store, "paper", book.KindleBook{ASIN: "B0PAPER001"})
+	// unprocessed を欠落させる（存在必須 object の不在）
+
+	q := NewKnownStateQuerier(store, "notified", "upcoming", "unprocessed", "paper")
+	if _, err := q.KnownState(context.Background(), "B0KINDLE01", "B0PAPER001"); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound (object 欠落は error)", err)
+	}
+}
+
+// TestBookFileStore_Delete_AbsentASINIsIdempotent は存在する object 内に無い ASIN の削除は
+// 何もしない（手動削除済み）ことを検証する（SPECIFICATION.md 7.5）。
+func TestBookFileStore_Delete_AbsentASINIsIdempotent(t *testing.T) {
+	store := NewMemStore()
+	// paper object は存在するが B0PAPER001 はない（手動削除済み）。
+	seedBook(store, "paper", book.KindleBook{ASIN: "B0OTHER0001", Title: "keep"})
 	s := NewBookFileStore(store, "paper")
 
 	if err := s.Delete(context.Background(), "B0PAPER001"); err != nil {
-		t.Fatalf("Delete on absent should not error: %v", err)
+		t.Fatalf("Delete on absent ASIN should not error: %v", err)
 	}
-	// object 自体が存在しない場合は新規保存しない（SPECIFICATION.md 7.5）。
+	obj, _ := store.Get(context.Background(), "paper")
+	records, _ := DecodeBooks(obj.Body)
+	if len(records) != 1 || records[0].Book.ASIN != "B0OTHER0001" {
+		t.Errorf("other record must be kept: %+v", records)
+	}
+}
+
+// TestBookFileStore_Delete_MissingObjectErrors は object 自体が欠落している場合は
+// 空配列へ fallback せず error とし、新規保存も行わないことを検証する（SPECIFICATION.md 9.1）。
+func TestBookFileStore_Delete_MissingObjectErrors(t *testing.T) {
+	store := NewMemStore()
+	s := NewBookFileStore(store, "paper")
+
+	if err := s.Delete(context.Background(), "B0PAPER001"); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
 	if _, err := store.Get(context.Background(), "paper"); !errors.Is(err, ErrObjectNotFound) {
-		t.Errorf("absent delete should not create object: %v", err)
+		t.Errorf("object must not be created on missing: %v", err)
 	}
 }
 
@@ -420,14 +483,16 @@ func TestBookFileStore_Books_ReturnsAllInStoredOrder(t *testing.T) {
 	}
 }
 
-func TestBookFileStore_Books_MissingObjectIsEmpty(t *testing.T) {
+// TestBookFileStore_Books_MissingObjectErrors は必須 object 欠落時に空配列へ fallback せず
+// error を返すことを検証する（SPECIFICATION.md 9.1）。Gist の空上書きを防ぐため空へ fall しない。
+func TestBookFileStore_Books_MissingObjectErrors(t *testing.T) {
 	s := NewBookFileStore(NewMemStore(), "k")
 	books, err := s.Books(context.Background())
-	if err != nil {
-		t.Fatalf("Books on missing object: %v", err)
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
-	if len(books) != 0 {
-		t.Errorf("want empty, got %+v", books)
+	if books != nil {
+		t.Errorf("want nil books on missing object, got %+v", books)
 	}
 }
 
@@ -449,14 +514,16 @@ func TestAuthorFileStore_Authors_ReturnsAllInStoredOrder(t *testing.T) {
 	}
 }
 
-func TestAuthorFileStore_Authors_MissingObjectIsEmpty(t *testing.T) {
+// TestAuthorFileStore_Authors_MissingObjectErrors は authors.json 欠落時に空配列へ fallback せず
+// error を返すことを検証する（SPECIFICATION.md 9.1）。作者0件として正本を再生成しない。
+func TestAuthorFileStore_Authors_MissingObjectErrors(t *testing.T) {
 	s := NewAuthorFileStore(NewMemStore(), "authors")
 	authors, err := s.Authors(context.Background())
-	if err != nil {
-		t.Fatalf("Authors on missing object: %v", err)
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
-	if len(authors) != 0 {
-		t.Errorf("want empty, got %+v", authors)
+	if authors != nil {
+		t.Errorf("want nil authors on missing object, got %+v", authors)
 	}
 }
 

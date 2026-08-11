@@ -66,14 +66,10 @@ func (s *BookFileStore) ApplyRetentionAndExists(ctx context.Context, asin string
 	return exists, err
 }
 
-// Delete は対象 ASIN を条件付きで削除する。object 自体が存在しない場合は新規保存せず no-op とする（SPECIFICATION.md 7.5 手動削除として新規保存を行わない）。冪等。
+// Delete は対象 ASIN を条件付きで削除する。対象 object は SPECIFICATION.md 9.1 の存在必須 objectで、
+// object 自体の欠落は error とする（空 fallback せず新規保存も行わない）。
+// object 内に ASIN がなければ（手動削除済み）何も削除せず成功する（SPECIFICATION.md 7.5）。冪等。
 func (s *BookFileStore) Delete(ctx context.Context, asin string) error {
-	if _, err := s.store.Get(ctx, s.key); err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return nil
-		}
-		return fmt.Errorf("get %s: %w", s.key, err)
-	}
 	return mutateBooks(ctx, s.store, s.key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
 		kept := make([]BookRecord, 0, len(records))
 		for _, r := range records {
@@ -86,13 +82,11 @@ func (s *BookFileStore) Delete(ctx context.Context, asin string) error {
 }
 
 // Books は object の全 Book を並び順（S3 保存時の発売日降順・同日タイトル昇順）のまま返す。
-// gist 再生成等で全件読み取るために使う。object が存在しない場合は空 slice とする。
+// gist 再生成等で全件読み取るために使う。対象 object は SPECIFICATION.md 9.1 の存在必須 objectのため、
+// ErrObjectNotFound を含む Get error をそのまま返し、空配列へ fallback して Gist を空上書きしない。
 func (s *BookFileStore) Books(ctx context.Context) ([]book.KindleBook, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get %s: %w", s.key, err)
 	}
 	records, err := DecodeBooks(obj.Body)
@@ -106,13 +100,12 @@ func (s *BookFileStore) Books(ctx context.Context) ([]book.KindleBook, error) {
 	return books, nil
 }
 
-// Book は対象 ASIN の Book を返す。存在しない場合は ok=false。
+// Book は対象 ASIN の Book を返す。object 内に ASIN がなければ ok=false。
+// 対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、object 自体の欠落は
+// ok=false ではなく error とし、「ASIN が存在しない」と同一視しない。
 func (s *BookFileStore) Book(ctx context.Context, asin string) (book.KindleBook, bool, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return book.KindleBook{}, false, nil
-		}
 		return book.KindleBook{}, false, fmt.Errorf("get %s: %w", s.key, err)
 	}
 	records, err := DecodeBooks(obj.Body)
@@ -138,13 +131,11 @@ func NewAuthorFileStore(store ObjectStore, key string) *AuthorFileStore {
 }
 
 // Authors は authors.json の全 Author を並び順（最新発売日降順・同日名昇順）のまま返す。
-// gist 再生成で全件読み取るために使う。object が存在しない場合は空 slice とする。
+// gist 再生成で全件読み取るために使う。authors.json は SPECIFICATION.md 9.1 の存在必須 objectのため、
+// ErrObjectNotFound を含む Get error をそのまま返し、空配列へ fallback して作者0件の正本を再生成しない。
 func (s *AuthorFileStore) Authors(ctx context.Context) ([]book.Author, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get %s: %w", s.key, err)
 	}
 	records, err := DecodeAuthors(obj.Body)
@@ -218,15 +209,14 @@ func (q *KnownStateQuerier) KnownState(ctx context.Context, kindleASIN, paperASI
 }
 
 // mutateAuthors は Get → mutate → Put(If-Match) を行い、412 で再試行する（Author 版 mutateBooks）。
+// authors.json は SPECIFICATION.md 9.1 の存在必須 object のため、ErrObjectNotFound を含む Get error を
+// 呼出側へ返し、空配列への fallback や If-None-Match: * による暗黙の新規作成は行わない。
 func mutateAuthors(ctx context.Context, store ObjectStore, key string, maxRetry int, mutate func([]AuthorRecord) ([]AuthorRecord, error)) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetry; attempt++ {
 		obj, err := store.Get(ctx, key)
 		if err != nil {
-			if !errors.Is(err, ErrObjectNotFound) {
-				return fmt.Errorf("get %s: %w", key, err)
-			}
-			obj = Object{Body: []byte("[]"), ETag: ""}
+			return fmt.Errorf("get %s: %w", key, err)
 		}
 		records, err := DecodeAuthors(obj.Body)
 		if err != nil {
@@ -240,11 +230,7 @@ func mutateAuthors(ctx context.Context, store ObjectStore, key string, maxRetry 
 		if err != nil {
 			return fmt.Errorf("encode %s: %w", key, err)
 		}
-		opts := PutOptions{IfMatch: obj.ETag}
-		if obj.ETag == "" {
-			opts = PutOptions{IfNoneMatch: "*"}
-		}
-		if err := store.Put(ctx, key, body, opts); err != nil {
+		if err := store.Put(ctx, key, body, PutOptions{IfMatch: obj.ETag}); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) && attempt < maxRetry {
 				lastErr = err
 				continue
@@ -257,12 +243,11 @@ func mutateAuthors(ctx context.Context, store ObjectStore, key string, maxRetry 
 }
 
 // bookExists は対象 ASIN が object に存在するかを返す。
+// 対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、object 自体の欠落は
+// exists=false ではなく error とし、「ASIN が存在しない」と同一視しない。
 func bookExists(ctx context.Context, store ObjectStore, key, asin string) (bool, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return false, nil
-		}
 		return false, fmt.Errorf("get %s: %w", key, err)
 	}
 	records, err := DecodeBooks(obj.Body)
