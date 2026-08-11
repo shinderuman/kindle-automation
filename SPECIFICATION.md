@@ -716,6 +716,8 @@ Author gist の投入（手順4）を notified/upcoming の upsert（手順5-6�
 
 `CurrentPrice == 0`かつ紙書籍価格を取得できた場合だけ、既存Go実装と同じく紙書籍レコードの価格を初期化する。紙書籍価格を取得できなくても、両スウォッチとKindle候補を確認できる場合は詳細確認を続ける。通知では0円と表示せず、紙書籍価格を取得できなかったことを記載する。
 
+紙書籍価格を取得できた場合は、価格初期化の有無にかかわらずPaper-to-Kindle用`gist_update`を決定的なIDで投入する。Gistは`paper_books_asins.json`全体から毎回再生成する（15）ため冗長な再投入は安全であり、初回のenqueue失敗後にSQS再配信で価格が初期化済みの同じ永続状態から再実行しても、enqueue自体の再試行で欠落をreconcileする（7.5）。FIFOの5分重複排除だけを正しさの根拠にしない。
+
 Amazon内検索によるKindle候補探索は行わない。UserScriptと同様に、同一商品ページの形式スウォッチから得たKindle版だけを候補とする。
 
 ### 14.3 Kindle候補確認
@@ -750,7 +752,7 @@ Amazon内検索によるKindle候補探索は行わない。UserScriptと同様�
 |---|---|---|
 | Sale | `sale_finalize`が`gist_update`を投入 | 発売日降順の`unprocessed_asins.json` |
 | New Release | accepted candidate処理後に`gist_update`を投入 | 作者、作者URL、最新発売日、最新作、最新作URLの表 |
-| Paper-to-Kindle | 紙書籍レコードの初期化・削除時に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
+| Paper-to-Kindle | 紙書籍価格を取得できたcheck成功時と候補検出後のdetail成功時に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
 
 Gist IDとfilenameは既存`checker_configs.json`の値を使用する。`gist_update`は実行時点のS3全体からMarkdownを再生成する。GitHub API失敗は当該Gistジョブのエラーとして再試行し、先に完了したS3更新は巻き戻さない。
 

@@ -226,12 +226,9 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil // asin_mismatch terminal
 	}
 
-	// SPEC 14.2: CurrentPrice==0 かつ紙書籍価格を取得できた場合だけ紙書籍レコードの価格を初期化する。
 	if info.PaperPrice.Valid() {
-		var priceInitialized bool
 		applied, err := deps.PaperBooksStore.UpdateOneBook(ctx, paperASIN, func(old book.KindleBook) book.KindleBook {
-			priceInitialized = !old.CurrentPrice.Valid()
-			if priceInitialized {
+			if !old.CurrentPrice.Valid() {
 				old.CurrentPrice = info.PaperPrice
 				old.MaxPrice = info.PaperPrice
 			}
@@ -242,16 +239,13 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 				fmt.Errorf("initialize paper price %s: %w", paperASIN, err)
 		}
 		if !applied {
-			return execution.Terminal(errorTypeTargetRemoved, result.HTTPStatus, result.ResponseBytes), nil // target_removed terminal
+			return execution.Terminal(errorTypeTargetRemoved, result.HTTPStatus, result.ResponseBytes), nil
 		}
-		// SPEC 14.2/15: 価格初期化が S3 へ反映されたら paper_books の内容が変わったため
-		// Paper-to-Kindle 用 gist_update を決定的 job_id で投入する。
-		// 既に価格が設定済みなら priceInitialized=false となり投入しない（冪等、SPECIFICATION.md 7.5）。
-		if priceInitialized {
-			if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j, gistStagePaperPriceInit, j.Target.ASIN)); err != nil {
-				return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
-					fmt.Errorf("enqueue paper-to-kindle gist after price init: %w", err)
-			}
+		// 価格が既に設定済みでも常に投入する。Gist は paper_books 全体から毎回再生成する（15）ため
+		// 冗長な再投入は安全であり、初回 enqueue 失敗後の再配信で永続状態に依存せず欠落を reconcile する（7.5）。
+		if err := deps.Enqueuer.Enqueue(ctx, buildPaperToKindleGistJob(j, gistStagePaperPriceInit, j.Target.ASIN)); err != nil {
+			return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
+				fmt.Errorf("enqueue paper-to-kindle gist after price init: %w", err)
 		}
 	}
 

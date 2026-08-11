@@ -142,6 +142,37 @@ func (n *fakeNotifier) Notify(_ context.Context, message string) error {
 	return n.err
 }
 
+type statefulPaperBooksStore struct {
+	book   book.KindleBook
+	exists bool
+}
+
+func (s *statefulPaperBooksStore) UpdateOneBook(_ context.Context, _ string, update func(book.KindleBook) book.KindleBook) (bool, error) {
+	s.book = update(s.book)
+	return s.exists, nil
+}
+
+func (s *statefulPaperBooksStore) Delete(_ context.Context, _ string) error { return nil }
+
+func (s *statefulPaperBooksStore) PaperBook(_ context.Context, _ string) (book.KindleBook, bool, error) {
+	return s.book, s.exists, nil
+}
+
+type failOnceEnqueuer struct {
+	succeeded []job.Job
+	failErr   error
+	failed    bool
+}
+
+func (e *failOnceEnqueuer) Enqueue(_ context.Context, j job.Job) error {
+	if !e.failed && e.failErr != nil {
+		e.failed = true
+		return e.failErr
+	}
+	e.succeeded = append(e.succeeded, j)
+	return nil
+}
+
 func baseDeps() Dependencies {
 	return Dependencies{
 		PaperPageFetcher:  &fakePaperPageFetcher{},
@@ -275,8 +306,7 @@ func TestCheck_PriceInitFailureEnqueuesNoGist(t *testing.T) {
 	}
 }
 
-// 価格が既に初期化済みなら gist を投入せず、Kindle候補の detail だけ投入する（冪等）。
-func TestCheck_PriceAlreadyInitializedIsIdempotent(t *testing.T) {
+func TestCheck_PriceAlreadySetStillEnqueuesGist(t *testing.T) {
 	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
@@ -286,13 +316,24 @@ func TestCheck_PriceAlreadyInitializedIsIdempotent(t *testing.T) {
 		t.Fatalf("Check: %v", err)
 	}
 	enq := deps.Enqueuer.(*fakeEnqueuer)
+	var hasGist, hasDetail bool
 	for i := range enq.jobs {
-		if enq.jobs[i].Kind == job.KindGistUpdate {
-			t.Errorf("gist must not be enqueued when price already initialized: %+v", enq.jobs)
+		switch enq.jobs[i].Kind {
+		case job.KindGistUpdate:
+			hasGist = true
+		case job.KindPaperToKindleDetail:
+			hasDetail = true
 		}
 	}
-	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindPaperToKindleDetail {
-		t.Fatalf("want only 1 detail job when price already set, got %+v", enq.jobs)
+	if !hasGist {
+		t.Errorf("gist must be enqueued even when price already set (7.5): %+v", enq.jobs)
+	}
+	if !hasDetail {
+		t.Errorf("detail must be enqueued: %+v", enq.jobs)
+	}
+	last := deps.PaperBooksStore.(*fakePaperBooksStore).lastUpdate
+	if !last.CurrentPrice.Valid() || last.CurrentPrice.Yen() != 792 {
+		t.Errorf("price must not change when already set, got %+v", last.CurrentPrice)
 	}
 }
 
@@ -737,13 +778,56 @@ func TestCheck_GistEnqueueFailureAfterPriceInitIsError(t *testing.T) {
 	}
 }
 
-// 価格初期化済み（gist スキップ）で Kindle候補の detail 投入が失敗した場合は enqueue_failed の retryable error にする。
-// detail(266) が最初の Enqueue 呼び出しになる。
-func TestCheck_DetailEnqueueFailureIsError(t *testing.T) {
-	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
+// 価格保存成功後にGist enqueueだけが失敗した場合、再配信で価格設定済みの同じ状態からGistをreconcileする（7.5）。
+func TestCheck_RedeliveryReconcilesMissingGistAfterPriceInit(t *testing.T) {
+	info := PaperPageInfo{
+		ASIN: "B0PAPER001", Title: "紙タイトル", PaperPrice: book.NewPrice(792),
+		HasPaperSwatch: true, HasKindleSwatch: false,
+	}
+	store := &statefulPaperBooksStore{book: book.KindleBook{ReleaseDate: releaseDay}, exists: true}
+	enq := &failOnceEnqueuer{failErr: errors.New("sqs throttled")}
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
-	deps.PaperBooksStore.(*fakePaperBooksStore).updateOldBook.CurrentPrice = book.NewPrice(792) // 既に初期化済み
+	deps.PaperBooksStore = store
+	deps.Enqueuer = enq
+	j := checkJob("B0PAPER001")
+
+	oc1, err1 := HandlePaperToKindleCheck(context.Background(), deps, j)
+	if err1 == nil {
+		t.Fatal("first run must fail when gist enqueue fails after price init")
+	}
+	if oc1.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("first run error_type = %q, want enqueue_failed", oc1.ErrorType)
+	}
+	if !store.book.CurrentPrice.Valid() || store.book.CurrentPrice.Yen() != 792 {
+		t.Errorf("price must persist before gist enqueue failure, got %+v", store.book.CurrentPrice)
+	}
+
+	oc2, err2 := HandlePaperToKindleCheck(context.Background(), deps, j)
+	if err2 != nil {
+		t.Fatalf("second run must reconcile gist without error: %v", err2)
+	}
+	if oc2.Result != execution.ResultTerminal || oc2.ErrorType != errorTypeKindleNA {
+		t.Errorf("second run result/error_type = %q/%q, want terminal/kindle_not_available", oc2.Result, oc2.ErrorType)
+	}
+	var gistCount int
+	for i := range enq.succeeded {
+		if enq.succeeded[i].Kind == job.KindGistUpdate && enq.succeeded[i].Target.GistType == gistPaperID {
+			gistCount++
+		}
+	}
+	if gistCount != 1 {
+		t.Errorf("redelivery must enqueue paper gist exactly once, got %d", gistCount)
+	}
+}
+
+func TestCheck_DetailEnqueueFailureIsError(t *testing.T) {
+	info := PaperPageInfo{
+		ASIN: "B0PAPER001", Title: "紙タイトル", PaperPrice: book.UnknownPrice(),
+		HasPaperSwatch: true, HasKindleSwatch: true, KindleSwatchASIN: "B0KINDLE01",
+	}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryOK, Info: info}
 	deps.Enqueuer.(*fakeEnqueuer).err = errors.New("sqs throttled")
 
 	oc, err := HandlePaperToKindleCheck(context.Background(), deps, checkJob("B0PAPER001"))
