@@ -13,8 +13,7 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// S3Store は AWS SDK for Go v2 による ObjectStore 実装。
-// ETag 付き読込と If-Match / If-None-Match 条件付き PutObject を行う（SPECIFICATION.md 9.5）。
+// AWS SDK for Go v2 による ObjectStore 実装。ETag 付き読込と If-Match / If-None-Match 条件付き PutObject を行う（SPECIFICATION.md 9.5）。
 // 実AWS接続を除く単体テストは MemStore で検証し、この実装はデプロイ時に確認する。
 type S3Store struct {
 	client *s3.Client

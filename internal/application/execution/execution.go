@@ -8,14 +8,11 @@
 // 本packageは domain/HTTP/AWS/logging のいずれへも依存しない（AGENTS.md §2/§3）。
 package execution
 
-// 結果分類（SPECIFICATION.md 18.1 result）。正常・terminal・retryable で共通に使う。
+// SPECIFICATION.md 18.1 result。正常・terminal・retryable で共通に使う。
 const (
-	// ResultCompleted は正常処理結果（job_completed）。
-	ResultCompleted = "completed"
-	// ResultTerminal は404・対象種別不一致等の再試行しない結果（job_terminal）。
-	ResultTerminal = "terminal"
-	// ResultError は再試行する処理エラー（job_error / gist_error）。
-	ResultError = "error"
+	ResultCompleted = "completed"   // job_completed
+	ResultTerminal  = "terminal"    // job_terminal。404・対象種別不一致等の再試行しない結果。
+	ResultError     = "error"       // job_error / gist_error
 )
 
 // Outcome は1ジョブの処理結果。
@@ -28,17 +25,16 @@ type Outcome struct {
 	ResponseBytes int
 }
 
-// Completed は正常結果の Outcome を返す。
 func Completed(httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultCompleted, HTTPStatus: httpStatus, ResponseBytes: responseBytes}
 }
 
-// Terminal は再試行しない結果の Outcome を返す。errorType に具体原因を設定する。
+// errorType に具体原因を設定する。
 func Terminal(errorType string, httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultTerminal, ErrorType: errorType, HTTPStatus: httpStatus, ResponseBytes: responseBytes}
 }
 
-// Errored は再試行する処理エラーの Outcome を返す。原因 error は呼び出し側が戻り値として保持する。
+// 原因 error は呼び出し側が戻り値として保持する（Outcome 自体には持たない）。
 func Errored(errorType string, httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultError, ErrorType: errorType, HTTPStatus: httpStatus, ResponseBytes: responseBytes}
 }

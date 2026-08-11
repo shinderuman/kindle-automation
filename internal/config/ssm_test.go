@@ -75,7 +75,6 @@ func TestLoadOneSecret_NonNotFoundSecureErrorPropagates(t *testing.T) {
 	}
 }
 
-// secure 側が ParameterNotFound で plain 取得へ進んだ後、plain 側が一時エラーなら NotFound 扱いせず伝播する。
 func TestLoadOneSecret_NonNotFoundPlainErrorPropagates(t *testing.T) {
 	g := &stubGetter{errs: map[string]error{
 		plainSSMPath + "/" + KeySlackBotToken: &smithy.GenericAPIError{Code: "ThrottlingException"},
@@ -113,7 +112,6 @@ func TestLoadSecrets_AllKeys(t *testing.T) {
 	}
 }
 
-// required key が SSM に存在しない場合は起動エラー（SPECIFICATION.md 19 step4）。
 func TestLoadSecrets_RequiredMissingErrors(t *testing.T) {
 	g := &stubGetter{values: map[string]string{
 		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
@@ -125,8 +123,6 @@ func TestLoadSecrets_RequiredMissingErrors(t *testing.T) {
 	}
 }
 
-// required key の取得値が空文字の場合は起動エラー（有効な値を取得できない、SPECIFICATION.md 19）。
-// secure 側へ空値が入っている場合も fallback せず required 不成立として弾く。
 func TestLoadSecrets_RequiredEmptyErrors(t *testing.T) {
 	g := &stubGetter{values: map[string]string{
 		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
@@ -142,7 +138,6 @@ func TestLoadSecrets_RequiredEmptyErrors(t *testing.T) {
 	}
 }
 
-// optional key の取得値が空文字の場合は許容し、空文字のまま保持する（任意通知先の未設定相当）。
 func TestLoadSecrets_OptionalEmptyAllowed(t *testing.T) {
 	g := &stubGetter{values: map[string]string{
 		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",
@@ -159,7 +154,6 @@ func TestLoadSecrets_OptionalEmptyAllowed(t *testing.T) {
 	}
 }
 
-// optional key は SSM に存在しなくても起動を妨げない（任意通知先の未設定）。存在すれば値が入る。
 func TestLoadSecrets_OptionalMissingSucceeds(t *testing.T) {
 	g := &stubGetter{values: map[string]string{
 		secureSSMPath + "/" + KeyAmazonPartnerTag: "tag",

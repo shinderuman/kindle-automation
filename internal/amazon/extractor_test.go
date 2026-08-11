@@ -9,13 +9,11 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
-// これらのテストは goquery のセレクタ解釈と抽出ロジックの回帰テストである。
 // 作者表記(#bylineInfo a)と紙書籍ページのKindle候補ASIN(#tmm-grid-swatch-KINDLE a[href])は
 // 実Amazon HTML fixture (testdata/amazon) に対して検証する。
 // CAPTCHA・検索発売日など自動テストから Amazon へアクセスして実HTMLを取得できないページは、
 // SPECIFICATION.md 11.2 の既定セレクタが想定するDOM構造を最小合成HTMLで再現して検証する。
 // 合成HTMLは既存セレクタの回帰テストが目的であり、推測で新規セレクタを追加しない。
-// 実HTML構造の検証は実fixture取得後に別途行う（SPECIFICATION.md 22.2）。
 
 func newDoc(t *testing.T, htmlSource string) *goquery.Document {
 	t.Helper()
@@ -94,10 +92,6 @@ func TestExtractProduct_KindlePriceThreeLayers(t *testing.T) {
 	}
 }
 
-// TestExtractProduct_PurchasePriceWithoutPrefixIsParsed は購入価格正規表現の第2表現
-// 「￥Xで購入」を第1表現（「または」/「購入価格」前置）とは独立して検証する。
-// 第1層(slot-price)を0円にして第2層の parsePurchasePrice へ進め、extraMessage を
-// 第2表現のみ（前置なし）にして pattern1 が不一致となり pattern2 だけで取れる合成HTMLで期待価格を検証する。
 func TestExtractProduct_PurchasePriceWithoutPrefixIsParsed(t *testing.T) {
 	const htmlSource = `<html><body>
 <div id="tmm-grid-swatch-KINDLE"><span class="a-button"><span class="a-button-inner"><a class="a-button-text"><span class="slot-price"><span>￥0</span></span><span class="slot-extraMessage"><span class="kindleExtraMessage">￥1234で購入</span></span></a></span></span></div>
@@ -152,7 +146,6 @@ func TestExtractProduct_CouponAbsent(t *testing.T) {
 	}
 }
 
-// SPECIFICATION.md 22.2「ポイントなし」。ポイント専用要素がなければ0ポイントになる。
 func TestExtractProduct_PointsAbsentIsZero(t *testing.T) {
 	const htmlSource = `<html><body>
 <div id="tmm-grid-swatch-KINDLE"><span class="a-button"><span class="a-button-inner"><a class="a-button-text"><span class="slot-price"><span>￥759</span></span></a></span></span></div>
@@ -163,8 +156,6 @@ func TestExtractProduct_PointsAbsentIsZero(t *testing.T) {
 	}
 }
 
-// SPECIFICATION.md 22.2「Kindle版スウォッチなし」。KINDLEスウォッチがなければ HasKindleSwatch=false。
-// 商品ページとしての必須構造(#productTitle)はあり、価格は第3層候補から取得できる。
 // not_kindle terminal 判定はアプリケーション層(sale/newrelease/papertokindle)のテストで検証する。
 func TestExtractProduct_KindleSwatchAbsent(t *testing.T) {
 	const htmlSource = `<html><body>
@@ -195,8 +186,7 @@ func TestExtractProduct_ReleaseDate(t *testing.T) {
 }
 
 func TestExtractSearch_BasicFields(t *testing.T) {
-	// 検索発売日セレクタは nth-child を含む厳密構造で実HTML fixture による検証が必要なため、
-	// このテストでは ASIN/タイトル/価格/作者表記だけを検証する。
+	// 検索発売日セレクタは nth-child 厳密構造で実HTML fixture が必要なため、ここでは ASIN/タイトル/価格/作者表記だけ検証する。
 	const htmlSource = `<html><body>
 <div data-component-type="s-search-result">
   <div class="s-title-instructions-style"><a href="/dp/B0FX3X569X/ref=..."><h2><span>テスト書籍</span></h2></a></div>
@@ -222,7 +212,6 @@ func TestExtractSearch_BasicFields(t *testing.T) {
 	if len(h.Contributors) != 1 || h.Contributors[0] != "海李 (著)" {
 		t.Errorf("Contributors = %#v, want [\"海李 (著)\"]", h.Contributors)
 	}
-	// 形式表示がない候補はKindle版と確定しない（SPECIFICATION.md 13.4）。
 	if h.IsKindle {
 		t.Errorf("IsKindle = true, want false (形式表示なし)")
 	}
@@ -236,21 +225,17 @@ func TestExtractSearch_Empty(t *testing.T) {
 	}
 }
 
-// 実HTML fixture: digital-text 検索結果カードは Kindle形式表示でKindle版と確定する。
-// 未知/非Kindleを誤ってKindle扱いしないこと、contributor が販売者・日付と分離されることを検証する（SPECIFICATION.md 11.2, 13.4）。
+// 実HTML fixture: 未知/非Kindleを誤ってKindle扱いしないこと、contributor が販売者・日付と分離されることを検証する（SPECIFICATION.md 11.2, 13.4）。
 func TestExtractSearch_RealFixture_KindleFormatAndContributors(t *testing.T) {
 	hits := ExtractSearch(loadFixtureDoc(t, "search_digital_text.html"))
 	if len(hits) < 1 {
 		t.Fatalf("len(hits) = %d, want >=1 from real fixture", len(hits))
 	}
-	// digital-text 検索の実カードはすべて Kindle版 を表示する。
 	for i, h := range hits {
 		if !h.IsKindle {
 			t.Errorf("hits[%d].IsKindle = false, want true (実fixtureのカードはKindle版表示)", i)
 		}
 	}
-	// 1件目の作者欄は「スコット・フィッツジェラルド、 村上春樹 | 販売者:...」形式。
-	// 販売者・日付を除外し、contributor ごとに分割されることを検証する。
 	first := hits[0]
 	if !containsString(first.Contributors, "村上春樹") {
 		t.Errorf("first.Contributors = %#v, want 村上春樹 を含む（販売者・日付は除外）", first.Contributors)
@@ -262,8 +247,7 @@ func TestExtractSearch_RealFixture_KindleFormatAndContributors(t *testing.T) {
 	}
 }
 
-// 検索結果カードのKindle形式表示でKindle/非Kindle/種別不明を判定する（SPECIFICATION.md 13.4）。
-// 非Kindle・種別不明の最小fixtureは実markupの構造を基に形式markerを差し替え/除去して作る。
+// 非Kindle・種別不明の最小fixtureは実markupの構造を基に形式markerを差し替え/除去して作る（SPECIFICATION.md 13.4）。
 func TestExtractSearch_KindleFormatClassification(t *testing.T) {
 	const kindleCard = `<div data-component-type="s-search-result">
   <div class="s-title-instructions-style"><a href="/dp/B0KKKKKK01"><h2><span>K</span></h2></a></div>
@@ -294,7 +278,6 @@ func TestExtractSearch_KindleFormatClassification(t *testing.T) {
 	}
 }
 
-// splitSearchContributors は作者表記から販売者/日付を除外し contributor ごとに分割する。
 func TestSplitSearchContributors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -320,11 +303,8 @@ func TestSplitSearchContributors(t *testing.T) {
 	}
 }
 
-// SPECIFICATION.md 22.2「検索結果に発売日あり」。
-// 検索発売日セレクタは UserScript new_release_checker 由来の nth-child 構造
-// (.puis-desktop-list-row .puisg-col-4-of-24 div:nth-child(2) div:nth-child(2) span span) であり、
-// 実検索HTML fixtureがtest環境にないため、同セレクタが想定するDOMを最小合成HTMLで再現して回帰検証する。
-// 実HTML構造の検証は実fixture取得後に別途行う。
+// 検索発売日セレクタは UserScript new_release_checker 由来の nth-child 構造。実検索HTML fixtureがないため、
+// 同セレクタが想定するDOMを最小合成HTMLで再現して回帰検証する（SPECIFICATION.md 22.2）。
 func TestExtractSearch_ReleaseDatePresent(t *testing.T) {
 	const htmlSource = `<html><body>
 <div data-component-type="s-search-result">
@@ -356,7 +336,6 @@ func TestExtractSearch_ReleaseDatePresent(t *testing.T) {
 	}
 }
 
-// SPECIFICATION.md 22.2「検索結果に発売日なし」。発売日要素がなければ HasReleaseDate=false。
 func TestExtractSearch_ReleaseDateAbsent(t *testing.T) {
 	const htmlSource = `<html><body>
 <div data-component-type="s-search-result">
@@ -374,9 +353,6 @@ func TestExtractSearch_ReleaseDateAbsent(t *testing.T) {
 	}
 }
 
-// TestExtractASIN_PriorityRules は ASIN を HTML input → canonical URL → redirect 後の
-// 最終URL の順で fallback し、いずれもなければ空になることを検証する（SPECIFICATION.md 11.2）。
-// 元の要求ASIN で無条件に代用しない。
 func TestExtractASIN_PriorityRules(t *testing.T) {
 	tests := []struct {
 		name     string

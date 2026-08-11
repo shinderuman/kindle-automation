@@ -244,8 +244,6 @@ func TestEncodeOmitsUnusedTargetFields(t *testing.T) {
 	}
 }
 
-// TestEncodeDecodeResultItemTypeRoundTrip は new_release_result の product.item_type が
-// canonical値 kindle で encode→decode→検証を往復することを検証する（SPECIFICATION.md 7.2, 13.4）。
 func TestEncodeDecodeResultItemTypeRoundTrip(t *testing.T) {
 	src := validBaseJob(KindNewReleaseResult, Target{
 		ASIN: "B0FX3X569X", AuthorName: "海李",
@@ -265,7 +263,6 @@ func TestEncodeDecodeResultItemTypeRoundTrip(t *testing.T) {
 	if err := got.Validate(); err != nil {
 		t.Fatalf("Validate after decode: %v", err)
 	}
-	// JSON上の canonical 表記も検証する。
 	if !strings.Contains(string(data), `"item_type":"kindle"`) {
 		t.Fatalf("encoded JSON lacks canonical item_type: %s", data)
 	}
@@ -289,8 +286,6 @@ func TestEncodeScheduledAtAsRFC3339(t *testing.T) {
 	}
 }
 
-// TestEncodeDecodeRoundTrip_AllKinds は全8 kindについて encode→decode→検証が成功し、
-// 各 field が往復で保存されることを検証する（SPECIFICATION.md 7.2）。
 func TestEncodeDecodeRoundTrip_AllKinds(t *testing.T) {
 	product := &SearchProduct{
 		ASIN: "B0FX3X569X", Title: "T", URL: "https://example.jp/u",

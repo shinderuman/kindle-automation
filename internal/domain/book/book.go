@@ -9,15 +9,12 @@ import (
 	"time"
 )
 
-// Price は取得済みの円価格を表す。
-// Valid が false のときは未取得を示し、Kindle Unlimited 等の 0円とは区別する。
-// Amazon HTML から正の金額を取得できなかった場合は未取得として扱う（SPECIFICATION.md 11.2）。
+// Valid=false は未取得を示し、Kindle Unlimited 等の 0円とは区別する（SPECIFICATION.md 11.2）。
 type Price struct {
 	yen   float64
 	valid bool
 }
 
-// NewPrice は正の金額から Price を作る。0 または負の値は未取得扱いとする。
 func NewPrice(yen float64) Price {
 	if yen <= 0 {
 		return Price{}
@@ -25,13 +22,10 @@ func NewPrice(yen float64) Price {
 	return Price{yen: yen, valid: true}
 }
 
-// UnknownPrice は未取得の Price を返す。
 func UnknownPrice() Price { return Price{} }
 
-// Yen は円価格を返す。Valid が false の場合は 0 を返す。
 func (p Price) Yen() float64 { return p.yen }
 
-// Valid は取得済みの正の金額であるかを返す。
 func (p Price) Valid() bool { return p.valid }
 
 // KindleBook は paper_books_asins / unprocessed_asins / notified_asins / upcoming_asins
@@ -55,7 +49,6 @@ type Author struct {
 	LatestReleaseURL   string
 }
 
-// maxPrice は候補のうち取得済みで最も高い円価格を返す。
 // 取得済み候補が1つもない場合は未取得を返す。
 func maxPrice(candidates ...Price) Price {
 	var best Price
@@ -70,12 +63,6 @@ func maxPrice(candidates ...Price) Price {
 	return best
 }
 
-// UpdatePriceHistory は今回取得価格で価格履歴を更新する（SPECIFICATION.md 12.3）。
-//
-//	new.CurrentPrice = current
-//	new.MaxPrice = max(old.MaxPrice, old.CurrentPrice, current)
-//	new.CreatedAt = old.CreatedAt
-//
 // old が新規レコード（CreatedAt ゼロ値）の場合は now を作成時刻にする。
 // old.MaxPrice が未取得の場合は今回価格が初回基準になる。
 // 既存Go実装にあった「セール成立書籍を保存対象から外す」挙動は引き継がない（SPECIFICATION.md 12.3）。
@@ -89,7 +76,7 @@ func UpdatePriceHistory(old KindleBook, current Price, now time.Time) KindleBook
 	return updated
 }
 
-// DedupBooks は ASIN で重複排除する。同じ ASIN は最初の出現を優先する。
+// DedupBooks は ASIN で重複排除する。
 // SPECIFICATION.md 10 の「重複時は既存 unprocessed 側を優先」は、
 // 呼び出し側で append(original, upcoming...) の順序を保証することで実現する。
 // ASIN が空のレコードは重複排除の判定対象にできず、そのまま残す。
@@ -123,7 +110,6 @@ func SortBooks(books []KindleBook) []KindleBook {
 	return sorted
 }
 
-// DedupAuthors は Name で重複排除する。同じ Name は最初の出現を優先する。
 func DedupAuthors(authors []Author) []Author {
 	seen := make(map[string]struct{})
 	out := make([]Author, 0, len(authors))

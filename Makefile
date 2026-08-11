@@ -1,6 +1,6 @@
 .PHONY: test vet staticcheck fmt sam-validate check build-ScheduleChecksFunction build-CheckWorkerFunction
 
-# 単体テスト。自動テストから実AWS・Amazon・Slack・Mastodon・GitHubへはアクセスしない。
+# 自動テストから実AWS・Amazon・Slack・Mastodon・GitHubへはアクセスしない。
 test:
 	go test ./...
 

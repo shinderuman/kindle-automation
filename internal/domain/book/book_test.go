@@ -187,7 +187,7 @@ func TestDedupAuthorsAndSortAuthors(t *testing.T) {
 		{Name: "AuthorB", LatestReleaseDate: day1},
 		{Name: "AuthorA", LatestReleaseDate: day1},
 		{Name: "AuthorC", LatestReleaseDate: day2},
-		{Name: "AuthorA", LatestReleaseDate: day1}, // 重複
+		{Name: "AuthorA", LatestReleaseDate: day1},
 	}
 
 	deduped := DedupAuthors(authors)

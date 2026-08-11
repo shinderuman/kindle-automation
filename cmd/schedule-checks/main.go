@@ -1,5 +1,4 @@
-// Package main は schedule-checks Lambda の薄いエントリポイント。
-// 依存組み立て・イベント decode・振り分けは internal/lambda/schedulechecks へ分離している。
+// Package main は schedule-checks Lambda のエントリポイント。実装は internal/lambda/schedulechecks へ分離。
 package main
 
 import "github.com/shinderuman/kindle-automation/internal/lambda/schedulechecks"

@@ -78,8 +78,6 @@ func TestFetchProduct_BodyTooLarge(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	// body 超過は応答ありの retryable として計測値を保持した FetchResult へ変換する
-	// （SPECIFICATION.md 11.3 body超過=retryable, 18.1 http_status/response_bytes）。
 	result, err := newTestClient(t, ts, 30*time.Second).FetchProduct(context.Background(), "B0FX3X569X")
 	if err != nil {
 		t.Fatalf("FetchProduct: %v", err)
@@ -111,10 +109,6 @@ func TestFetchProduct_ShortBodyIsRetryable(t *testing.T) {
 }
 
 func TestFetchProduct_MissingASINIsRetryable(t *testing.T) {
-	// #productTitle はあるが ASIN input・canonical link ともになく、最終URL path にも
-	// /dp/{ASIN} が無い200。対象ASINを canonical/final URL のいずれからも確認できないため
-	// 必須構造欠落の取得内容不足として再試行する（SPECIFICATION.md 11.3）。
-	// 要求ASINを無条件に代入して検証を形骸化しない。
 	htmlBody := `<html><body><span id="productTitle">タイトル</span></body></html>`
 	c := newClientWithHTTPClient(amazonBase, &http.Client{
 		Timeout:       5 * time.Second,
@@ -133,8 +127,8 @@ func TestFetchProduct_MissingASINIsRetryable(t *testing.T) {
 	}
 }
 
-// finalURLNoASINRT は応答をそのまま返しつつ、最終URL path を ASIN を含まない /selected へ
-// 替える Transport。Amazon が商品URLを /dp/{ASIN} を含まない path へ誘導した状況を再現する。
+// finalURLNoASINRT は最終URL path を ASIN を含まない /selected へ替えて、Amazon が
+// /dp/{ASIN} を含まない path へ誘導した状況を再現する Transport。
 type finalURLNoASINRT struct{ body []byte }
 
 func (rt finalURLNoASINRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -148,9 +142,7 @@ func (rt finalURLNoASINRT) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func TestFetchProduct_CaptchaIsRetryable(t *testing.T) {
-	// CAPTCHAページ全体像は実HTML fixtureがtest環境にないため、lambda-pocで観測された
-	// CAPTCHA文言を含む最小合成bodyで分類を検証する（SPECIFICATION.md 11.3, 22.2）。
-	// markerの拡充は実HTML取得後に行い、ここでは推測で文言を追加しない。
+	// 実CAPTCHA fixtureがないため lambda-poc で観測された文言の最小合成bodyで検証する（SPECIFICATION.md 22.2）。
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("<html><body>画像に表示されている文字を入力してください</body></html>"))
 	}))
@@ -209,7 +201,6 @@ func TestFetchProduct_StatusClassification(t *testing.T) {
 }
 
 func TestFetchSearch_SuccessAndEmpty(t *testing.T) {
-	// 結果あり → CategoryOK
 	tsOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(searchHitHTML))
 	}))
@@ -226,7 +217,6 @@ func TestFetchSearch_SuccessAndEmpty(t *testing.T) {
 		t.Errorf("hit ASIN = %q", result.Hits[0].ASIN)
 	}
 
-	// 結果0件 → CategorySearchEmpty（search_empty）
 	tsEmpty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("<html><body>結果なし</body></html>"))
 	}))
@@ -304,9 +294,7 @@ func redirectChainServer(targetHops int32) (*httptest.Server, *int32) {
 	})), &hops
 }
 
-// newRedirectCountClient は redirect 回数上限（checkRedirectCount）だけを適用する client を返す。
-// httptest server が 127.0.0.1 で IsAmazonHost を通らないため、実 redirect chain で回数境界を
-// 検証するには回数判定だけを注入する。host 制限は TestFetchProduct_RedirectToNonAmazonHost で担保する。
+// newRedirectCountClient は回数判定だけを注入する。httptest server が 127.0.0.1 で IsAmazonHost を通らないため。
 func newRedirectCountClient(t *testing.T, ts *httptest.Server) *Client {
 	t.Helper()
 	return newClientWithHTTPClient(ts.URL, &http.Client{
@@ -371,7 +359,6 @@ func TestIsAmazonHost_AcceptsApexAndSubdomainRejectsSpoof(t *testing.T) {
 	}
 }
 
-// NewClient は本番用の依存(timeout・redirect検証)を組み立てた client を返す。
 func TestNewClient_ReturnsConfiguredClient(t *testing.T) {
 	c := NewClient()
 	if c == nil {
@@ -379,8 +366,6 @@ func TestNewClient_ReturnsConfiguredClient(t *testing.T) {
 	}
 }
 
-// checkRedirect は相対redirect(host 空)を許容する。host が空のときは
-// IsAmazonHost 判定へ進まず追随する（SPECIFICATION.md 11.1）。
 func TestCheckRedirect_EmptyHostAllowed(t *testing.T) {
 	req := &http.Request{URL: &url.URL{Host: "", Path: "/dp/B0FX3X569X"}}
 	if err := checkRedirect(req, nil); err != nil {
@@ -388,8 +373,6 @@ func TestCheckRedirect_EmptyHostAllowed(t *testing.T) {
 	}
 }
 
-// 商品ページ取得でTCP/DNSレベルの通信失敗が起きた場合は応答なしのerrorとして返す
-// （SPECIFICATION.md 11.3 timeout、DNS、接続失敗=retryable。HTTP client内で再試行しない）。
 func TestFetchProduct_ConnectionFailure(t *testing.T) {
 	c := newClientWithHTTPClient("http://127.0.0.1:1", &http.Client{
 		Timeout:       2 * time.Second,
@@ -401,8 +384,6 @@ func TestFetchProduct_ConnectionFailure(t *testing.T) {
 	}
 }
 
-// response body の読込失敗も応答ありのerrorとして返す（SPECIFICATION.md 11.3）。
-// 応答は Amazon 由来とは限らないため本文は parse せず error を上位へ伝播する。
 type readErrBody struct{}
 
 func (readErrBody) Read(_ []byte) (int, error) {
@@ -432,7 +413,6 @@ func TestFetchProduct_BodyReadError(t *testing.T) {
 	}
 }
 
-// FetchSearch の body 超過は応答ありの retryable として計測値を保持する（SPECIFICATION.md 11.3, 18.1）。
 func TestFetchSearch_BodyTooLarge(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		big := make([]byte, maxBodyBytes+1)
@@ -458,7 +438,6 @@ func TestFetchSearch_BodyTooLarge(t *testing.T) {
 	}
 }
 
-// FetchSearch の CAPTCHA 本文は retryable に分類する（SPECIFICATION.md 11.3, 22.2）。
 func TestFetchSearch_CaptchaIsRetryable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("<html><body>画像に表示されている文字を入力してください</body></html>"))
@@ -474,7 +453,6 @@ func TestFetchSearch_CaptchaIsRetryable(t *testing.T) {
 	}
 }
 
-// FetchSearch でもTCP/DNSレベルの通信失敗は応答なしのerrorとして返す（SPECIFICATION.md 11.3）。
 func TestFetchSearch_ConnectionFailure(t *testing.T) {
 	c := newClientWithHTTPClient("http://127.0.0.1:1", &http.Client{
 		Timeout:       2 * time.Second,
@@ -486,7 +464,6 @@ func TestFetchSearch_ConnectionFailure(t *testing.T) {
 	}
 }
 
-// baseURL が不正でリクエストを構築できない場合はerrorとして返す（設定異常）。
 func TestFetchProduct_MalformedBaseURL(t *testing.T) {
 	c := newClientWithHTTPClient("http://[::1zzz", &http.Client{
 		Timeout:       5 * time.Second,
@@ -498,7 +475,6 @@ func TestFetchProduct_MalformedBaseURL(t *testing.T) {
 	}
 }
 
-// FetchSearch の HTTP status 分類（SPECIFICATION.md 11.3）。
 func TestFetchSearch_StatusClassification(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -30,7 +30,6 @@ const (
 	EnvLogLevel                 = "LOG_LEVEL"
 )
 
-// Env は環境変数由来の起動設定。S3 object key と queue URL と log level を集約する。
 type Env struct {
 	S3Bucket                 string
 	S3Region                 string
@@ -45,8 +44,7 @@ type Env struct {
 	LogLevel                 string
 }
 
-// LoadEnv は getenv から環境変数を読み取り validation する。
-// 必須項目は空を許さず、log level は空なら INFO、非空なら有効な値を要求する。
+// LoadEnv は必須項目は空を許さず、log level は空なら INFO、非空なら有効な値を要求する。
 func LoadEnv(getenv func(string) string) (Env, error) {
 	env := Env{
 		S3Bucket:                 getenv(EnvS3Bucket),

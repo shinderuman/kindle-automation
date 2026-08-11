@@ -9,8 +9,7 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 )
 
-// KnownState は処理開始時の候補/対象の既知状態（SPECIFICATION.md 14.4 step1）。
-// papertokindle.KnownState と同じ構造だが storage 固有型とし、cmd 層で変換する。
+// SPECIFICATION.md 14.4 step1 の処理開始時既知状態。papertokindle.KnownState と同じ構造だが storage 固有型とし、cmd 層で変換する。
 type KnownState struct {
 	NotifiedExists    bool
 	UpcomingExists    bool
@@ -18,8 +17,7 @@ type KnownState struct {
 	PaperBookExists   bool
 }
 
-// BookFileStore は1つの書籍JSON object（notified/upcoming/unprocessed/paper_books）へ
-// 業務単位の読み書きを提供する。ObjectStore と key を1つ持つ。
+// 1つの書籍JSON object（notified/upcoming/unprocessed/paper_books）へ業務単位の読み書きを提供する。
 // application 層の interface シグネチャ（book.KindleBook 等）と一致するメソッドを提供し、
 // cmd/check-worker 層の薄い wrapper が各 application interface を満たす。
 type BookFileStore struct {
@@ -27,28 +25,27 @@ type BookFileStore struct {
 	key   string
 }
 
-// NewBookFileStore は ObjectStore と key を指定して BookFileStore を返す。
 func NewBookFileStore(store ObjectStore, key string) *BookFileStore {
 	return &BookFileStore{store: store, key: key}
 }
 
-// UpdateOneBook は対象 ASIN の Book を更新する。対象なし（手動削除）は applied=false。
+// 対象 ASIN が無ければ手動削除扱いで applied=false を返す（再追加しない）。
 func (s *BookFileStore) UpdateOneBook(ctx context.Context, asin string, update func(book.KindleBook) book.KindleBook) (bool, error) {
 	return UpdateOneBook(ctx, s.store, s.key, asin, update)
 }
 
-// Upsert は対象 ASIN のレコードを冪等 upsert する。既存 ASIN は値を merge 更新し Extra は保持し、不存在なら追加する。重複実行で件数は増えない。
+// 冪等 upsert: 既存 ASIN は値を merge 更新し Extra は保持し、不存在なら追加する。重複実行で件数は増えない。
 func (s *BookFileStore) Upsert(ctx context.Context, b book.KindleBook) error {
 	return UpsertBookRecord(ctx, s.store, s.key, BookRecord{Book: b})
 }
 
-// Exists は対象 ASIN が存在するかを返す。保存期間適用なしの読み込みのみ。
+// 保存期間適用なしの読み込みのみ。
 func (s *BookFileStore) Exists(ctx context.Context, asin string) (bool, error) {
 	return bookExists(ctx, s.store, s.key, asin)
 }
 
-// ApplyRetentionAndExists は発売日が now より未来でないレコードを除外（保存期間適用）し、
-// 処理開始時に対象 ASIN が存在したかを返す（SPECIFICATION.md 13.6 step2-3）。
+// SPECIFICATION.md 13.6 step2-3: 発売日が now より未来でないレコードを除外（保存期間適用）し、
+// 処理開始時に対象 ASIN が存在したかを返す。
 func (s *BookFileStore) ApplyRetentionAndExists(ctx context.Context, asin string, now time.Time) (bool, error) {
 	var exists bool
 	err := mutateBooks(ctx, s.store, s.key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
@@ -66,9 +63,8 @@ func (s *BookFileStore) ApplyRetentionAndExists(ctx context.Context, asin string
 	return exists, err
 }
 
-// Delete は対象 ASIN を条件付きで削除する。対象 object は SPECIFICATION.md 9.1 の存在必須 objectで、
-// object 自体の欠落は error とする（空 fallback せず新規保存も行わない）。
-// object 内に ASIN がなければ（手動削除済み）何も削除せず成功する（SPECIFICATION.md 7.5）。冪等。
+// SPECIFICATION.md 9.1/7.5: 対象 object は存在必須のため object 自体の欠落は error（空 fallback や新規保存はしない）。
+// object 内に ASIN がなければ（手動削除済み）何も削除せず成功する（冪等）。
 func (s *BookFileStore) Delete(ctx context.Context, asin string) error {
 	return mutateBooks(ctx, s.store, s.key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
 		kept := make([]BookRecord, 0, len(records))
@@ -81,9 +77,8 @@ func (s *BookFileStore) Delete(ctx context.Context, asin string) error {
 	})
 }
 
-// Books は object の全 Book を並び順（S3 保存時の発売日降順・同日タイトル昇順）のまま返す。
-// gist 再生成等で全件読み取るために使う。対象 object は SPECIFICATION.md 9.1 の存在必須 objectのため、
-// ErrObjectNotFound を含む Get error をそのまま返し、空配列へ fallback して Gist を空上書きしない。
+// SPECIFICATION.md 9.1: 対象 object は存在必須のため、ErrObjectNotFound を含む Get error をそのまま返し、
+// 空配列へ fallback して Gist を空上書きしない。
 func (s *BookFileStore) Books(ctx context.Context) ([]book.KindleBook, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
@@ -100,9 +95,8 @@ func (s *BookFileStore) Books(ctx context.Context) ([]book.KindleBook, error) {
 	return books, nil
 }
 
-// Book は対象 ASIN の Book を返す。object 内に ASIN がなければ ok=false。
-// 対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、object 自体の欠落は
-// ok=false ではなく error とし、「ASIN が存在しない」と同一視しない。
+// SPECIFICATION.md 9.1: 対象 object は存在必須のため、object 自体の欠落は ok=false ではなく error とし、
+// 「ASIN が存在しない」と同一視しない（object 内に ASIN が無ければ ok=false）。
 func (s *BookFileStore) Book(ctx context.Context, asin string) (book.KindleBook, bool, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
@@ -119,20 +113,17 @@ func (s *BookFileStore) Book(ctx context.Context, asin string) (book.KindleBook,
 	return records[idx].Book, true, nil
 }
 
-// AuthorFileStore は authors.json への業務単位アクセスを提供する。
 type AuthorFileStore struct {
 	store ObjectStore
 	key   string
 }
 
-// NewAuthorFileStore は ObjectStore と key を指定して AuthorFileStore を返す。
 func NewAuthorFileStore(store ObjectStore, key string) *AuthorFileStore {
 	return &AuthorFileStore{store: store, key: key}
 }
 
-// Authors は authors.json の全 Author を並び順（最新発売日降順・同日名昇順）のまま返す。
-// gist 再生成で全件読み取るために使う。authors.json は SPECIFICATION.md 9.1 の存在必須 objectのため、
-// ErrObjectNotFound を含む Get error をそのまま返し、空配列へ fallback して作者0件の正本を再生成しない。
+// SPECIFICATION.md 9.1: authors.json は存在必須 object のため、ErrObjectNotFound を含む Get error をそのまま返し、
+// 空配列へ fallback して作者0件の正本を再生成しない。
 func (s *AuthorFileStore) Authors(ctx context.Context) ([]book.Author, error) {
 	obj, err := s.store.Get(ctx, s.key)
 	if err != nil {
@@ -149,8 +140,7 @@ func (s *AuthorFileStore) Authors(ctx context.Context) ([]book.Author, error) {
 	return authors, nil
 }
 
-// UpdateLatestRelease は候補の発売日が既存 Author の LatestReleaseDate より後なら更新する。
-// 過去/将来を問わず、変更があれば true を返す。作者一覧を並べ直す（SPECIFICATION.md 13.5）。
+// SPECIFICATION.md 13.5: 候補の発売日が既存 Author の LatestReleaseDate より後なら更新し、作者一覧を並べ直す。
 func (s *AuthorFileStore) UpdateLatestRelease(ctx context.Context, authorName string, releaseDate time.Time, title, url string) (bool, error) {
 	var changed bool
 	err := mutateAuthors(ctx, s.store, s.key, defaultMergeRetries, func(records []AuthorRecord) ([]AuthorRecord, error) {
@@ -167,7 +157,6 @@ func (s *AuthorFileStore) UpdateLatestRelease(ctx context.Context, authorName st
 	return changed, err
 }
 
-// KnownStateQuerier は複数 object の存在判定から既知状態を返す（SPECIFICATION.md 14.4 step1）。
 type KnownStateQuerier struct {
 	store          ObjectStore
 	notifiedKey    string
@@ -176,12 +165,11 @@ type KnownStateQuerier struct {
 	paperBooksKey  string
 }
 
-// NewKnownStateQuerier は ObjectStore と各 object key を指定して KnownStateQuerier を返す。
 func NewKnownStateQuerier(store ObjectStore, notifiedKey, upcomingKey, unprocessedKey, paperBooksKey string) *KnownStateQuerier {
 	return &KnownStateQuerier{store: store, notifiedKey: notifiedKey, upcomingKey: upcomingKey, unprocessedKey: unprocessedKey, paperBooksKey: paperBooksKey}
 }
 
-// KnownState は処理開始時の候補/対象の既知状態を返す（SPECIFICATION.md 14.4 step1, 7.5）。
+// SPECIFICATION.md 14.4 step1, 7.5: 処理開始時の候補/対象の既知状態を返す。
 func (q *KnownStateQuerier) KnownState(ctx context.Context, kindleASIN, paperASIN string) (KnownState, error) {
 	state := KnownState{}
 	state.NotifiedExists = false
@@ -208,7 +196,7 @@ func (q *KnownStateQuerier) KnownState(ctx context.Context, kindleASIN, paperASI
 	return state, nil
 }
 
-// mutateAuthors は Get → mutate → Put(If-Match) を行い、412 で再試行する（Author 版 mutateBooks）。
+// Author 版 mutateBooks: Get → mutate → Put(If-Match) を行い、412 で再試行する。
 // authors.json は SPECIFICATION.md 9.1 の存在必須 object のため、ErrObjectNotFound を含む Get error を
 // 呼出側へ返し、空配列への fallback や If-None-Match: * による暗黙の新規作成は行わない。
 func mutateAuthors(ctx context.Context, store ObjectStore, key string, maxRetry int, mutate func([]AuthorRecord) ([]AuthorRecord, error)) error {
@@ -242,9 +230,8 @@ func mutateAuthors(ctx context.Context, store ObjectStore, key string, maxRetry 
 	return fmt.Errorf("merge %s failed after %d retries: %w", key, maxRetry, lastErr)
 }
 
-// bookExists は対象 ASIN が object に存在するかを返す。
-// 対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、object 自体の欠落は
-// exists=false ではなく error とし、「ASIN が存在しない」と同一視しない。
+// SPECIFICATION.md 9.1: 対象 object は存在必須のため、object 自体の欠落は exists=false ではなく error とし、
+// 「ASIN が存在しない」と同一視しない。
 func bookExists(ctx context.Context, store ObjectStore, key, asin string) (bool, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
@@ -257,8 +244,7 @@ func bookExists(ctx context.Context, store ObjectStore, key, asin string) (bool,
 	return findBookIndex(records, asin) != -1, nil
 }
 
-// sortAuthorRecords は AuthorRecord を重複排除・並び順（最新発売日降順・同日名昇順）へ整える。
-// Extra（未知 field）は保持する。
+// 重複排除・並び順（最新発売日降順・同日名昇順）へ整える。Extra（未知 field）は保持する。
 func sortAuthorRecords(records []AuthorRecord) []AuthorRecord {
 	byName := make(map[string]AuthorRecord, len(records))
 	authors := make([]book.Author, 0, len(records))

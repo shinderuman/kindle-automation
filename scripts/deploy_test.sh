@@ -13,7 +13,6 @@ PASS=0
 FAIL_COUNT=0
 ERRORS=0
 
-# stub が呼出を記録する log。各ケースで setup_root が再設定する。
 CALL_LOG=""
 ROOT=""
 RUN_RC=0

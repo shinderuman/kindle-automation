@@ -137,8 +137,6 @@ func sha256sum(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestEnqueueBatch_BoundariesAndOrder は 0/10/11/20/21 件の境界で batch 数が正しく、
-// 各 batch が10件以下で、入力順が MessageBody の並びで保存されることを検証する（SPECIFICATION.md 7.3）。
 func TestEnqueueBatch_BoundariesAndOrder(t *testing.T) {
 	cases := []struct {
 		n         int
@@ -199,8 +197,6 @@ func TestEnqueueBatch_BoundariesAndOrder(t *testing.T) {
 	}
 }
 
-// TestEnqueueBatch_MidBatchFailureStopsAndReturnsError は2件目の batch が失敗したとき
-// 3件目を送信せず error を返すことを検証する（SPECIFICATION.md 7.3、AGENTS.md 4）。
 func TestEnqueueBatch_MidBatchFailureStopsAndReturnsError(t *testing.T) {
 	s := &stubSQS{failOnCall: 1, failCallErr: errors.New("batch 2 down")}
 	enq := NewEnqueuer(s, "queue-url", nil)
@@ -212,7 +208,6 @@ func TestEnqueueBatch_MidBatchFailureStopsAndReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error when a mid batch fails")
 	}
-	// 25件は 10+10+5。2件目(呼び出し1)で失敗するため3件目は送信しない。
 	if s.calls != 2 {
 		t.Errorf("calls = %d, want stop after 2", s.calls)
 	}
@@ -221,7 +216,6 @@ func TestEnqueueBatch_MidBatchFailureStopsAndReturnsError(t *testing.T) {
 	}
 }
 
-// TestSendBatch_LogsFailedEntries は logger 設定時に失敗 entry を構造化ログへ出力することを検証する。
 func TestSendBatch_LogsFailedEntries(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))

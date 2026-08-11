@@ -129,7 +129,6 @@ func TestNotify_NilSendersAreSkipped(t *testing.T) {
 }
 
 func TestNotify_LogsSuccessAtInfo(t *testing.T) {
-	// SPECIFICATION.md 18.1: level は INFO/WARN/ERROR。通知成功は INFO で記録する。
 	var slackBody map[string]string
 	var mastodonForm url.Values
 	slackSrv := newSlackServer(t, true, &slackBody)
@@ -156,9 +155,6 @@ func TestNotify_LogsSuccessAtInfo(t *testing.T) {
 	}
 }
 
-// TestNotify_FailureLogHasSingleEventKey は notification_error ログが本番の logging 設定
-// （replaceAttr が message を event へ map）でも event key を1つだけ持つことを検証する
-// （SPECIFICATION.md 18.3）。message 引数と追加 attr で event を重複させない。
 func TestNotify_FailureLogHasSingleEventKey(t *testing.T) {
 	var slackBody map[string]string
 	slackSrv := newSlackServer(t, false, &slackBody)
@@ -184,7 +180,6 @@ func TestNotify_FailureLogHasSingleEventKey(t *testing.T) {
 	}
 }
 
-// parseLogMap は JSON 1行を map へ復元する。
 func parseLogMap(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -205,13 +200,10 @@ func newRawSlackServer(t *testing.T, status int, body string) *httptest.Server {
 	}))
 }
 
-// TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth は Slack・Mastodon 両方の失敗が
-// あっても片方を中止せず、両失敗を1件ずつ notification_error で記録し、error も両方を含むことを検証する
-// （SPECIFICATION.md 17.1: 片方の失敗後も他方を実行、各送信結果を個別にログ）。
 func TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth(t *testing.T) {
 	var slackBody map[string]string
 	var mastodonForm url.Values
-	slackSrv := newSlackServer(t, false, &slackBody) // ok:false
+	slackSrv := newSlackServer(t, false, &slackBody)
 	defer slackSrv.Close()
 	mastoSrv := newMastodonServer(t, http.StatusServiceUnavailable, &mastodonForm)
 	defer mastoSrv.Close()
@@ -227,11 +219,9 @@ func TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error when both channels fail")
 	}
-	// 両側の失敗が error へ現れる（best-effort でも失敗を握り潰さない）。
 	if !strings.Contains(err.Error(), "slack") || !strings.Contains(err.Error(), "mastodon") {
 		t.Errorf("joined error must mention both channels: %v", err)
 	}
-	// 各送信失敗を channel 別に1件ずつ notification_error で記録する（観測可能性）。
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("want 2 failure logs (one per channel), got %d: %s", len(lines), buf.String())
@@ -257,11 +247,9 @@ func TestNotify_BothChannelsFailReturnsJoinedErrorAndLogsBoth(t *testing.T) {
 	}
 }
 
-// TestNotify_FailureLogDoesNotLeakSecrets は失敗ログが token・channel 識別子を含まないことを検証する
-// （SPECIFICATION.md 18.1/19: token/秘密をログへ出さない）。
 func TestNotify_FailureLogDoesNotLeakSecrets(t *testing.T) {
 	var slackBody map[string]string
-	slackSrv := newSlackServer(t, false, &slackBody) // ok:false → "slack api error: invalid_channel"
+	slackSrv := newSlackServer(t, false, &slackBody)
 	defer slackSrv.Close()
 
 	var buf bytes.Buffer
@@ -280,7 +268,6 @@ func TestNotify_FailureLogDoesNotLeakSecrets(t *testing.T) {
 	}
 }
 
-// TestTimeoutsAreFiveSeconds は SPECIFICATION.md 17.1 / AGENTS.md 9 の5秒 timeout 定数を固定する。
 func TestTimeoutsAreFiveSeconds(t *testing.T) {
 	if slackTimeout != 5*time.Second {
 		t.Errorf("slackTimeout = %v, want 5s", slackTimeout)
@@ -290,7 +277,6 @@ func TestTimeoutsAreFiveSeconds(t *testing.T) {
 	}
 }
 
-// 各 sender は生成時に5秒 timeout を client へ適用する（SPECIFICATION.md 17.1）。
 func TestNewSenders_ApplyFiveSecondClientTimeout(t *testing.T) {
 	if got := NewSlackSender("t", "c").client.Timeout; got != 5*time.Second {
 		t.Errorf("slack client timeout = %v, want 5s", got)
@@ -300,15 +286,12 @@ func TestNewSenders_ApplyFiveSecondClientTimeout(t *testing.T) {
 	}
 }
 
-// TestDefaultSlackURL_PointsToRealChatPostMessage は本番 Slack endpoint 定数を固定する（誤った endpoint へ送らない）。
 func TestDefaultSlackURL_PointsToRealChatPostMessage(t *testing.T) {
 	if defaultSlackURL != "https://slack.com/api/chat.postMessage" {
 		t.Errorf("defaultSlackURL = %q, want Slack chat.postMessage endpoint", defaultSlackURL)
 	}
 }
 
-// TestSlackSender_Non2xxStatusClassifiesHTTPError は 429/5xx を status code 付きで error に分類する。
-// Slack は通常 200+ok だが、HTTP層の過負荷/制限も status code で観測できるようにする（SPECIFICATION.md 18.1）。
 func TestSlackSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
@@ -328,8 +311,6 @@ func TestSlackSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
 	}
 }
 
-// TestSlackSender_EmptyOrInvalidBodyReturnsDecodeError は 200 でも JSON 本文が空/不正なら
-// decode error として観測できるようにする（SPECIFICATION.md 18.1: 異常応答の分類）。
 func TestSlackSender_EmptyOrInvalidBodyReturnsDecodeError(t *testing.T) {
 	cases := []struct {
 		name string
@@ -352,8 +333,6 @@ func TestSlackSender_EmptyOrInvalidBodyReturnsDecodeError(t *testing.T) {
 	}
 }
 
-// TestSlackSender_TimeoutReturnsRequestError は client timeout 超過を request error として観測する。
-// テストを高速・決定性ありにするため client の timeout を短く上書きする（既定5秒の契約は別テストで固定済み）。
 func TestSlackSender_TimeoutReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(300 * time.Millisecond)
@@ -373,7 +352,6 @@ func TestSlackSender_TimeoutReturnsRequestError(t *testing.T) {
 	}
 }
 
-// TestSlackSender_CancelledContextReturnsRequestError は context cancellation を request error として観測する。
 func TestSlackSender_CancelledContextReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(300 * time.Millisecond)
@@ -393,8 +371,6 @@ func TestSlackSender_CancelledContextReturnsRequestError(t *testing.T) {
 	}
 }
 
-// TestSlackSender_RequestShape は POST・Bearer 認証・JSON Content-Type・payload(channel,text) という
-// 外部HTTP契約を検証する（実装内部でなく Slack API への観測可能な振る舞い）。
 func TestSlackSender_RequestShape(t *testing.T) {
 	var got struct {
 		method      string
@@ -432,7 +408,6 @@ func TestSlackSender_RequestShape(t *testing.T) {
 	}
 }
 
-// TestMastodonSender_Non2xxStatusClassifiesHTTPError は 429/5xx を status code 付きで error に分類する。
 func TestMastodonSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
 		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
@@ -452,7 +427,6 @@ func TestMastodonSender_Non2xxStatusClassifiesHTTPError(t *testing.T) {
 	}
 }
 
-// TestMastodonSender_TimeoutReturnsRequestError は client timeout 超過を request error として観測する。
 func TestMastodonSender_TimeoutReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(300 * time.Millisecond)
@@ -471,7 +445,6 @@ func TestMastodonSender_TimeoutReturnsRequestError(t *testing.T) {
 	}
 }
 
-// TestMastodonSender_CancelledContextReturnsRequestError は context cancellation を request error として観測する。
 func TestMastodonSender_CancelledContextReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(300 * time.Millisecond)
@@ -490,8 +463,6 @@ func TestMastodonSender_CancelledContextReturnsRequestError(t *testing.T) {
 	}
 }
 
-// TestMastodonSender_RequestShapeAndPath は server 末尾スラッシュを正規化したうえで
-// POST {server}/api/v1/statuses へ、Bearer 認証・form-urlencoded・status+visibility を送る外部契約を検証する。
 func TestMastodonSender_RequestShapeAndPath(t *testing.T) {
 	var got struct {
 		method      string
@@ -511,7 +482,6 @@ func TestMastodonSender_RequestShapeAndPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// server に末尾スラッシュを付けて trimRight が効くことを同時に検証する（二重スラッシュ回避）。
 	masto := NewMastodonSender(srv.URL+"/", "secret-access")
 	if err := masto.Send(context.Background(), "📚 新刊"); err != nil {
 		t.Fatalf("Send: %v", err)

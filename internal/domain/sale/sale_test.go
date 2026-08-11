@@ -62,7 +62,6 @@ func TestEvaluate(t *testing.T) {
 func TestEvaluateUsesSaleThresholdForPriceDropAndPoints(t *testing.T) {
 	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
 
-	// 価格差150(<151)は成立せず、ポイント151(>=151)は成立する。同一閾値の兼用を検証。
 	in := Input{CurrentPrice: 649, MaxPrice: 799, Points: 151, Coupon: false}
 	got := Evaluate(in, th)
 	if got.PriceDrop {
@@ -199,7 +198,6 @@ func TestEvaluateThresholdBoundaries(t *testing.T) {
 	})
 
 	t.Run("ポイント数は直前不成立/一致と直後成立", func(t *testing.T) {
-		// CurrentPriceとMaxPriceを大きく取り、還元率と価格差が重ならないようにする。
 		cases := []struct {
 			name   string
 			points int
@@ -221,7 +219,6 @@ func TestEvaluateThresholdBoundaries(t *testing.T) {
 	})
 
 	t.Run("ポイント還元率は直前不成立/一致と直後成立し丸めず生値で比較する", func(t *testing.T) {
-		// current=600 で points=120 が 20.0%。points<151 なので Points 条件は重ならない。
 		cases := []struct {
 			name    string
 			current float64
@@ -246,8 +243,6 @@ func TestEvaluateThresholdBoundaries(t *testing.T) {
 
 func TestEvaluateFirstFetchNoPriceDrop(t *testing.T) {
 	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
-	// MaxPrice未取得(0)の初回取得では、現価格が安くても価格差セールは成立しない（SPEC 12.3）。
-	// ポイントとクーポンは初回取得でも判定する。
 	got := Evaluate(Input{CurrentPrice: 600, MaxPrice: 0, Points: 200, Coupon: true}, th)
 	if got.PriceDrop {
 		t.Errorf("PriceDrop must be false when MaxPrice is uninitialized (first fetch)")
@@ -259,7 +254,6 @@ func TestEvaluateFirstFetchNoPriceDrop(t *testing.T) {
 
 func TestEvaluatePointRateZeroPrice(t *testing.T) {
 	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
-	// CurrentPrice=0 でも 0 除算せず、還元率条件は成立しない。ポイント数は単独で判定する。
 	got := Evaluate(Input{CurrentPrice: 0, MaxPrice: 0, Points: 1, Coupon: false}, th)
 	if got.PointRate {
 		t.Errorf("PointRate must be false for zero price (no division by zero)")
@@ -271,7 +265,6 @@ func TestEvaluatePointRateZeroPrice(t *testing.T) {
 
 func TestNotificationLinesPointRateRounding(t *testing.T) {
 	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
-	// 還元率は小数第1位へ丸める（%.1f、最近接丸め）。整数円・整数ptの現実入力で検証する。
 	cases := []struct {
 		name    string
 		current float64
@@ -298,10 +291,9 @@ func TestNotificationLinesPointRateRounding(t *testing.T) {
 
 func TestNotificationLinesPriceDropTruncation(t *testing.T) {
 	th := Thresholds{SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100}
-	// 価格差の {diff}円 は int() でゼロ方向へ切り捨てる（SPEC 12.4）。小数価格で切り捨て規則を検証。
 	in := Input{CurrentPrice: 600, MaxPrice: 800.9, Points: 0, Coupon: false}
 	lines := NotificationLines(in, Evaluate(in, th), "")
-	want := "✅ 最高額との価格差 200円" // int(200.9) = 200
+	want := "✅ 最高額との価格差 200円"
 	for _, l := range lines {
 		if l == want {
 			return

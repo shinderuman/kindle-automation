@@ -57,7 +57,7 @@ if [[ -z "$PROFILE" || -z "$REGION" || -z "$STAGE" ]]; then
     exit 2
 fi
 
-# デプロイ成果物の S3 bucket。明示指定がなければ SAM 管理 bucket を使う。
+# 明示指定がなければ --resolve-s3 で SAM が管理する bucket を使う。
 s3_args=()
 if [[ -n "$S3_BUCKET" ]]; then
     s3_args=(--s3-bucket "$S3_BUCKET")
@@ -67,14 +67,11 @@ fi
 
 do_build() {
     echo "==> sam build"
-    # --build-dir で build 済み template の出力先を固定し、do_deploy が参照する位置を確定させる。
     sam build --template-file "$TEMPLATE" --build-dir "$BUILD_DIR" --config-file "$SAMCONFIG" \
         --profile "$PROFILE" --region "$REGION"
 }
 
 do_deploy() {
-    # source template でなく build 済み template を sam deploy へ渡す。sam deploy は build せず、
-    # source template を渡すと build 済み bootstrap を含まない Lambda になるため不可。
     if [[ ! -f "$BUILD_TEMPLATE" ]]; then
         echo "build 済み template が見つかりません: $BUILD_TEMPLATE" >&2
         echo "先に --stage build を実行してください。" >&2

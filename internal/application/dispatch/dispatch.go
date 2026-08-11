@@ -12,45 +12,42 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
-// Event は schedule-checks への入力（SPECIFICATION.md 6）。
+// SPECIFICATION.md 6。
 type Event struct {
 	CheckType   job.CheckType
 	ScheduledAt time.Time
 }
 
-// Keys は対象リストの S3 object key。
 type Keys struct {
 	Unprocessed string
 	Authors     string
 	PaperBooks  string
 }
 
-// AsinListReader は ASIN 形式の対象リストを読み取る（unprocessed_asins, paper_books_asins）。
+// unprocessed_asins, paper_books_asins 用。
 type AsinListReader interface {
 	LoadAsins(ctx context.Context, key string) ([]string, error)
 }
 
-// AuthorReader は作者名の対象リストを読み取る（authors.json の Name）。
+// authors.json の Name 用。
 type AuthorReader interface {
 	LoadAuthorNames(ctx context.Context, key string) ([]string, error)
 }
 
-// ConfigReader は Checker の有効状態を読み取る。
 type ConfigReader interface {
 	IsEnabled(ctx context.Context, checkType job.CheckType) (bool, error)
 }
 
-// Enqueuer は SQS へジョブを投入する。batch 内の1件でも失敗すれば error を返す（SPECIFICATION.md 7.3）。
+// batch 内の1件でも失敗すれば error を返す（SPECIFICATION.md 7.3）。
 type Enqueuer interface {
 	EnqueueBatch(ctx context.Context, jobs []job.Job) error
 }
 
-// UpcomingMerger はセール周期開始時の Upcoming→Unprocessed 条件付き merge を行う（SPECIFICATION.md 10）。
+// セール周期開始時の Upcoming→Unprocessed 条件付き merge（SPECIFICATION.md 10）。
 type UpcomingMerger interface {
 	MergeUpcoming(ctx context.Context) (int, error)
 }
 
-// Dependencies は dispatch ユースケースの外部依存。
 type Dependencies struct {
 	AsinListReader AsinListReader
 	AuthorReader   AuthorReader
@@ -60,7 +57,7 @@ type Dependencies struct {
 	Keys           Keys
 }
 
-// DispatchResult は1周分の dispatch 結果（SPECIFICATION.md 18.3 cycle_dispatched/cycle_disabled）。
+// SPECIFICATION.md 18.3 cycle_dispatched/cycle_disabled。
 // Disabled が true のときは Checker 無効で投入を省略したことを表す。
 // composition root がこの値から cycle_dispatched または cycle_disabled を出す。
 type DispatchResult struct {
@@ -70,7 +67,6 @@ type DispatchResult struct {
 	UpcomingMerged int // sale 周回の Upcoming→Unprocessed 取り込み件数。sale 以外は 0。
 }
 
-// Run は1周分の対象をジョブ化して投入する。結果は DispatchResult で返す。
 func Run(ctx context.Context, deps Dependencies, event Event) (DispatchResult, error) {
 	cycleID := scheduling.CycleID(string(event.CheckType), event.ScheduledAt)
 	enabled, err := deps.ConfigReader.IsEnabled(ctx, event.CheckType)
@@ -93,7 +89,7 @@ func Run(ctx context.Context, deps Dependencies, event Event) (DispatchResult, e
 	}
 }
 
-// runSale は Upcoming 取り込み後に unprocessed を sale_check へジョブ化し、全件投入成功後に sale_finalize を1件投入する。
+// Upcoming 取り込み → sale_check → 全件投入成功後に sale_finalize を1件、の順序。
 func runSale(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
 	merged, err := deps.UpcomingMerger.MergeUpcoming(ctx)
 	if err != nil {
@@ -120,7 +116,6 @@ func runSale(ctx context.Context, deps Dependencies, event Event, cycleID string
 	}, nil
 }
 
-// runNewRelease は authors を new_release_search へジョブ化する。
 func runNewRelease(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
 	names, err := deps.AuthorReader.LoadAuthorNames(ctx, deps.Keys.Authors)
 	if err != nil {
@@ -134,7 +129,6 @@ func runNewRelease(ctx context.Context, deps Dependencies, event Event, cycleID 
 	return DispatchResult{TargetCount: len(deduped), EnqueuedCount: len(deduped)}, nil
 }
 
-// runPaperToKindle は paper_books を paper_to_kindle_check へジョブ化する。
 func runPaperToKindle(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
 	asins, err := deps.AsinListReader.LoadAsins(ctx, deps.Keys.PaperBooks)
 	if err != nil {
@@ -150,7 +144,7 @@ func runPaperToKindle(ctx context.Context, deps Dependencies, event Event, cycle
 
 const finalizeTargetID = "finalize"
 
-// buildAsinJobs は ASIN ごとに job を生成する。job_id は kind+cycleID+ASIN で決定的。
+// job_id は kind+cycleID+ASIN で決定的。
 func buildAsinJobs(kind job.Kind, checkType job.CheckType, cycleID string, scheduledAt time.Time, asins []string) []job.Job {
 	jobs := make([]job.Job, 0, len(asins))
 	for _, asin := range asins {
@@ -159,7 +153,6 @@ func buildAsinJobs(kind job.Kind, checkType job.CheckType, cycleID string, sched
 	return jobs
 }
 
-// buildAuthorJobs は作者名ごとに job を生成する。
 func buildAuthorJobs(kind job.Kind, checkType job.CheckType, cycleID string, scheduledAt time.Time, names []string) []job.Job {
 	jobs := make([]job.Job, 0, len(names))
 	for _, name := range names {
@@ -168,7 +161,7 @@ func buildAuthorJobs(kind job.Kind, checkType job.CheckType, cycleID string, sch
 	return jobs
 }
 
-// buildJob は1つの job を生成する。job_id は kind+cycleID+targetID で決定的（SPECIFICATION.md 7.2）。
+// job_id は kind+cycleID+targetID で決定的（SPECIFICATION.md 7.2）。
 func buildJob(kind job.Kind, checkType job.CheckType, cycleID string, scheduledAt time.Time, targetID string, target job.Target) job.Job {
 	return job.Job{
 		Version:     job.Version,

@@ -11,8 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ───────── YAML helpers ─────────
-
 // top は template.yaml の top-level mapping を返す。
 func top(t *testing.T) map[string]*yaml.Node {
 	t.Helper()
@@ -32,7 +30,7 @@ func resources(t *testing.T) map[string]*yaml.Node {
 	return fields(top(t)["Resources"])
 }
 
-// fields は mapping node を key→node へ変換する。非 mapping は空 map。
+// fields は nil・非 mapping node は空 map として扱う。
 func fields(n *yaml.Node) map[string]*yaml.Node {
 	out := map[string]*yaml.Node{}
 	if n == nil || n.Kind != yaml.MappingNode {
@@ -44,13 +42,12 @@ func fields(n *yaml.Node) map[string]*yaml.Node {
 	return out
 }
 
-// props は resource の Properties mapping を返す (fields が nil も処理するため存在チェック不要)。
+// props は fields が nil も処理するため存在チェック不要。
 func props(res map[string]*yaml.Node, name string) map[string]*yaml.Node {
 	return fields(fields(res[name])["Properties"])
 }
 
-// scalar は mapping から key の scalar 値を返す。未設定・非 scalar は空文字列。
-// !GetAtt X.Y 等の組込み関数短縮形も scalar node となり参照文字列が Value に入る。
+// scalar は未設定・非 scalar は空文字列。!GetAtt X.Y 等の組込み関数短縮形も scalar node となり Value に参照文字列が入る。
 func scalar(m map[string]*yaml.Node, key string) string {
 	n := m[key]
 	if n == nil || n.Kind != yaml.ScalarNode {
@@ -61,7 +58,6 @@ func scalar(m map[string]*yaml.Node, key string) string {
 
 func hasKey(m map[string]*yaml.Node, key string) bool { _, ok := m[key]; return ok }
 
-// ofType は指定 Type の resource 名→Properties を返す。
 func ofType(res map[string]*yaml.Node, typ string) map[string]map[string]*yaml.Node {
 	out := map[string]map[string]*yaml.Node{}
 	for name, r := range res {
@@ -72,7 +68,6 @@ func ofType(res map[string]*yaml.Node, typ string) map[string]map[string]*yaml.N
 	return out
 }
 
-// refsCond は !If [Cond, ...] node が condition を参照するかを返す。
 func refsCond(n *yaml.Node, cond string) bool {
 	if n == nil || n.Tag != "!If" {
 		return false
@@ -85,7 +80,7 @@ func refsCond(n *yaml.Node, cond string) bool {
 	return false
 }
 
-// grantsAction は Role のいずれかの Policy Statement が act を許可するか (Action は scalar/sequence どちらも可)。
+// grantsAction は Action が scalar/sequence どちらも許容する。
 func grantsAction(roleProps map[string]*yaml.Node, act string) bool {
 	policies := roleProps["Policies"]
 	if policies == nil || policies.Kind != yaml.SequenceNode {

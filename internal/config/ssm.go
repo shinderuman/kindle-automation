@@ -49,7 +49,6 @@ var ErrSecretNotFound = errors.New("secret not found in secure or plain")
 // secure/plain いずれかに存在しても値が空文字なら required として成立しない。
 var ErrSecretEmpty = errors.New("secret value is empty")
 
-// Secrets は SSM から取得した秘密情報。各 adapter ぀配布される。
 type Secrets struct {
 	AmazonPartnerTag     string
 	SlackBotToken        string

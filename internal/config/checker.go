@@ -23,7 +23,7 @@ type CheckerConfigs struct {
 	PaperToKindleChecker PaperToKindleCheckerConfig `json:"PaperToKindleChecker"`
 }
 
-// SaleCheckerConfig はセール Checker の設定。SaleThreshold は価格差とポイント数の双方に使う。
+// SaleCheckerConfig.SaleThreshold は価格差とポイント数の双方に使う。
 type SaleCheckerConfig struct {
 	Enabled           bool   `json:"Enabled"`
 	GistID            string `json:"GistID"`
@@ -33,21 +33,18 @@ type SaleCheckerConfig struct {
 	PriceChangeAmount int    `json:"PriceChangeAmount"`
 }
 
-// NewReleaseCheckerConfig は新刊 Checker の設定。
 type NewReleaseCheckerConfig struct {
 	Enabled      bool   `json:"Enabled"`
 	GistID       string `json:"GistID"`
 	GistFilename string `json:"GistFilename"`
 }
 
-// PaperToKindleCheckerConfig は紙書籍・Kindle版 Checker の設定。
 type PaperToKindleCheckerConfig struct {
 	Enabled      bool   `json:"Enabled"`
 	GistID       string `json:"GistID"`
 	GistFilename string `json:"GistFilename"`
 }
 
-// DecodeCheckerConfigs は checker_configs.json を decode する。
 func DecodeCheckerConfigs(data []byte) (CheckerConfigs, error) {
 	var result CheckerConfigs
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -103,7 +100,6 @@ func (c CheckerConfigs) IsEnabled(_ context.Context, checkType job.CheckType) (b
 	}
 }
 
-// SaleThresholds はセールユースケースの閾値へ変換する。SaleThreshold は価格差とポイント数の双方に使う。
 func (c CheckerConfigs) SaleThresholds() domainsale.Thresholds {
 	return domainsale.Thresholds{
 		SaleThreshold:     float64(c.SaleChecker.SaleThreshold),

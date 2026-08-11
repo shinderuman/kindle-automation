@@ -3,7 +3,6 @@
 // Enqueuer は dispatch ユースケースの EnqueueBatch と各 worker ユースケースの Enqueue の
 // 両方を満たす。Amazon 系ジョブは MessageGroupId=amazon-requests、gist_update は external-updates とする。
 // MessageDeduplicationId には job_id の SHA-256 lowercase hex を使う（SPECIFICATION.md 7.2、AGENTS.md 4）。
-// 実 AWS 接続を除く単体テストは SQSAPI の手書き stub で検証する。
 package queue
 
 import (
@@ -25,19 +24,17 @@ type SQSAPI interface {
 	SendMessageBatch(ctx context.Context, in *sqs.SendMessageBatchInput, opts ...func(*sqs.Options)) (*sqs.SendMessageBatchOutput, error)
 }
 
-// Enqueuer は SQS FIFO Queue へジョブを投入する。
 type Enqueuer struct {
 	api      SQSAPI
 	queueURL string
 	logger   *slog.Logger
 }
 
-// NewEnqueuer は SQS API と queue URL と logger を指定して Enqueuer を返す。
 func NewEnqueuer(api SQSAPI, queueURL string, logger *slog.Logger) *Enqueuer {
 	return &Enqueuer{api: api, queueURL: queueURL, logger: logger}
 }
 
-// Enqueue は1件のジョブを投入する。各 worker ユースケースの Enqueuer interface を満たす。
+// Enqueue は各 worker ユースケースの Enqueuer interface を満たす。
 func (e *Enqueuer) Enqueue(ctx context.Context, j job.Job) error {
 	return e.sendBatch(ctx, []job.Job{j})
 }
@@ -57,7 +54,6 @@ func (e *Enqueuer) EnqueueBatch(ctx context.Context, jobs []job.Job) error {
 	return nil
 }
 
-// sendBatch は最大10件のジョブを1つの SendMessageBatch で送信する。
 func (e *Enqueuer) sendBatch(ctx context.Context, jobs []job.Job) error {
 	entries := make([]sqstypes.SendMessageBatchRequestEntry, len(jobs))
 	for i, j := range jobs {

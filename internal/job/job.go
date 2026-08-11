@@ -17,7 +17,6 @@ const Version = 1
 // 検索結果でKindle版と確定した候補だけがこの値を持つ。
 const ItemTypeKindle = "kindle"
 
-// Kind はジョブ種別。
 type Kind string
 
 const (
@@ -31,7 +30,6 @@ const (
 	KindGistUpdate          Kind = "gist_update"
 )
 
-// CheckType はチェック種別。
 type CheckType string
 
 const (
@@ -52,7 +50,7 @@ type SearchProduct struct {
 	ItemType    string    `json:"item_type"`
 }
 
-// Target はジョブ種別ごとの対象情報。不要な field は空値で送らない（omitempty）。
+// Target の不要な field は空値で送らない（omitempty）。
 type Target struct {
 	ASIN       string         `json:"asin,omitempty"`
 	SourceASIN string         `json:"source_asin,omitempty"`
@@ -88,7 +86,6 @@ var (
 	isbnRe = regexp.MustCompile(`^\d{10,13}$`)
 )
 
-// Validate は schema 検証を行う。未対応 version、未知 kind、必須 field 欠落、ASIN 形式不正を検出する。
 func (j Job) Validate() error {
 	if j.Version != Version {
 		return ErrUnsupportedVersion
@@ -144,7 +141,6 @@ func (j Job) Validate() error {
 	return nil
 }
 
-// requireASIN は ASIN が必須かつ形式（10文字英数字 または 10〜13桁数字）を満たすかを検証する。
 func requireASIN(asin string) error {
 	if asin == "" {
 		return ErrMissingField
@@ -174,7 +170,6 @@ func AmazonRequests(k Kind) int {
 	}
 }
 
-// Decode は JSON を Job へ復号し schema 検証する。
 func Decode(data []byte) (Job, error) {
 	var j Job
 	if err := json.Unmarshal(data, &j); err != nil {
@@ -186,7 +181,7 @@ func Decode(data []byte) (Job, error) {
 	return j, nil
 }
 
-// Encode は Job を JSON へ符号化する。送信側で事前に Validate 済みであることを前提とする。
+// Encode は送信側で事前に Validate 済みであることを前提とする。
 func (j Job) Encode() ([]byte, error) {
 	return json.Marshal(j)
 }

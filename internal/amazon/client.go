@@ -16,12 +16,9 @@ import (
 
 // SPECIFICATION.md 11.1 の共通リクエスト設定。
 const (
-	// requestTimeout は Amazon HTTP リクエストの timeout（15秒）。
 	requestTimeout = 15 * time.Second
-	// maxRedirects は redirect の最大回数。
-	maxRedirects = 5
-	// maxBodyBytes は response body の上限（8 MiB）。
-	maxBodyBytes int64 = 8 * 1024 * 1024
+	maxRedirects   = 5
+	maxBodyBytes   int64 = 8 * 1024 * 1024
 
 	userAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 	acceptLanguage = "ja-JP,ja;q=0.9"
@@ -34,16 +31,12 @@ const (
 	searchPrefix       = "https://www.amazon.co.jp/s?k="
 )
 
-// ErrBodyTooLarge は response body が 8 MiB を超過した（SPECIFICATION.md 11.1）。
 var ErrBodyTooLarge = errors.New("amazon response body exceeds 8 MiB")
 
-// ErrTooManyRedirects は redirect 回数が上限を超えた。
 var ErrTooManyRedirects = errors.New("too many redirects")
 
-// ErrNonAmazonRedirect は redirect 先が Amazon Japan 以外の host になった（SPECIFICATION.md 11.1）。
 var ErrNonAmazonRedirect = errors.New("redirect to non-Amazon host")
 
-// FetchResult は商品ページ1回の取得結果（adapter DTO）。
 // HTTPStatus/ResponseBytes は構造化ログ（SPECIFICATION.md 18.1）へ伝播するHTTP計測値。
 // 未送信時は0。Amazon HTML本文は logger/上位層へ出さないため本文は含めない。
 type FetchResult struct {
@@ -53,7 +46,6 @@ type FetchResult struct {
 	ResponseBytes int
 }
 
-// SearchResult は検索ページ1回の取得結果（adapter DTO）。
 // HTTPStatus/ResponseBytes は構造化ログ（SPECIFICATION.md 18.1）へ伝播するHTTP計測値。
 type SearchResult struct {
 	Category      Category
@@ -62,14 +54,13 @@ type SearchResult struct {
 	ResponseBytes int
 }
 
-// Client は Amazon Japan の商品・検索ページへ net/http で取得する本番 client。
 // HTTP 内で再試行せず、retryable は呼び出し側（Lambda error 経由の SQS 再配信）へ委ねる。
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
 }
 
-// NewClient は本番用の Amazon client を返す。Cookie・Authorization・Amazonログイン情報は送らない。
+// Cookie・Authorization・Amazonログイン情報は送らない。
 func NewClient() *Client {
 	return newClientWithHTTPClient(amazonBase, &http.Client{
 		Timeout:       requestTimeout,
@@ -77,13 +68,10 @@ func NewClient() *Client {
 	})
 }
 
-// newClientWithHTTPClient はテスト用に baseURL と http.Client を注入する。
 func newClientWithHTTPClient(baseURL string, hc *http.Client) *Client {
 	return &Client{httpClient: hc, baseURL: baseURL}
 }
 
-// FetchProduct は商品ページを1回取得し、本文検証と ExtractProduct を行って adapter DTO を返す。
-// ASIN は ExtractProduct 内で HTML input → canonical URL → redirect 後の最終URL の順で fallback する。
 func (c *Client) FetchProduct(ctx context.Context, asin string) (FetchResult, error) {
 	body, status, finalURL, err := c.fetch(ctx, c.productURL(asin))
 	if err != nil {
@@ -116,7 +104,6 @@ func (c *Client) FetchProduct(ctx context.Context, asin string) (FetchResult, er
 	return FetchResult{Category: CategoryOK, Info: info, HTTPStatus: status, ResponseBytes: responseBytes}, nil
 }
 
-// FetchSearch は検索ページを1回取得し、ExtractSearch を行って adapter DTO を返す。
 // 検索結果0件は search_empty 分類とし、呼び出し側で retryable outcome へ写像する。
 func (c *Client) FetchSearch(ctx context.Context, author string) (SearchResult, error) {
 	body, status, _, err := c.fetch(ctx, c.searchURL(author))
@@ -141,7 +128,6 @@ func (c *Client) FetchSearch(ctx context.Context, author string) (SearchResult, 
 	return SearchResult{Category: CategoryOK, Hits: hits, HTTPStatus: status, ResponseBytes: responseBytes}, nil
 }
 
-// fetch は GET リクエストを送り、status・8 MiB 上限の body・redirect 後の最終URL を返す。
 // finalURL は resp.Request.URL から取得し、商品ページの ASIN 抽出フォールバックに使う。
 func (c *Client) fetch(ctx context.Context, rawURL string) (body []byte, status int, finalURL string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -169,7 +155,6 @@ func (c *Client) fetch(ctx context.Context, rawURL string) (body []byte, status 
 	return body, status, finalURL, nil
 }
 
-// classifyResponse は HTTP status と本文から取得結果の分類を返す（SPECIFICATION.md 11.3）。
 func classifyResponse(status int, body []byte) Category {
 	if IsBlockedPage(string(body)) {
 		return CategoryRetryable
@@ -177,14 +162,13 @@ func classifyResponse(status int, body []byte) Category {
 	return ClassifyHTTPStatus(status)
 }
 
-// setHeaders は必須 header を設定する。Cookie・Authorization は送らない。
+// Cookie・Authorization は送らない。
 func setHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept-Language", acceptLanguage)
 	req.Header.Set("Accept", acceptHeader)
 }
 
-// checkRedirect は redirect 回数と redirect 先 host を検証する。
 func checkRedirect(req *http.Request, via []*http.Request) error {
 	if err := checkRedirectCount(via); err != nil {
 		return err
@@ -204,23 +188,20 @@ func checkRedirectCount(via []*http.Request) error {
 	return nil
 }
 
-// IsAmazonHost は host が Amazon Japan（apex amazon.co.jp または正規サブドメイン *.amazon.co.jp）かを返す。
 // "amazon.co.jp.evil.example" のような suffix 偽装は許容しない。
 func IsAmazonHost(host string) bool {
 	return host == amazonApex || strings.HasSuffix(host, amazonDomainSuffix)
 }
 
-// productURL は取得用の商品ページ URL を返す（baseURL 基準、Affiliate Tag なし）。
 func (c *Client) productURL(asin string) string {
 	return c.baseURL + "/dp/" + asin
 }
 
-// searchURL は取得用の検索 URL を返す（baseURL 基準、SPECIFICATION.md 13.2）。
+// SPECIFICATION.md 13.2 の検索 URL（baseURL 基準）。
 func (c *Client) searchURL(author string) string {
 	return c.baseURL + "/s?k=" + url.QueryEscape(author) + "&i=digital-text&rh=n%3A2250738051&s=date-desc-rank"
 }
 
-// ProductURL は商品ページの URL を返す。partnerTag が空でなければ Affiliate Tag を付ける。
 // 取得用途（SPECIFICATION.md 11.1）では partnerTag を空にし、保存用途（9.2）では partnerTag を付ける。
 func ProductURL(asin string, partnerTag string) string {
 	u := dPPrefix + asin
@@ -230,7 +211,7 @@ func ProductURL(asin string, partnerTag string) string {
 	return u
 }
 
-// SearchURL は新刊検索の URL を返す（SPECIFICATION.md 13.2）。
+// SPECIFICATION.md 13.2 の新刊検索 URL。
 func SearchURL(author string) string {
 	return searchPrefix + url.QueryEscape(author) + "&i=digital-text&rh=n%3A2250738051&s=date-desc-rank"
 }

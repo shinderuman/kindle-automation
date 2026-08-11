@@ -59,7 +59,7 @@ const (
 	CategoryRetryable
 )
 
-// PaperPageInfo は紙書籍ページ（check job）から必要な取得結果。
+// 紙書籍ページ（check job）から取得する。
 type PaperPageInfo struct {
 	ASIN             string
 	Title            string
@@ -78,7 +78,7 @@ type PaperCheckResult struct {
 	ResponseBytes int
 }
 
-// KindlePageInfo はKindle商品ページ（detail job）から必要な取得結果。
+// Kindle商品ページ（detail job）から取得する。
 type KindlePageInfo struct {
 	ASIN            string
 	Title           string
@@ -97,7 +97,6 @@ type KindleDetailResult struct {
 	ResponseBytes int
 }
 
-// DetectedBook は検出後のKindle書籍の保存値と通知用の紙書籍情報。
 type DetectedBook struct {
 	ASIN        string
 	Title       string
@@ -115,32 +114,29 @@ type KnownState struct {
 	PaperBookExists   bool
 }
 
-// PaperPageFetcher は紙書籍ページを1回取得し結果へ変換して返す。1起動で最大1回。
+// 1起動で最大1回。
 type PaperPageFetcher interface {
 	FetchPaperPage(ctx context.Context, paperASIN string) (PaperCheckResult, error)
 }
 
-// KindlePageFetcher はKindle商品ページを1回取得し結果へ変換して返す。1起動で最大1回。
+// 1起動で最大1回。
 type KindlePageFetcher interface {
 	FetchKindlePage(ctx context.Context, kindleASIN string) (KindleDetailResult, error)
 }
 
-// PaperBooksStore は paper_books_asins の価格初期化・削除・発売日参照を担う。
 type PaperBooksStore interface {
-	// UpdateOneBook は対象レコードを更新する（紙価格初期化等）。手動削除時 applied=false。
+	// 手動削除時 applied=false。
 	UpdateOneBook(ctx context.Context, paperASIN string, update func(book.KindleBook) book.KindleBook) (bool, error)
-	// Delete は対象ASINを paper_books から削除する。冪等（既になければ何もしない）。
+	// 冪等（既になければ何もしない）。
 	Delete(ctx context.Context, paperASIN string) error
-	// PaperBook は対象レコードを返す。存在しない場合は ok=false。
+	// 存在しない場合は ok=false。
 	PaperBook(ctx context.Context, paperASIN string) (book.KindleBook, bool, error)
 }
 
-// NotifiedStore は notified_asins の冪等upsertを担う。
 type NotifiedStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
 
-// UpcomingStore は upcoming_asins の冪等upsertを担う。
 type UpcomingStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
@@ -150,7 +146,6 @@ type KnownStateQuerier interface {
 	KnownState(ctx context.Context, kindleASIN, paperASIN string) (KnownState, error)
 }
 
-// Enqueuer は後続 job を投入する。
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job job.Job) error
 }
@@ -161,13 +156,11 @@ type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
 
-// Config は紙→Kindle ユースケースの設定。
 type Config struct {
-	// PartnerTag は保存用 Kindle URL へ付ける Amazon Affiliate Tag（SPECIFICATION.md 9.2）。
+	// 保存用 Kindle URL へ付ける Amazon Affiliate Tag（SPECIFICATION.md 9.2）。
 	PartnerTag string
 }
 
-// Dependencies は紙→Kindle ユースケースの外部依存。
 type Dependencies struct {
 	PaperPageFetcher  PaperPageFetcher
 	KindlePageFetcher KindlePageFetcher
@@ -200,7 +193,6 @@ const (
 	gistStagePaperDelete    = "delete"
 )
 
-// HandlePaperToKindleCheck は paper_to_kindle_check ジョブを処理する。
 // 紙書籍ページへ1回アクセスし、紙価格初期化とKindle候補有無を確認する。
 // Kindle候補がスウォッチから得られた場合は paper_to_kindle_detail を投入し、同じ起動で詳細へはアクセスしない。
 func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
@@ -223,7 +215,7 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 
 	info := result.Info
 	if info.ASIN != "" && info.ASIN != paperASIN {
-		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil // asin_mismatch terminal
+		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil
 	}
 
 	if info.PaperPrice.Valid() {
@@ -250,10 +242,10 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 	}
 
 	if !info.HasPaperSwatch {
-		return execution.Terminal(errorTypeNotPaperBook, result.HTTPStatus, result.ResponseBytes), nil // not_paper_book terminal
+		return execution.Terminal(errorTypeNotPaperBook, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	if !info.HasKindleSwatch || info.KindleSwatchASIN == "" {
-		return execution.Terminal(errorTypeKindleNA, result.HTTPStatus, result.ResponseBytes), nil // kindle_not_available terminal
+		return execution.Terminal(errorTypeKindleNA, result.HTTPStatus, result.ResponseBytes), nil
 	}
 
 	// Kindle候補は同一商品ページの形式スウォッチから得たものだけ（SPECIFICATION.md 14.2）。詳細は後続jobへ。
@@ -264,7 +256,6 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
-// HandlePaperToKindleDetail は paper_to_kindle_detail ジョブを処理する。
 // Kindle商品ページへ最大1回アクセスし、SPEC 14.3 の対応判定後、notified/upcoming/paper_books を更新する。
 func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	kindleASIN := j.Target.ASIN
@@ -277,7 +268,7 @@ func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job
 	case CategoryRetryable:
 		return execution.Errored(errorTypeFetchRetryable, result.HTTPStatus, result.ResponseBytes), &ErrRetryableFetch{ASIN: kindleASIN}
 	case CategoryNotFound, CategoryPermanentClientError:
-		return execution.Terminal(notFoundType(result.Category), result.HTTPStatus, result.ResponseBytes), nil // terminal
+		return execution.Terminal(notFoundType(result.Category), result.HTTPStatus, result.ResponseBytes), nil
 	case CategoryOK:
 	default:
 		return execution.Errored(errorTypeUnknownCategory, result.HTTPStatus, result.ResponseBytes),
@@ -286,26 +277,26 @@ func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job
 
 	info := result.Info
 	if info.ASIN != "" && info.ASIN != kindleASIN {
-		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil // asin_mismatch terminal（候補URL/ASIN不一致）
+		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	// SPEC 14.3 必須。条件を満たさない場合は edition_mismatch として対象を削除せず残す。
 	if kindleASIN == paperASIN {
-		return execution.Terminal(errorTypeSameAsin, result.HTTPStatus, result.ResponseBytes), nil // ASIN差異 terminal
+		return execution.Terminal(errorTypeSameAsin, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	if !info.HasKindleSwatch {
-		return execution.Terminal(errorTypeNotKindle, result.HTTPStatus, result.ResponseBytes), nil // Kindle版ではない terminal
+		return execution.Terminal(errorTypeNotKindle, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	if info.Title == "" {
 		return execution.Errored(errorTypeTitleUnavailable, result.HTTPStatus, result.ResponseBytes),
-			fmt.Errorf("title not available for %s", kindleASIN) // 解析失敗 retryable
+			fmt.Errorf("title not available for %s", kindleASIN)
 	}
 	if !info.CurrentPrice.Valid() {
 		return execution.Errored(errorTypePriceUnavailable, result.HTTPStatus, result.ResponseBytes),
-			fmt.Errorf("kindle price not available for %s", kindleASIN) // 解析失敗 retryable
+			fmt.Errorf("kindle price not available for %s", kindleASIN)
 	}
 	if !info.HasReleaseDate {
 		return execution.Errored(errorTypeDateUnavailable, result.HTTPStatus, result.ResponseBytes),
-			fmt.Errorf("release date not available for %s", kindleASIN) // 解析失敗 retryable
+			fmt.Errorf("release date not available for %s", kindleASIN)
 	}
 	paperBook, paperExists, err := deps.PaperBooksStore.PaperBook(ctx, paperASIN)
 	if err != nil {
@@ -313,7 +304,7 @@ func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job
 			fmt.Errorf("load paper book %s: %w", paperASIN, err)
 	}
 	if paperExists && !IsSameReleaseDayJST(paperBook.ReleaseDate, info.ReleaseDate) {
-		return execution.Terminal(errorTypeEditionMismatch, result.HTTPStatus, result.ResponseBytes), nil // 発売日不一致 terminal（edition_mismatch）
+		return execution.Terminal(errorTypeEditionMismatch, result.HTTPStatus, result.ResponseBytes), nil
 	}
 
 	oc, err := applyDetectedBook(ctx, deps, j, DetectedBook{
@@ -330,7 +321,6 @@ func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job
 	return oc, err
 }
 
-// notFoundType は商品ページ取得分類を not_found/permanent_client_error の error_type へ写像する。
 func notFoundType(c Category) string {
 	if c == CategoryPermanentClientError {
 		return "permanent_client_error"
@@ -435,7 +425,7 @@ func formatPaperToKindleMessage(d DetectedBook, partnerTag string) string {
 		d.Title, paperLine, int(d.KindlePrice.Yen()), kindleURL(d.ASIN, partnerTag))
 }
 
-// kindleURL は Kindle 商品の保存用 URL を構築する。partnerTag が空でなければ Affiliate Tag を付ける（SPECIFICATION.md 9.2）。
+// partnerTag が空でなければ Affiliate Tag を付ける（SPECIFICATION.md 9.2）。
 func kindleURL(asin, partnerTag string) string {
 	u := paperURLBase + asin
 	if partnerTag != "" {
@@ -444,7 +434,7 @@ func kindleURL(asin, partnerTag string) string {
 	return u
 }
 
-// IsSameReleaseDayJST は2つの時刻が同じJST暦日かを返す（SPECIFICATION.md 14.3）。
+// 2つの時刻が同じJST暦日か（SPECIFICATION.md 14.3）。
 func IsSameReleaseDayJST(a, b time.Time) bool {
 	return a.In(jst).Format("2006-01-02") == b.In(jst).Format("2006-01-02")
 }

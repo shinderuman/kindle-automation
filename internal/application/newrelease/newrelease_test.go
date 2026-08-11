@@ -34,8 +34,6 @@ func detailJob(asin, author string) job.Job {
 		Target: job.Target{ASIN: asin, AuthorName: author}}
 }
 
-// --- stubs ---
-
 type fakeSearchFetcher struct {
 	result SearchResult
 	err    error
@@ -156,8 +154,6 @@ func completeHit(asin string) SearchHit {
 	}
 }
 
-// --- 純粋関数 ---
-
 func TestNormalizeAuthorName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -204,9 +200,6 @@ func TestExcludedByKeywordAndYearMonth(t *testing.T) {
 	}
 }
 
-// TestAuthorMatches は contributor 境界を保持した []string を受け取り、
-// 正規化した完全名同士を比較することを検証する（SPECIFICATION.md 13.3）。
-// 空白トークン単位の部分一致は行わないため、姓だけ同一の別人を誤検出しない。
 func TestAuthorMatches(t *testing.T) {
 	if !AuthorMatches("海李", []string{"海李"}) {
 		t.Errorf("完全一致する場合はtrue")
@@ -238,8 +231,6 @@ func TestAuthorMatches(t *testing.T) {
 	}
 }
 
-// --- HandleNewReleaseSearch ---
-
 func TestHandleNewReleaseSearch_FetchesOnceAndEnqueuesResultForCompleteCandidate(t *testing.T) {
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
 	deps := baseDeps()
@@ -262,7 +253,7 @@ func TestHandleNewReleaseSearch_FetchesOnceAndEnqueuesResultForCompleteCandidate
 
 func TestHandleNewReleaseSearch_EnqueuesDetailWhenIncomplete(t *testing.T) {
 	hit := completeHit("B0FX3X569X")
-	hit.HasReleaseDate = false // 発売日不足 → detail
+	hit.HasReleaseDate = false
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{hit}}}
 	deps := baseDeps()
 	deps.SearchFetcher = fetcher
@@ -339,11 +330,10 @@ func TestHandleNewReleaseSearch_SkipsNotifiedExisting(t *testing.T) {
 }
 
 func TestHandleNewReleaseSearch_CapsCandidatesAtTen(t *testing.T) {
-	// SPECIFICATION.md 13.2: 検索結果の先頭10件だけを候補として処理する。
 	const total = 12
 	hits := make([]SearchHit, total)
 	for i := 0; i < total; i++ {
-		hits[i] = completeHit(fmt.Sprintf("B0C%07d", i)) // 10桁 ASIN
+		hits[i] = completeHit(fmt.Sprintf("B0C%07d", i))
 	}
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: hits}}
 	deps := baseDeps()
@@ -353,7 +343,6 @@ func TestHandleNewReleaseSearch_CapsCandidatesAtTen(t *testing.T) {
 		t.Fatalf("HandleNewReleaseSearch: %v", err)
 	}
 	enq := deps.Enqueuer.(*fakeEnqueuer)
-	// completeHit は result job へ変換されるため、先頭10件分だけ投入される。
 	if len(enq.jobs) != maxSearchCandidates {
 		t.Errorf("enqueued jobs = %d, want %d (先頭10件へ制限)", len(enq.jobs), maxSearchCandidates)
 	}
@@ -441,8 +430,6 @@ func TestHandleNewReleaseDetail_EmptyTitleIsRetryable(t *testing.T) {
 		t.Fatal("empty title must be retryable error (SPEC 13.4)")
 	}
 }
-
-// --- applyCandidate (result job 経由) ---
 
 func futureProduct(asin string) *job.SearchProduct {
 	return &job.SearchProduct{

@@ -40,13 +40,12 @@ const (
 type Category int
 
 const (
-	// CategoryOK は必須構造あり。ページ内 ASIN/Kindle 種別/価格の検証は呼び出し側で行う。
-	CategoryOK Category = iota
-	// CategoryNotFound は 404 または明示的な商品不存在。terminal。
+	CategoryOK Category = iota // ページ内 ASIN/Kindle 種別/価格の検証は呼び出し側で行う。
+	// 404 または明示的な商品不存在。terminal。
 	CategoryNotFound
-	// CategoryPermanentClientError は 400 等の恒久的 4xx。terminal。
+	// 400 等の恒久的 4xx。terminal。
 	CategoryPermanentClientError
-	// CategoryRetryable は 403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
+	// 403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
 	CategoryRetryable
 )
 
@@ -71,12 +70,12 @@ type FetchResult struct {
 	ResponseBytes int
 }
 
-// ProductFetcher は Amazon 商品ページを1回取得し sale 用の結果へ変換して返す。1起動で最大1回しか呼ばない。
+// 1起動で最大1回しか呼ばない。
 type ProductFetcher interface {
 	FetchProduct(ctx context.Context, asin string) (FetchResult, error)
 }
 
-// BookStore は対象レコードの条件付き更新。手動削除時は applied=false。
+// 手動削除時は applied=false。
 type BookStore interface {
 	UpdateOneBook(ctx context.Context, key, asin string, update func(book.KindleBook) book.KindleBook) (bool, error)
 }
@@ -88,18 +87,15 @@ type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
 
-// Enqueuer は後続 job を投入する。
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job job.Job) error
 }
 
-// Config は sale ユースケースの設定。
 type Config struct {
 	UnprocessedKey string
 	Thresholds     domainsale.Thresholds
 }
 
-// Dependencies は sale ユースケースの外部依存。
 type Dependencies struct {
 	Fetcher  ProductFetcher
 	Store    BookStore
@@ -114,9 +110,7 @@ type ErrRetryableFetch struct{ ASIN string }
 
 func (e *ErrRetryableFetch) Error() string { return "retryable fetch for " + e.ASIN }
 
-// HandleSaleCheck は sale_check ジョブを処理する（SPECIFICATION.md 12.6）。
-// 処理結果とHTTP計測値を Outcome で返し、retryable は原因 error も返す。
-// composition root が Outcome へ共通ログfieldを合成して job_completed/job_terminal/job_error を出す。
+// SPECIFICATION.md 12.6。composition root が Outcome へ共通ログfieldを合成して job_completed/job_terminal/job_error を出す。
 func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	asin := j.Target.ASIN
 	result, err := deps.Fetcher.FetchProduct(ctx, asin)
@@ -139,15 +133,12 @@ func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (executi
 
 	info := result.Info
 	if info.ASIN != "" && info.ASIN != asin {
-		// asin_mismatch terminal。対象はリストへ残す。
 		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	if !info.HasKindleSwatch {
-		// not_kindle terminal。対象はリストへ残す。
 		return execution.Terminal(errorTypeNotKindle, result.HTTPStatus, result.ResponseBytes), nil
 	}
 	if !info.CurrentPrice.Valid() {
-		// 価格解析失敗は retryable。
 		return execution.Errored(errorTypePriceUnavailable, result.HTTPStatus, result.ResponseBytes),
 			fmt.Errorf("kindle price not available for %s", asin)
 	}
@@ -175,7 +166,6 @@ func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (executi
 			fmt.Errorf("update book %s: %w", asin, err)
 	}
 	if !applied {
-		// target_removed terminal。再追加しない。
 		return execution.Terminal(errorTypeTargetRemoved, result.HTTPStatus, result.ResponseBytes), nil
 	}
 
@@ -188,7 +178,7 @@ func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (executi
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
-// HandleSaleFinalize は Sale 用 gist_update を1件投入する。1周につき1回呼ばれる。
+// 1周につき1回呼ばれる。
 func HandleSaleFinalize(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	if err := deps.Enqueuer.Enqueue(ctx, buildGistJob(j, "sale")); err != nil {
 		return execution.Errored(errorTypeEnqueueFailed, 0, 0), fmt.Errorf("enqueue sale gist: %w", err)
@@ -196,7 +186,7 @@ func HandleSaleFinalize(ctx context.Context, deps Dependencies, j job.Job) (exec
 	return execution.Completed(0, 0), nil
 }
 
-// buildGistJob は Sale 用 gist_update ジョブを生成する。job_id は決定的。
+// job_id は決定的。
 func buildGistJob(j job.Job, gistType string) job.Job {
 	return job.Job{
 		Version:     job.Version,

@@ -13,7 +13,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// encodeBooks はテスト用に BookRecord 一覧を本番 codec で JSON へ変換する。
 func encodeBooks(t *testing.T, records []storage.BookRecord) []byte {
 	t.Helper()
 	body, err := storage.EncodeBooks(records)
@@ -24,17 +23,14 @@ func encodeBooks(t *testing.T, records []storage.BookRecord) []byte {
 }
 
 func TestApplyMigration(t *testing.T) {
-	// MaxPrice へ紙書籍価格が入っている典型的な移行対象のレコード。
 	updated := storage.BookRecord{Book: book.KindleBook{
 		ASIN: "B000000001", Title: "タイトル1",
 		CurrentPrice: book.NewPrice(759), MaxPrice: book.NewPrice(792),
 	}}
-	// CurrentPrice==0 のレコード。SPECIFICATION.md 20.2 で MaxPrice も 0 になる。
 	currentZero := storage.BookRecord{Book: book.KindleBook{
 		ASIN: "B000000002", Title: "タイトル2",
 		CurrentPrice: book.Price{}, MaxPrice: book.NewPrice(1500),
 	}}
-	// 既に MaxPrice==CurrentPrice で変更不要なレコード。
 	unchanged := storage.BookRecord{Book: book.KindleBook{
 		ASIN: "B000000003", Title: "タイトル3",
 		CurrentPrice: book.NewPrice(759), MaxPrice: book.NewPrice(759),
@@ -106,7 +102,6 @@ func TestMigrateObject_DryRun(t *testing.T) {
 		t.Errorf("report = %+v, want total=2 changed=2 current_zero=1", rep)
 	}
 
-	// dry-run は S3 へ書き込まない。
 	obj, err := store.Get(ctx, "unprocessed_asins.json")
 	if err != nil {
 		t.Fatalf("get after dry-run: %v", err)
@@ -155,7 +150,6 @@ func TestMigrateObject_Apply(t *testing.T) {
 	if !priceEqual(after[0].Book.MaxPrice, book.NewPrice(759)) {
 		t.Errorf("MaxPrice = %v, want 759", after[0].Book.MaxPrice)
 	}
-	// CurrentPrice・他 field は不変。
 	if !priceEqual(after[0].Book.CurrentPrice, book.NewPrice(759)) {
 		t.Errorf("CurrentPrice が変わった: %v", after[0].Book.CurrentPrice)
 	}
@@ -165,13 +159,12 @@ func TestMigrateObject_Apply(t *testing.T) {
 	if !after[0].Book.ReleaseDate.Equal(release) || !after[0].Book.CreatedAt.Equal(created) {
 		t.Errorf("ReleaseDate/CreatedAt が変わった: %+v", after[0].Book)
 	}
-	// 未知 field も保持する。
 	if !extraEqual(before[0].Extra, after[0].Extra) {
 		t.Errorf("Extra が変わった: %v -> %v", before[0].Extra, after[0].Extra)
 	}
 }
 
-// applyStore は Get と Put を記録する検証用 ObjectStore。If-Match の引き渡しを確認する。
+// applyStore は If-Match の引き渡しを確認するための検証用 ObjectStore。
 type applyStore struct {
 	body     []byte
 	etag     string
@@ -224,7 +217,7 @@ func TestMigrateObject_DryRunDoesNotPut(t *testing.T) {
 
 func TestMigrateObject_NotFound(t *testing.T) {
 	ctx := context.Background()
-	store := storage.NewMemStore() // 空
+	store := storage.NewMemStore()
 
 	_, err := migrateObject(ctx, store, "notified_asins.json", false)
 	if err == nil {
@@ -239,7 +232,7 @@ func TestValidateInvariants_DetectsCountChange(t *testing.T) {
 	before := []storage.BookRecord{
 		{Book: book.KindleBook{ASIN: "B000000001", CurrentPrice: book.NewPrice(759), MaxPrice: book.NewPrice(759)}},
 	}
-	after := []storage.BookRecord{} // 件数が減った破壊状態
+	after := []storage.BookRecord{}
 	if err := validateInvariants(before, after, "k"); err == nil {
 		t.Fatal("件数変化を検出しなかった")
 	}
@@ -257,8 +250,8 @@ func TestValidateInvariants_DetectsCurrentPriceChange(t *testing.T) {
 	}
 }
 
-// TestMigrateObject_ApplyThenRerunNoChange は apply 後に再度 dry-run すると
-// changed=0 になる（再実行冪等性）ことを検証する（SPECIFICATION.md 20.2 一度だけ適用）。
+// TestMigrateObject_ApplyThenRerunNoChange は SPECIFICATION.md 20.2 一度だけ適用。
+// apply 後の再 dry-run は changed=0（冪等性）を検証する。
 func TestMigrateObject_ApplyThenRerunNoChange(t *testing.T) {
 	ctx := context.Background()
 	before := []storage.BookRecord{
@@ -272,7 +265,6 @@ func TestMigrateObject_ApplyThenRerunNoChange(t *testing.T) {
 		t.Fatalf("first apply: %v", err)
 	}
 
-	// 2回目は dry-run。MaxPrice==CurrentPrice になっているため changed=0。
 	rep, err := migrateObject(ctx, store, "unprocessed_asins.json", false)
 	if err != nil {
 		t.Fatalf("rerun dry-run: %v", err)

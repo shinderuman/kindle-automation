@@ -41,7 +41,7 @@ type Notifier struct {
 	logger   *slog.Logger
 }
 
-// NewNotifier は送信先と logger を指定して Notifier を返す。nil の送信先は送信しない。
+// NewNotifier は nil の送信先は送信しない。
 func NewNotifier(slack, mastodon Sender, logger *slog.Logger) *Notifier {
 	return &Notifier{slack: slack, mastodon: mastodon, logger: logger}
 }
@@ -98,7 +98,6 @@ type SlackSender struct {
 	baseURL string
 }
 
-// NewSlackSender は Slack notice channel への送信者を返す。
 func NewSlackSender(token, channel string) *SlackSender {
 	return &SlackSender{
 		token:   token,
@@ -148,7 +147,7 @@ type MastodonSender struct {
 	client      *http.Client
 }
 
-// NewMastodonSender は Mastodon server への送信者を返す。server は末尾スラッシュなしの URL。
+// NewMastodonSender は server の末尾スラッシュを正規化する。
 func NewMastodonSender(server, accessToken string) *MastodonSender {
 	return &MastodonSender{
 		server:      strings.TrimRight(server, "/"),

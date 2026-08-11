@@ -9,7 +9,6 @@ import (
 )
 
 func TestDecodeCheckerConfigs_AcceptsExistingShape(t *testing.T) {
-	// PA API retry 等の未使用 field が含まれていても decode できる。
 	body := []byte(`{
 		"ReportFailure": true,
 		"SaleChecker": {"Enabled": true, "GistID": "g1", "GistFilename": "sale.md", "ExecutionIntervalMinutes": 5, "SaleThreshold": 151, "PointPercent": 20, "PriceChangeAmount": 100},
@@ -45,7 +44,6 @@ func TestValidate_RejectsNonPositiveThreshold(t *testing.T) {
 	}
 }
 
-// PointPercent・PriceChangeAmount も単独で0なら弾く（SPECIFICATION.md 16: 使用する閾値は正）。
 func TestValidate_RejectsNonPositivePointPercentAndPriceChange(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -70,7 +68,6 @@ func TestValidate_RejectsNonPositivePointPercentAndPriceChange(t *testing.T) {
 	}
 }
 
-// NewRelease/PaperToKindle も Enabled なら GistID・GistFilename 両方が必要（SPECIFICATION.md 16）。
 func TestValidate_RejectsOtherEnabledCheckersWithoutGist(t *testing.T) {
 	cases := []struct {
 		name string
@@ -88,7 +85,6 @@ func TestValidate_RejectsOtherEnabledCheckersWithoutGist(t *testing.T) {
 	}
 }
 
-// GistID と GistFilename は片方だけ欠けても弾く（SPECIFICATION.md 16）。
 func TestValidate_RejectsPartialGist(t *testing.T) {
 	cases := []struct {
 		name string
@@ -106,7 +102,6 @@ func TestValidate_RejectsPartialGist(t *testing.T) {
 	}
 }
 
-// 全 Checker 無効なら Gist・閾値なしでも validation を通す（使用しないため）。
 func TestValidate_AllDisabledPasses(t *testing.T) {
 	cfg := CheckerConfigs{
 		SaleChecker:          SaleCheckerConfig{Enabled: false},
@@ -118,7 +113,6 @@ func TestValidate_AllDisabledPasses(t *testing.T) {
 	}
 }
 
-// 不正な型（SaleThreshold が文字列等）は decode error になる。
 func TestDecodeCheckerConfigs_TypeMismatch(t *testing.T) {
 	body := []byte(`{"SaleChecker":{"Enabled":true,"SaleThreshold":"not-a-number"}}`)
 	if _, err := DecodeCheckerConfigs(body); err == nil {
@@ -127,7 +121,6 @@ func TestDecodeCheckerConfigs_TypeMismatch(t *testing.T) {
 }
 
 func TestValidate_DisabledSaleSkipsThresholdCheck(t *testing.T) {
-	// Sale 無効なら閾値が 0 でも validation を通す（使用しないため）。
 	cfg := CheckerConfigs{SaleChecker: SaleCheckerConfig{Enabled: false}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled sale should not validate thresholds: %v", err)

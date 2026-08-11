@@ -46,7 +46,6 @@ func TestJobID(t *testing.T) {
 	if got != want {
 		t.Fatalf("JobID = %q, want %q", got, want)
 	}
-	// 同じ入力からは同じ値。決定性の検証。
 	if JobID("sale_check", cycle, "B0FX3X569X") != got {
 		t.Fatalf("JobID is not deterministic")
 	}
@@ -62,14 +61,11 @@ func TestDedupID(t *testing.T) {
 	if len(got) != 64 {
 		t.Fatalf("DedupID length = %d, want 64", len(got))
 	}
-	// job_id が異なれば DedupID も異なる。
 	if DedupID("a") == DedupID("b") {
 		t.Fatalf("DedupID must differ for different job_id")
 	}
 }
 
-// TestJobID_DiscriminatesByKindCycleTarget は kind/cycle/対象いずれかが違えば job_id が異なり、
-// 全体が同じ時だけ同一になることを検証する（SPECIFICATION.md 7.2）。
 func TestJobID_DiscriminatesByKindCycleTarget(t *testing.T) {
 	cycle := "sale:2026-07-23T00:00:00Z"
 	base := JobID("sale_check", cycle, "B0FX3X569X")

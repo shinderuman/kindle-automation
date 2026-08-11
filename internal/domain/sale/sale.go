@@ -12,8 +12,7 @@ type Thresholds struct {
 	PriceChangeAmount float64
 }
 
-// Input はセール判定と価格変動判定の入力。
-// MaxPrice は取得済みの過去最高Kindle価格。未取得の場合は呼び出し側で 0 を渡す。
+// Input.MaxPrice は未取得の場合、呼び出し側で 0 を渡す。
 // 紙書籍価格はセール条件に使用しない（SPECIFICATION.md 12.4）。
 type Input struct {
 	CurrentPrice float64
@@ -30,12 +29,10 @@ type Conditions struct {
 	Coupon    bool
 }
 
-// Any は1つ以上の条件が成立しているかを返す。
 func (c Conditions) Any() bool {
 	return c.PriceDrop || c.Points || c.PointRate || c.Coupon
 }
 
-// Evaluate は4つのセール条件を独立して判定する。
 func Evaluate(in Input, th Thresholds) Conditions {
 	c := Conditions{}
 	if in.MaxPrice-in.CurrentPrice >= th.SaleThreshold {
@@ -53,7 +50,7 @@ func Evaluate(in Input, th Thresholds) Conditions {
 	return c
 }
 
-// pointRatePercent はポイント還元率を百分率で返す。呼び出し側で CurrentPrice > 0 を保証すること。
+// pointRatePercent は呼び出し側で CurrentPrice > 0 を保証すること（0 除算回避）。
 func pointRatePercent(in Input) float64 {
 	return float64(in.Points) / in.CurrentPrice * 100
 }
@@ -81,22 +78,16 @@ func NotificationLines(in Input, c Conditions, couponText string) []string {
 	return lines
 }
 
-// PriceChangeKind は価格変動通知の種別。
 type PriceChangeKind int
 
 const (
-	// NoChange は価格変動通知をしない。
 	NoChange PriceChangeKind = iota
-	// PriceUp は値上がり。
 	PriceUp
-	// PriceDown は値下がり。
 	PriceDown
 )
 
-// EvaluatePriceChange は旧 CurrentPrice からの変化を判定する（SPECIFICATION.md 12.5）。
-// oldCurrent が 0 の場合は通知しない。amount は PriceChangeAmount。
-// 返り値は種別と差額（円）。
-// セール条件成立時に価格変動を送らない排他は呼び出し側で行う（SPECIFICATION.md 12.5）。
+// EvaluatePriceChange は oldCurrent が 0 の場合は通知しない（SPECIFICATION.md 12.5）。
+// セール条件成立時に価格変動を送らない排他は呼び出し側で行う。
 func EvaluatePriceChange(oldCurrent, current float64, amount float64) (PriceChangeKind, int) {
 	if oldCurrent == 0 {
 		return NoChange, 0

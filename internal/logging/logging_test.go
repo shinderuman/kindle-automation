@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// logLine は1行目のJSONログを取り出す。
 func logLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 	out := bytes.TrimSpace(buf.Bytes())
@@ -104,7 +103,6 @@ func TestNew_ErrorLevelStringForMetricFilter(t *testing.T) {
 	logger.Error(EventNotificationError, "error", "boom")
 
 	got := logLine(t, &buf)
-	// SPEC 18.2: CloudWatch Logs metric filter は level=ERROR を集計する。
 	if got["level"] != "ERROR" {
 		t.Errorf("level = %v, want ERROR string", got["level"])
 	}
@@ -114,7 +112,6 @@ func TestNew_ErrorLevelStringForMetricFilter(t *testing.T) {
 }
 
 func TestNew_NoAddedFields(t *testing.T) {
-	// logger 自体は値を追加しない。渡した attribute だけが出力される（秘密情報漏洩の原因を作らない）。
 	var buf bytes.Buffer
 	logger := New(&buf, slog.LevelInfo)
 	logger.Info("e", "job_id", "J1")
@@ -128,8 +125,6 @@ func TestNew_NoAddedFields(t *testing.T) {
 	}
 }
 
-// group 内の属性は replaceAttr の組込み field 書換え対象外となり、値をそのまま通す。
-// time/level/msg の書換えはトップレベル属性にだけ適用される（SPECIFICATION.md 18.1）。
 func TestNew_GroupedAttrsAreNotRewritten(t *testing.T) {
 	var buf bytes.Buffer
 	logger := New(&buf, slog.LevelInfo).WithGroup("detail")
@@ -140,7 +135,6 @@ func TestNew_GroupedAttrsAreNotRewritten(t *testing.T) {
 	if !ok {
 		t.Fatalf("detail group missing or wrong type: %v", got["detail"])
 	}
-	// group 内の time/msg/level は書換えられずそのまま残る（replaceAttr が groups>0 で素通しする）。
 	if detail["time"] != "raw" || detail["msg"] != "raw" || detail["level"] != "raw" {
 		t.Errorf("grouped built-in keys must not be rewritten: %v", detail)
 	}

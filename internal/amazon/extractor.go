@@ -28,7 +28,6 @@ var (
 	searchAsinRe = regexp.MustCompile(`/(?:dp|gp/product|kindle-dbs/product)/([A-Z0-9]{10})`)
 )
 
-// ProductInfo は商品ページから抽出した値。
 type ProductInfo struct {
 	Title            string
 	ASIN             string
@@ -45,7 +44,6 @@ type ProductInfo struct {
 	KindleSwatchASIN string
 }
 
-// SearchHit は検索結果1件から抽出した値。
 type SearchHit struct {
 	ASIN           string
 	Title          string
@@ -54,13 +52,12 @@ type SearchHit struct {
 	Contributors   []string
 	ReleaseDate    time.Time
 	HasReleaseDate bool
-	// IsKindle は検索結果カードのKindle形式表示でKindle版と確認できたか（SPECIFICATION.md 13.4）。
+	// 検索結果カードのKindle形式表示でKindle版と確認できたか（SPECIFICATION.md 13.4）。
 	IsKindle bool
 }
 
-// ExtractProduct は商品ページから値を抽出する（SPECIFICATION.md 11.2）。
 // finalURL は redirect 後の最終URL。ASIN は extractASIN が HTML input → canonical URL →
-// finalURL の順で fallback して決定し、元の要求ASIN で無条件に代用しない。
+// finalURL の順で fallback して決定し、元の要求ASIN で無条件に代用しない（SPECIFICATION.md 11.2）。
 func ExtractProduct(doc *goquery.Document, finalURL string) ProductInfo {
 	releaseDate, hasDate := extractReleaseDate(doc)
 	coupon, couponText := extractCoupon(doc)
@@ -81,7 +78,6 @@ func ExtractProduct(doc *goquery.Document, finalURL string) ProductInfo {
 	}
 }
 
-// extractProductContributors は商品ページ #bylineInfo a の各 contributor テキストを個別に返す。
 // 役割表記`(著)`は兄弟 span にありリンクテキストには含まれないため、各リンクテキストを
 // そのまま1 contributor とする（実HTML fixture product_B0FX3X569X で確認）。
 func extractProductContributors(doc *goquery.Document) []string {
@@ -94,7 +90,6 @@ func extractProductContributors(doc *goquery.Document) []string {
 	return contributors
 }
 
-// extractKindleSwatchASIN は KINDLEスウォッチ内で最初の ASIN付きリンクからKindle版ASINを取り出す。
 // 現EditionがKindleのときスウォッチリンクは javascript:void(0) になりASINは空になる。
 func extractKindleSwatchASIN(doc *goquery.Document) string {
 	var asin string
@@ -110,7 +105,6 @@ func extractKindleSwatchASIN(doc *goquery.Document) string {
 	return asin
 }
 
-// ExtractSearch は検索ページから結果一覧を抽出する（SPECIFICATION.md 11.2）。
 func ExtractSearch(doc *goquery.Document) []SearchHit {
 	var hits []SearchHit
 	doc.Find(selectorSearchResult).Each(func(_ int, s *goquery.Selection) {
@@ -152,7 +146,6 @@ func extractPoints(doc *goquery.Document) int {
 	return 0
 }
 
-// extractCoupon はクーポンバッジの有無と .couponLabelText の最初の直接テキストノードを返す。
 func extractCoupon(doc *goquery.Document) (bool, string) {
 	badge := doc.Find(selectorCouponBadge).First()
 	if badge.Length() == 0 {
@@ -164,13 +157,11 @@ func extractCoupon(doc *goquery.Document) (bool, string) {
 	return true, firstChildText(doc.Find(selectorCouponText).First())
 }
 
-// extractReleaseDate は発売日を UTC 00:00:00 へ正規化して返す。
 // 観測済み primary selector だけを使い、未検証の fallback は持たない。
 func extractReleaseDate(doc *goquery.Document) (time.Time, bool) {
 	return parseReleaseDateOptional(textOf(doc, selectorReleaseDate))
 }
 
-// extractSearchHit は検索結果1件から値を抽出する。
 func extractSearchHit(s *goquery.Selection) SearchHit {
 	title := firstNonEmpty(
 		strings.TrimSpace(s.Find(selectorSearchTitle).First().Text()),
@@ -208,7 +199,6 @@ func extractSearchHit(s *goquery.Selection) SearchHit {
 	}
 }
 
-// splitSearchContributors は検索結果の作者表記テキストから各 contributor を取り出す。
 // 実HTMLでは1テキストに `著者A、 著者B | 販売者:... | 日付` のように複数 contributor と
 // 販売者・日付が混入するため、先頭の ` | ` までを著者部分とし `、` で分割する（SPECIFICATION.md 11.2）。
 func splitSearchContributors(authorText string) []string {
@@ -228,22 +218,19 @@ func splitSearchContributors(authorText string) []string {
 	return contributors
 }
 
-// isKindleFormat は検索結果カードの形式表示がKindle版を示すかを返す（SPECIFICATION.md 13.4）。
+// SPECIFICATION.md 13.4: 検索結果カードの形式表示がKindle版か。
 func isKindleFormat(formatText string) bool {
 	return strings.TrimSpace(formatText) == kindleFormatLabel
 }
 
-// textOf はセレクタの最初の要素の text を返す。
 func textOf(doc *goquery.Document, selector string) string {
 	return strings.TrimSpace(doc.Find(selector).First().Text())
 }
 
-// priceFromSelector はセレクタの text から正の金額を取り出す。
 func priceFromSelector(doc *goquery.Document, selector string) book.Price {
 	return parsePrice(textOf(doc, selector))
 }
 
-// parsePrice は数字列から正の金額の Price を作る。
 func parsePrice(text string) book.Price {
 	m := priceRe.FindStringSubmatch(text)
 	if m == nil {
@@ -252,7 +239,6 @@ func parsePrice(text string) book.Price {
 	return yenToPrice(m[1])
 }
 
-// parsePurchasePrice は購入価格正規表現を順に適用して正の金額を取り出す。
 func parsePurchasePrice(text string) book.Price {
 	for _, re := range purchasePriceRe {
 		m := re.FindStringSubmatch(text)
@@ -266,7 +252,6 @@ func parsePurchasePrice(text string) book.Price {
 	return book.UnknownPrice()
 }
 
-// parseSearchPrice は検索ページの ￥ 付き金額から正の Price を作る。
 func parseSearchPrice(text string) book.Price {
 	m := searchPriceRe.FindStringSubmatch(text)
 	if m == nil {
@@ -275,7 +260,6 @@ func parseSearchPrice(text string) book.Price {
 	return yenToPrice(m[1])
 }
 
-// parsePoints はポイント正規表現で正のポイント数を取り出す。
 func parsePoints(text string) int {
 	m := pointsRe.FindStringSubmatch(text)
 	if m == nil {
@@ -288,7 +272,6 @@ func parsePoints(text string) int {
 	return pt
 }
 
-// yenToPrice は数字文字列から正の金額の Price を作る。0 以下は未取得扱い。
 func yenToPrice(digits string) book.Price {
 	yen, err := strconv.Atoi(strings.ReplaceAll(digits, ",", ""))
 	if err != nil || yen <= 0 {
@@ -297,7 +280,6 @@ func yenToPrice(digits string) book.Price {
 	return book.NewPrice(float64(yen))
 }
 
-// parseReleaseDateOptional は発売日文字列を解析し、失敗時は hasDate=false を返す。
 func parseReleaseDateOptional(text string) (time.Time, bool) {
 	if text == "" {
 		return time.Time{}, false
@@ -309,7 +291,7 @@ func parseReleaseDateOptional(text string) (time.Time, bool) {
 	return t, true
 }
 
-// firstChildText は要素の最初の直接テキストノードだけを返す（子要素の規約等を混ぜない）。
+// 子要素の規約等を混ぜず、最初の直接テキストノードだけを返す。
 func firstChildText(sel *goquery.Selection) string {
 	var found string
 	sel.Contents().Each(func(_ int, s *goquery.Selection) {
@@ -326,7 +308,7 @@ func firstChildText(sel *goquery.Selection) string {
 	return found
 }
 
-// extractASIN は ASIN を優先規則で取り出す（SPECIFICATION.md 11.2）。
+// ASIN を優先規則で取り出す（SPECIFICATION.md 11.2）。
 // 1. ページ内 ASIN 入力欄の value
 // 2. canonical URL の path
 // 3. redirect 後の最終URL（呼び出し側が resp.Request.URL から渡す）
@@ -343,7 +325,6 @@ func extractASIN(doc *goquery.Document, finalURL string) string {
 	return extractASINFromURL(finalURL)
 }
 
-// extractASINFromURL は /dp/{ASIN} から ASIN を取り出す。
 func extractASINFromURL(rawURL string) string {
 	m := searchAsinRe.FindStringSubmatch(rawURL)
 	if m == nil {
@@ -352,7 +333,6 @@ func extractASINFromURL(rawURL string) string {
 	return m[1]
 }
 
-// firstNonEmpty は最初の空でない文字列を返す。
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {

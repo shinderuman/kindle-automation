@@ -83,7 +83,7 @@ Resources:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
 
-  # Scheduler DLQ（Standard）。EventBridge Scheduler の再試行限界到達メッセージを受ける。
+  # EventBridge Scheduler の再試行限界到達メッセージを受ける。
   SchedulerDLQ:
     Type: AWS::SQS::Queue
     Properties:

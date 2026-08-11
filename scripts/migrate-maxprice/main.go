@@ -39,7 +39,7 @@ func main() {
 	}
 }
 
-// run は CLI 引数を解析し、各 object へ移行を適用する。AWS 接続を含むため単体テストは migrateObject で行う。
+// run は AWS 接続を含むため単体テストは migrateObject で行う。
 func run(args []string, stdout, stderr *os.File) error {
 	fs := flag.NewFlagSet("migrate-maxprice", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -88,7 +88,6 @@ func run(args []string, stdout, stderr *os.File) error {
 	return nil
 }
 
-// objectReport は1 object の移行結果。
 type objectReport struct {
 	Key         string
 	Total       int
@@ -96,9 +95,7 @@ type objectReport struct {
 	CurrentZero int
 }
 
-// migrateObject は1 object を読み込み、MaxPrice=CurrentPrice へ書き換える。
-// apply=false なら検証と差分計算だけ行い S3 へ書き込まない。
-// 件数・ASIN 集合・CurrentPrice・他 field の不変を検証し、違反時は error を返す。
+// migrateObject は apply=false なら検証と差分計算だけ行い S3 へ書き込まない。
 func migrateObject(ctx context.Context, store storage.ObjectStore, key string, apply bool) (objectReport, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
@@ -124,9 +121,8 @@ func migrateObject(ctx context.Context, store storage.ObjectStore, key string, a
 	return objectReport{Key: key, Total: len(records), Changed: changed, CurrentZero: currentZero}, nil
 }
 
-// applyMigration は各レコードの MaxPrice を CurrentPrice へ置き換える（SPECIFICATION.md 20.2）。
-// CurrentPrice が未取得（0円）の場合は MaxPrice も未取得となり Yen() は 0 を返す。
-// 件数・ASIN・他 field は一切変更せず、新しい slice を返す。
+// applyMigration は SPECIFICATION.md 20.2。CurrentPrice 未取得（0円）時は MaxPrice も未取り。
+// 件数・ASIN・他 field は一切変更せず新しい slice を返す。
 func applyMigration(records []storage.BookRecord) ([]storage.BookRecord, int, int) {
 	migrated := make([]storage.BookRecord, len(records))
 	changed := 0
@@ -174,12 +170,10 @@ func validateInvariants(before, after []storage.BookRecord, key string) error {
 	return nil
 }
 
-// priceEqual は2つの Price が valid と yen で一致するかを返す。
 func priceEqual(a, b book.Price) bool {
 	return a.Valid() == b.Valid() && a.Yen() == b.Yen()
 }
 
-// asinSet は records の ASIN 集合を返す。
 func asinSet(records []storage.BookRecord) map[string]struct{} {
 	m := make(map[string]struct{}, len(records))
 	for _, r := range records {
@@ -188,7 +182,6 @@ func asinSet(records []storage.BookRecord) map[string]struct{} {
 	return m
 }
 
-// setEqual は2つの文字列集合が等しいかを返す。
 func setEqual(a, b map[string]struct{}) bool {
 	if len(a) != len(b) {
 		return false
@@ -201,7 +194,6 @@ func setEqual(a, b map[string]struct{}) bool {
 	return true
 }
 
-// extraEqual は未知 field の map が等しいかを返す。
 func extraEqual(a, b map[string]json.RawMessage) bool {
 	if len(a) != len(b) {
 		return false
@@ -218,7 +210,7 @@ func extraEqual(a, b map[string]json.RawMessage) bool {
 	return true
 }
 
-// splitKeys はカンマ区切り文字列を trim 済みの非空 key 一覧へ分割する。
+// splitKeys は trim 済みの非空 key のみを返す。
 func splitKeys(csv string) []string {
 	parts := strings.Split(csv, ",")
 	keys := make([]string, 0, len(parts))
