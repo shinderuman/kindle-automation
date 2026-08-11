@@ -32,9 +32,11 @@ const (
 	errorTypeDateUnavailable  = "release_date_unavailable"
 	errorTypeAuthorMismatch   = "author_mismatch"
 	errorTypeExcluded         = "excluded"
+	errorTypeMinPriceExcluded = "min_price_excluded"
 	errorTypeMissingProduct   = "missing_product"
 	errorTypeRetention        = "retention"
 	errorTypeAuthorStore      = "author_store"
+	errorTypePaperStore       = "paper_store"
 	errorTypeEnqueueFailed    = "enqueue_failed"
 	errorTypeNotifiedUpsert   = "notified_upsert"
 	errorTypeUpcomingUpsert   = "upcoming_upsert"
@@ -115,6 +117,26 @@ type ProductResult struct {
 	ResponseBytes int
 }
 
+// PaperPageInfo はISBN候補の紙書籍ページ1回から取得した情報（SPECIFICATION.md 13.4）。
+// PaperPrice が未取得のときは Invalid となり、CurrentPrice/MaxPrice を 0 のまま paper_books へ保存する。
+type PaperPageInfo struct {
+	ASIN           string
+	Title          string
+	URL            string
+	PaperPrice     book.Price
+	ReleaseDate    time.Time
+	HasReleaseDate bool
+	Contributors   []string
+}
+
+// PaperPageResult はISBN候補の紙書籍ページ1回の取得結果。
+type PaperPageResult struct {
+	Category      ProductCategory
+	Info          PaperPageInfo
+	HTTPStatus    int
+	ResponseBytes int
+}
+
 // Candidate は notified/upcoming へ保存・通知する候補1件を表す。
 type Candidate struct {
 	ASIN        string
@@ -135,6 +157,18 @@ type SearchFetcher interface {
 // 1起動で最大1回。
 type ProductFetcher interface {
 	FetchProduct(ctx context.Context, asin string) (ProductResult, error)
+}
+
+// PaperPageFetcher はISBN候補の紙書籍ページ取得の最小依存インターフェース（SPECIFICATION.md 13.4）。
+// 1起動で最大1回。
+type PaperPageFetcher interface {
+	FetchPaperPage(ctx context.Context, asin string) (PaperPageResult, error)
+}
+
+// PaperCandidateStore は paper_books_asins.json へのASIN単位冪等upsertと変更検知を担う（SPECIFICATION.md 13.4/15）。
+// Amazon 由来 field の追加・変更があった場合だけ changed=true を返し、未変更重複では Gist job を増やさない。
+type PaperCandidateStore interface {
+	UpsertChanged(ctx context.Context, b book.KindleBook) (bool, error)
 }
 
 // NotifiedStore は notified_asins の保存期間適用・存在判定・冪等upsertを担う。
@@ -173,19 +207,23 @@ type Notifier interface {
 // Config は新刊ジョブの実行設定を表す。
 type Config struct {
 	ExcludedKeywords []string
+	// MinPrice は新刊候補の最低価格（円）。取得できたKindle/紙価格が MinPrice 以下の候補は除外する（SPECIFICATION.md 13.4）。
+	MinPrice int
 }
 
-// Dependencies は新刊3ジョブが依存する adapter・設定・時刻源をまとめる。
+// Dependencies は新刊ジョブが依存する adapter・設定・時刻源をまとめる。
 type Dependencies struct {
-	SearchFetcher  SearchFetcher
-	ProductFetcher ProductFetcher
-	NotifiedStore  NotifiedStore
-	UpcomingStore  UpcomingStore
-	AuthorStore    AuthorStore
-	Enqueuer       Enqueuer
-	Notifier       Notifier
-	Config         Config
-	Clock          func() time.Time
+	SearchFetcher       SearchFetcher
+	ProductFetcher      ProductFetcher
+	PaperPageFetcher    PaperPageFetcher
+	NotifiedStore       NotifiedStore
+	UpcomingStore       UpcomingStore
+	AuthorStore         AuthorStore
+	PaperCandidateStore PaperCandidateStore
+	Enqueuer            Enqueuer
+	Notifier            Notifier
+	Config              Config
+	Clock               func() time.Time
 }
 
 // ErrRetryableFetch は Amazon 取得の再試行可能エラー。Lambda error として SQS へ再配信させる。
@@ -198,9 +236,15 @@ var (
 	isbnRe       = regexp.MustCompile(`^\d{10,13}$`)
 	yearMonthRe  = regexp.MustCompile(`\d{4}年\d{1,2}月`)
 	gistNewRelID = "new_release"
+	// gistPaperID は新刊ISBN候補が paper_books へ追加・変更されたときに投入する Paper Gist の gist_type（SPECIFICATION.md 13.4/15）。
+	gistPaperID = "paper_to_kindle"
 	// roleParenRe は contributor 表記の役割括弧（著）や（イラスト）など半角/全角を取り除く。
 	roleParenRe = regexp.MustCompile(`[（(][^)）]*[)）]`)
 )
+
+// gistStageNewReleasePaper は新刊ISBN候補による paper_books 追加・変更を示す Paper Gist job の決定的 stage。
+// paper_to_kindle checker/detail の stage と区別し、同一 cycle・同一 paperASIN の再試行を同一 job_id で冪等にする。
+const gistStageNewReleasePaper = "nr_paper"
 
 // maxSearchCandidates は検索ページ1回から候補として処理する最大件数（SPECIFICATION.md 13.2）。
 const maxSearchCandidates = 10
@@ -320,12 +364,9 @@ func notFoundType(c ProductCategory) string {
 	return "not_found"
 }
 
-// enqueueCandidate は検索候補の事前除外を行い、必須項目が揃えば result、不足なら detail を投入する。
+// enqueueCandidate は検索候補の事前除外を行い、ISBN候補は紙detail、それ以外は必須項目が揃えば result・不足なら detail を投入する。
 func enqueueCandidate(ctx context.Context, deps Dependencies, j job.Job, hit SearchHit) error {
 	if hit.ASIN == "" || hit.Title == "" || hit.URL == "" {
-		return nil
-	}
-	if IsISBNASIN(hit.ASIN) {
 		return nil
 	}
 	if ExcludedByKeyword(hit.Title, deps.Config.ExcludedKeywords) {
@@ -336,6 +377,11 @@ func enqueueCandidate(ctx context.Context, deps Dependencies, j job.Job, hit Sea
 	}
 	if !AuthorMatches(j.Target.AuthorName, hit.Contributors) {
 		return nil
+	}
+	// SPECIFICATION.md 13.3/13.4: ISBN候補は紙経路（new_release_paper_detail）へ振り分け、捨てない。
+	// 紙候補は notified/upcoming に入れないため notified 存在判定は使わず、紙detailで paper_books へ冪等upsertする。
+	if IsISBNASIN(hit.ASIN) {
+		return deps.Enqueuer.Enqueue(ctx, buildPaperDetailJob(j, hit))
 	}
 	exists, err := deps.NotifiedStore.Exists(ctx, hit.ASIN)
 	if err != nil {
@@ -355,6 +401,11 @@ func enqueueCandidate(ctx context.Context, deps Dependencies, j job.Job, hit Sea
 // 結果とHTTP計測値を Outcome で返すが、本関数は Amazon 未アクセスのため計測値は0（呼び出し側が上書き）。
 func applyCandidate(ctx context.Context, deps Dependencies, j job.Job, c Candidate) (execution.Outcome, error) {
 	now := deps.Clock()
+
+	// 価格未取得候補はここへ来ないため Valid な価格だけ比較し、MinPrice 以下なら更新せず終了する（SPECIFICATION.md 13.4）。
+	if c.KindlePrice.Valid() && c.KindlePrice.Yen() <= float64(deps.Config.MinPrice) {
+		return execution.Terminal(errorTypeMinPriceExcluded, 0, 0), nil
+	}
 
 	// 13.6 step1-3: notified 読直し・保存期間（将来分のみ残す）適用・処理開始時の通知済み記録。
 	alreadyNotified, err := deps.NotifiedStore.ApplyRetentionAndExists(ctx, c.ASIN, now)
@@ -431,6 +482,20 @@ func buildDetailJob(j job.Job, hit SearchHit) job.Job {
 	}
 }
 
+// buildPaperDetailJob はISBN候補の紙書籍詳細jobを生成する（SPECIFICATION.md 13.4）。
+// job_id はKindle detail と同じ cycle+ASIN でも kind が異なるため別 id になり、FIFO dedup で消えない。
+func buildPaperDetailJob(j job.Job, hit SearchHit) job.Job {
+	return job.Job{
+		Version:     job.Version,
+		JobID:       scheduling.JobID(string(job.KindNewReleasePaperDetail), j.CycleID, hit.ASIN),
+		Kind:        job.KindNewReleasePaperDetail,
+		CheckType:   j.CheckType,
+		CycleID:     j.CycleID,
+		ScheduledAt: j.ScheduledAt,
+		Target:      job.Target{ASIN: hit.ASIN, AuthorName: j.Target.AuthorName},
+	}
+}
+
 // buildAuthorGistJob は Author 用 gist_update ジョブを生成する。
 // job_id は gist_type + 作者名 + 候補ASIN で決定的。Gist updater は authors.json 全体を再生成するため
 // Target.GistType は new_release のまま変えない（job schema 互換、SPECIFICATION.md 7.2/15）。
@@ -448,6 +513,88 @@ func buildAuthorGistJob(j job.Job, candidateASIN string) job.Job {
 		ScheduledAt: j.ScheduledAt,
 		Target:      job.Target{GistType: gistNewRelID},
 	}
+}
+
+// buildNewReleasePaperGistJob はISBN候補による paper_books 追加・変更後に投入する Paper Gist job を生成する（SPECIFICATION.md 13.4/15）。
+// Gist updater は paper_books 全体を再生成するため gist_type は paper_to_kindle を使う。
+// stage+paperASIN で決定的 id にし、paper_to_kindle checker/detail の gist job と区別しつつ再試行は冪等にする。
+func buildNewReleasePaperGistJob(j job.Job, paperASIN string) job.Job {
+	return job.Job{
+		Version:     job.Version,
+		JobID:       scheduling.JobID(string(job.KindGistUpdate), j.CycleID, gistPaperID+":"+gistStageNewReleasePaper+":"+paperASIN),
+		Kind:        job.KindGistUpdate,
+		CheckType:   j.CheckType,
+		CycleID:     j.CycleID,
+		ScheduledAt: j.ScheduledAt,
+		Target:      job.Target{GistType: gistPaperID},
+	}
+}
+
+// HandleNewReleasePaperDetail はISBN紙書籍候補の詳細job（SPECIFICATION.md 13.4）。
+// 商品ページへ最大1回アクセスし、ASIN/作者/タイトル/発売日を検証して paper_books_asins.json へ upsert する。
+// 紙価格は取得できれば CurrentPrice=MaxPrice へ保存し、未取得なら 0/0 で保存して価格初期化は Paper-to-Kindle（§14）へ委ねる。
+// notified/upcoming/unprocessed へは入れず、authors.LatestRelease も更新しない。
+func HandleNewReleasePaperDetail(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
+	asin := j.Target.ASIN
+	result, err := deps.PaperPageFetcher.FetchPaperPage(ctx, asin)
+	if err != nil {
+		return execution.Errored(errorTypeFetchError, 0, 0), fmt.Errorf("fetch paper page %s: %w", asin, err)
+	}
+	switch result.Category {
+	case ProductRetryable:
+		return execution.Errored(errorTypeFetchRetryable, result.HTTPStatus, result.ResponseBytes), &ErrRetryableFetch{ASIN: asin}
+	case ProductNotFound, ProductPermanentClientError:
+		return execution.Terminal(notFoundType(result.Category), result.HTTPStatus, result.ResponseBytes), nil
+	case ProductOK:
+	default:
+		return execution.Errored(errorTypeUnknownCategory, result.HTTPStatus, result.ResponseBytes),
+			fmt.Errorf("unknown fetch category %v for %s", result.Category, asin)
+	}
+	info := result.Info
+	if info.ASIN != "" && info.ASIN != asin {
+		return execution.Terminal(errorTypeAsinMismatch, result.HTTPStatus, result.ResponseBytes), nil
+	}
+	if info.Title == "" {
+		return execution.Errored(errorTypeTitleUnavailable, result.HTTPStatus, result.ResponseBytes),
+			fmt.Errorf("title not available for paper %s", asin)
+	}
+	if !info.HasReleaseDate {
+		return execution.Errored(errorTypeDateUnavailable, result.HTTPStatus, result.ResponseBytes),
+			fmt.Errorf("release date not available for paper %s", asin)
+	}
+	if !AuthorMatches(j.Target.AuthorName, info.Contributors) {
+		return execution.Terminal(errorTypeAuthorMismatch, result.HTTPStatus, result.ResponseBytes), nil
+	}
+	if ExcludedByKeyword(info.Title, deps.Config.ExcludedKeywords) || ExcludedByYearMonth(info.Title) {
+		return execution.Terminal(errorTypeExcluded, result.HTTPStatus, result.ResponseBytes), nil
+	}
+	if info.PaperPrice.Valid() && info.PaperPrice.Yen() <= float64(deps.Config.MinPrice) {
+		return execution.Terminal(errorTypeMinPriceExcluded, result.HTTPStatus, result.ResponseBytes), nil
+	}
+	price := info.PaperPrice
+	b := book.KindleBook{
+		ASIN:         asin,
+		Title:        info.Title,
+		URL:          info.URL,
+		ReleaseDate:  info.ReleaseDate,
+		CurrentPrice: price,
+		MaxPrice:     price,
+		CreatedAt:    deps.Clock(),
+	}
+	changed, err := deps.PaperCandidateStore.UpsertChanged(ctx, b)
+	if err != nil {
+		return execution.Errored(errorTypePaperStore, result.HTTPStatus, result.ResponseBytes),
+			fmt.Errorf("upsert paper book %s: %w", asin, err)
+	}
+	// 変更時だけ Gist job を投入し、未変更重複での無駄な更新を避ける（SPECIFICATION.md 13.4/15）。
+	// changed=false の再配信でも paper_books は反映済みのため Gist 省略は安全。
+	if changed {
+		if err := deps.Enqueuer.Enqueue(ctx, buildNewReleasePaperGistJob(j, asin)); err != nil {
+			return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
+				fmt.Errorf("enqueue new_release paper gist: %w", err)
+		}
+	}
+	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
 func toBook(c Candidate, now time.Time) book.KindleBook {

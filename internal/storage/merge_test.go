@@ -288,6 +288,77 @@ func TestUpsertBookRecord_SavesSortOrder(t *testing.T) {
 	}
 }
 
+func TestUpsertBookRecordChanged_ReportsChangedForAddAndModify(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("k", `[]`)
+	target := BookRecord{Book: book.KindleBook{
+		ASIN: "B0FX3X569X", Title: "T", URL: "https://u",
+		ReleaseDate:  time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		CurrentPrice: book.NewPrice(800), MaxPrice: book.NewPrice(800),
+		CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}}
+
+	changed, err := UpsertBookRecordChanged(context.Background(), store, "k", target)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if !changed {
+		t.Errorf("new ASIN must report changed=true")
+	}
+
+	// 同じ内容の再upsertは未変更（changed=false）。CreatedAt は保持され比較から除外される。
+	changed, err = UpsertBookRecordChanged(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0FX3X569X", Title: "T", URL: "https://u",
+		ReleaseDate:  time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		CurrentPrice: book.NewPrice(800), MaxPrice: book.NewPrice(800),
+		CreatedAt: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
+	}})
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if changed {
+		t.Errorf("unchanged re-upsert must report changed=false")
+	}
+
+	// Amazon 由来 field（価格）が変われば changed=true。
+	changed, err = UpsertBookRecordChanged(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0FX3X569X", Title: "T", URL: "https://u",
+		ReleaseDate:  time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		CurrentPrice: book.NewPrice(900), MaxPrice: book.NewPrice(900),
+	}})
+	if err != nil {
+		t.Fatalf("third upsert: %v", err)
+	}
+	if !changed {
+		t.Errorf("price change must report changed=true")
+	}
+}
+
+func TestUpsertBookRecordChanged_KeepsExistingExtraAndCreatedAt(t *testing.T) {
+	store := NewMemStore()
+	store.Seed("k", `[{"ASIN":"B0FX3X569X","Title":"T","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"手動"}]`)
+
+	changed, err := UpsertBookRecordChanged(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
+		ASIN: "B0FX3X569X", Title: "T2",
+		CurrentPrice: book.NewPrice(800), MaxPrice: book.NewPrice(800),
+	}})
+	if err != nil {
+		t.Fatalf("UpsertBookRecordChanged: %v", err)
+	}
+	if !changed {
+		t.Errorf("Title change must report changed=true")
+	}
+	obj, _ := store.Get(context.Background(), "k")
+	records, _ := DecodeBooks(obj.Body)
+	r := records[findBookIndex(records, "B0FX3X569X")]
+	if _, ok := r.Extra["Memo"]; !ok {
+		t.Errorf("unknown field Memo lost: %s", obj.Body)
+	}
+	if !r.Book.CreatedAt.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("CreatedAt not preserved: %v", r.Book.CreatedAt)
+	}
+}
+
 func TestMergeUpcoming_SavesSortOrder(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "unprocessed", book.KindleBook{

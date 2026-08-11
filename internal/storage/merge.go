@@ -85,6 +85,42 @@ func UpsertBookRecord(ctx context.Context, store ObjectStore, key string, target
 	})
 }
 
+// UpsertBookRecordChanged は Amazon 由来 field の追加・変更有無を返す冪等 upsert（SPECIFICATION.md 9.2/9.4, 13.4）。
+// 新規 ASIN、または Title/URL/ReleaseDate/CurrentPrice/MaxPrice の変化で changed=true となる。
+// CreatedAt は既存値を保持し、Extra（未知 field）は既存レコード側を保持するため比較から除外する。
+func UpsertBookRecordChanged(ctx context.Context, store ObjectStore, key string, target BookRecord) (bool, error) {
+	var changed bool
+	err := mutateBooks(ctx, store, key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
+		idx := findBookIndex(records, target.Book.ASIN)
+		if idx == -1 {
+			changed = true
+			return append(records, target), nil
+		}
+		updated := target.Book
+		updated.CreatedAt = records[idx].Book.CreatedAt
+		if !bookAmazonFieldsEqual(records[idx].Book, updated) {
+			changed = true
+		}
+		records[idx].Book = updated
+		return records, nil
+	})
+	return changed, err
+}
+
+// bookAmazonFieldsEqual は Amazon 由来 field の一致を返す。CreatedAt と Extra（未知 field）は比較しない。
+func bookAmazonFieldsEqual(a, b book.KindleBook) bool {
+	return a.ASIN == b.ASIN &&
+		a.Title == b.Title &&
+		a.URL == b.URL &&
+		a.ReleaseDate.Equal(b.ReleaseDate) &&
+		priceEqual(a.CurrentPrice, b.CurrentPrice) &&
+		priceEqual(a.MaxPrice, b.MaxPrice)
+}
+
+func priceEqual(a, b book.Price) bool {
+	return a.Valid() == b.Valid() && a.Yen() == b.Yen()
+}
+
 // MergeUpcoming は Upcoming を Unprocessed へ条件付き merge する（SPECIFICATION.md 10）。
 // 重複 ASIN は Unprocessed 側を優先し、Unprocessed 保存成功後、Upcoming の ETag が開始時と同じ場合だけ Upcoming を空配列へ戻す（処理中に増えた場合は消去しない）。
 // 返り値の int は Unprocessed へ新規追加した Upcoming 由来の ASIN 件数。

@@ -10,9 +10,8 @@ import (
 
 func TestDecodeCheckerConfigs_AcceptsExistingShape(t *testing.T) {
 	body := []byte(`{
-		"ReportFailure": true,
-		"SaleChecker": {"Enabled": true, "GistID": "g1", "GistFilename": "sale.md", "ExecutionIntervalMinutes": 5, "SaleThreshold": 151, "PointPercent": 20, "PriceChangeAmount": 100},
-		"NewReleaseChecker": {"Enabled": false, "GistID": "g2", "GistFilename": "new.md", "CycleDays": 1.0},
+		"SaleChecker": {"Enabled": true, "GistID": "g1", "GistFilename": "sale.md", "SaleThreshold": 151, "PointPercent": 20, "PriceChangeAmount": 100},
+		"NewReleaseChecker": {"Enabled": false, "GistID": "g2", "GistFilename": "new.md", "MinPrice": 221},
 		"PaperToKindleChecker": {"Enabled": true, "GistID": "g3", "GistFilename": "paper.md"}
 	}`)
 	cfg, err := DecodeCheckerConfigs(body)
@@ -21,6 +20,25 @@ func TestDecodeCheckerConfigs_AcceptsExistingShape(t *testing.T) {
 	}
 	if !cfg.SaleChecker.Enabled || cfg.SaleChecker.SaleThreshold != 151 {
 		t.Errorf("SaleChecker not decoded: %+v", cfg.SaleChecker)
+	}
+	if cfg.NewReleaseChecker.MinPrice != 221 {
+		t.Errorf("NewReleaseChecker.MinPrice not decoded: %d", cfg.NewReleaseChecker.MinPrice)
+	}
+}
+
+func TestDecodeCheckerConfigs_RejectsOldFieldsAsCheckerShape(t *testing.T) {
+	body := []byte(`{
+		"ReportFailure": true,
+		"SaleChecker": {"Enabled": true, "GistID": "g1", "GistFilename": "sale.md", "ExecutionIntervalMinutes": 5, "SaleThreshold": 151, "PointPercent": 20, "PriceChangeAmount": 100, "GetItemsPaapiRetryCount": 3, "GetItemsInitialRetrySeconds": 2},
+		"NewReleaseChecker": {"Enabled": false, "GistID": "g2", "GistFilename": "new.md", "MinPrice": 221, "CycleDays": 1.0, "SearchItemsPaapiRetryCount": 3, "SearchItemsInitialRetrySeconds": 2, "GetItemsPaapiRetryCount": 3, "GetItemsInitialRetrySeconds": 2},
+		"PaperToKindleChecker": {"Enabled": true, "GistID": "g3", "GistFilename": "paper.md", "CycleDays": 1.0, "SearchItemsPaapiRetryCount": 3, "SearchItemsInitialRetrySeconds": 2, "GetItemsPaapiRetryCount": 3, "GetItemsInitialRetrySeconds": 2}
+	}`)
+	cfg, err := DecodeCheckerConfigs(body)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.NewReleaseChecker.MinPrice != 221 {
+		t.Errorf("MinPrice must still decode: %d", cfg.NewReleaseChecker.MinPrice)
 	}
 }
 
@@ -73,12 +91,30 @@ func TestValidate_RejectsOtherEnabledCheckersWithoutGist(t *testing.T) {
 		name string
 		cfg  CheckerConfigs
 	}{
-		{name: "NewRelease without gist", cfg: CheckerConfigs{NewReleaseChecker: NewReleaseCheckerConfig{Enabled: true}}},
+		{name: "NewRelease without gist", cfg: CheckerConfigs{NewReleaseChecker: NewReleaseCheckerConfig{Enabled: true, MinPrice: 221}}},
 		{name: "PaperToKindle without gist", cfg: CheckerConfigs{PaperToKindleChecker: PaperToKindleCheckerConfig{Enabled: true}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.cfg.Validate(); !errors.Is(err, ErrInvalidCheckerConfig) {
+				t.Fatalf("%s: want ErrInvalidCheckerConfig, got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestValidate_RejectsNonPositiveNewReleaseMinPrice(t *testing.T) {
+	cases := []struct {
+		name     string
+		minPrice int
+	}{
+		{name: "MinPrice=0", minPrice: 0},
+		{name: "MinPrice negative", minPrice: -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := CheckerConfigs{NewReleaseChecker: NewReleaseCheckerConfig{Enabled: true, GistID: "g", GistFilename: "f", MinPrice: tc.minPrice}}
+			if err := cfg.Validate(); !errors.Is(err, ErrInvalidCheckerConfig) {
 				t.Fatalf("%s: want ErrInvalidCheckerConfig, got %v", tc.name, err)
 			}
 		})
@@ -130,11 +166,18 @@ func TestValidate_DisabledSaleSkipsThresholdCheck(t *testing.T) {
 func TestValidate_AcceptsFullyConfigured(t *testing.T) {
 	cfg := CheckerConfigs{
 		SaleChecker:          SaleCheckerConfig{Enabled: true, GistID: "g1", GistFilename: "sale.md", SaleThreshold: 151, PointPercent: 20, PriceChangeAmount: 100},
-		NewReleaseChecker:    NewReleaseCheckerConfig{Enabled: true, GistID: "g2", GistFilename: "new.md"},
+		NewReleaseChecker:    NewReleaseCheckerConfig{Enabled: true, GistID: "g2", GistFilename: "new.md", MinPrice: 221},
 		PaperToKindleChecker: PaperToKindleCheckerConfig{Enabled: true, GistID: "g3", GistFilename: "paper.md"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+func TestNewReleaseMinPrice_ReturnsConfiguredValue(t *testing.T) {
+	cfg := CheckerConfigs{NewReleaseChecker: NewReleaseCheckerConfig{MinPrice: 221}}
+	if got := cfg.NewReleaseMinPrice(); got != 221 {
+		t.Errorf("NewReleaseMinPrice = %d, want 221", got)
 	}
 }
 

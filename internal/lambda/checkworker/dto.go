@@ -75,6 +75,25 @@ func mapNRProductCategory(c amazon.Category) newrelease.ProductCategory {
 	}
 }
 
+// toNewReleasePaperResult は紙書籍ページ結果へ affiliate tag 付き URL を再構築して詰め直す（SPECIFICATION.md 13.4）。
+func toNewReleasePaperResult(r amazon.FetchResult, partnerTag string) newrelease.PaperPageResult {
+	info := r.Info
+	return newrelease.PaperPageResult{
+		Category: mapNRProductCategory(r.Category),
+		Info: newrelease.PaperPageInfo{
+			ASIN:           info.ASIN,
+			Title:          info.Title,
+			URL:            amazon.ProductURL(info.ASIN, partnerTag),
+			PaperPrice:     info.PaperPrice,
+			ReleaseDate:    info.ReleaseDate,
+			HasReleaseDate: info.HasReleaseDate,
+			Contributors:   info.Contributors,
+		},
+		HTTPStatus:    r.HTTPStatus,
+		ResponseBytes: r.ResponseBytes,
+	}
+}
+
 // toNewReleaseSearchResult は IsKindle を形式表示でKindle版と確認できた候補だけ真とし（SPECIFICATION.md 13.4）、
 // 保存用 URL を構築する。
 func toNewReleaseSearchResult(r amazon.SearchResult, partnerTag string) newrelease.SearchResult {

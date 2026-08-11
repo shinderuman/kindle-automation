@@ -54,6 +54,15 @@ func (f newReleaseFetcher) FetchProduct(ctx context.Context, asin string) (newre
 	return toNewReleaseProductResult(r, f.partnerTag), nil
 }
 
+// FetchPaperPage はISBN候補の紙書籍ページを1回取得し新刊紙detail用結果へ変換する。
+func (f newReleaseFetcher) FetchPaperPage(ctx context.Context, asin string) (newrelease.PaperPageResult, error) {
+	r, err := f.client.FetchProduct(ctx, asin)
+	if err != nil {
+		return newrelease.PaperPageResult{}, err
+	}
+	return toNewReleasePaperResult(r, f.partnerTag), nil
+}
+
 type paperPageFetcher struct {
 	client *amazon.Client
 }

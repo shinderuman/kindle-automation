@@ -11,7 +11,7 @@ import (
 
 func TestRefreshVariableConfig_ReloadsThresholdsKeywordsAndGist(t *testing.T) {
 	store := storage.NewMemStore()
-	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g1","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50},"NewReleaseChecker":{"Enabled":true,"GistID":"gn","GistFilename":"new.md"},"PaperToKindleChecker":{"Enabled":true,"GistID":"gp","GistFilename":"paper.md"}}`)
+	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g1","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50},"NewReleaseChecker":{"Enabled":true,"GistID":"gn","GistFilename":"new.md","MinPrice":221},"PaperToKindleChecker":{"Enabled":true,"GistID":"gp","GistFilename":"paper.md"}}`)
 	store.Seed("excluded_title_keywords.json", `["ボックス","セット"]`)
 	w := &Worker{
 		store:                    store,
@@ -34,11 +34,14 @@ func TestRefreshVariableConfig_ReloadsThresholdsKeywordsAndGist(t *testing.T) {
 	if len(w.NRDeps.Config.ExcludedKeywords) != 2 {
 		t.Errorf("ExcludedKeywords = %v, want 2 items", w.NRDeps.Config.ExcludedKeywords)
 	}
+	if w.NRDeps.Config.MinPrice != 221 {
+		t.Errorf("MinPrice = %v, want 221", w.NRDeps.Config.MinPrice)
+	}
 	if w.GistDeps.Settings.Sale.ID != "g1" || w.GistDeps.Settings.NewRelease.ID != "gn" || w.GistDeps.Settings.PaperToKindle.ID != "gp" {
 		t.Errorf("Gist settings not mapped: %+v", w.GistDeps.Settings)
 	}
 
-	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g2","GistFilename":"sale.md","SaleThreshold":200,"PointPercent":20,"PriceChangeAmount":80},"NewReleaseChecker":{"Enabled":true,"GistID":"gn2","GistFilename":"new.md"},"PaperToKindleChecker":{"Enabled":true,"GistID":"gp2","GistFilename":"paper.md"}}`)
+	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g2","GistFilename":"sale.md","SaleThreshold":200,"PointPercent":20,"PriceChangeAmount":80},"NewReleaseChecker":{"Enabled":true,"GistID":"gn2","GistFilename":"new.md","MinPrice":300},"PaperToKindleChecker":{"Enabled":true,"GistID":"gp2","GistFilename":"paper.md"}}`)
 	store.Seed("excluded_title_keywords.json", `["完結"]`)
 
 	if err := w.refreshVariableConfig(context.Background()); err != nil {
@@ -55,6 +58,9 @@ func TestRefreshVariableConfig_ReloadsThresholdsKeywordsAndGist(t *testing.T) {
 	}
 	if len(w.NRDeps.Config.ExcludedKeywords) != 1 || w.NRDeps.Config.ExcludedKeywords[0] != "完結" {
 		t.Errorf("ExcludedKeywords after reload = %v, want [完結]", w.NRDeps.Config.ExcludedKeywords)
+	}
+	if w.NRDeps.Config.MinPrice != 300 {
+		t.Errorf("MinPrice after reload = %v, want 300 (warm reload)", w.NRDeps.Config.MinPrice)
 	}
 	if w.GistDeps.Settings.Sale.ID != "g2" {
 		t.Errorf("Gist Sale ID after reload = %v, want g2 (warm reload)", w.GistDeps.Settings.Sale.ID)

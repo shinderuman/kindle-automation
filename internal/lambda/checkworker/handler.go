@@ -50,6 +50,8 @@ func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error
 		return newrelease.HandleNewReleaseResult(ctx, w.NRDeps, j)
 	case job.KindNewReleaseDetail:
 		return newrelease.HandleNewReleaseDetail(ctx, w.NRDeps, j)
+	case job.KindNewReleasePaperDetail:
+		return newrelease.HandleNewReleasePaperDetail(ctx, w.NRDeps, j)
 	case job.KindPaperToKindleCheck:
 		return papertokindle.HandlePaperToKindleCheck(ctx, w.PaperDeps, j)
 	case job.KindPaperToKindleDetail:

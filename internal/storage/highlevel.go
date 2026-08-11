@@ -39,6 +39,11 @@ func (s *BookFileStore) Upsert(ctx context.Context, b book.KindleBook) error {
 	return UpsertBookRecord(ctx, s.store, s.key, BookRecord{Book: b})
 }
 
+// UpsertChanged は Amazon 由来 field の追加・変更有無を返す ASIN 単位の冪等 upsert（SPECIFICATION.md 13.4/15）。
+func (s *BookFileStore) UpsertChanged(ctx context.Context, b book.KindleBook) (bool, error) {
+	return UpsertBookRecordChanged(ctx, s.store, s.key, BookRecord{Book: b})
+}
+
 // Exists は対象 ASIN が object 内に存在するかを返す（SPECIFICATION.md 9.1 の存在必須 object 前提）。
 func (s *BookFileStore) Exists(ctx context.Context, asin string) (bool, error) {
 	return bookExists(ctx, s.store, s.key, asin)

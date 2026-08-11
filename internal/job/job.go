@@ -31,6 +31,8 @@ const (
 	KindNewReleaseResult Kind = "new_release_result"
 	// KindNewReleaseDetail は候補の商品ページで発売日・価格・Kindle版確認を行うジョブ（SPECIFICATION.md 7.3）。
 	KindNewReleaseDetail Kind = "new_release_detail"
+	// KindNewReleasePaperDetail はISBN候補の紙書籍ページを取得し paper_books_asins.json へ冪等upsertするジョブ（SPECIFICATION.md 7.3, 13.4）。
+	KindNewReleasePaperDetail Kind = "new_release_paper_detail"
 	// KindPaperToKindleCheck は紙書籍ページで Kindle 版スウォッチを確認するジョブ（SPECIFICATION.md 7.3）。
 	KindPaperToKindleCheck Kind = "paper_to_kindle_check"
 	// KindPaperToKindleDetail は Kindle 版候補の商品ページで検証・保存を行うジョブ（SPECIFICATION.md 7.3）。
@@ -138,6 +140,13 @@ func (j Job) Validate() error {
 		if j.Target.AuthorName == "" {
 			return ErrMissingField
 		}
+	case KindNewReleasePaperDetail:
+		if err := requireASIN(j.Target.ASIN); err != nil {
+			return err
+		}
+		if j.Target.AuthorName == "" {
+			return ErrMissingField
+		}
 	case KindPaperToKindleCheck:
 		if err := requireASIN(j.Target.ASIN); err != nil {
 			return err
@@ -181,7 +190,7 @@ func MessageGroup(k Kind) string {
 // AmazonRequests は1起動でAmazonへアクセスする回数（0 または 1）を返す（SPECIFICATION.md 7.3）。
 func AmazonRequests(k Kind) int {
 	switch k {
-	case KindSaleCheck, KindNewReleaseSearch, KindNewReleaseDetail, KindPaperToKindleCheck, KindPaperToKindleDetail:
+	case KindSaleCheck, KindNewReleaseSearch, KindNewReleaseDetail, KindNewReleasePaperDetail, KindPaperToKindleCheck, KindPaperToKindleDetail:
 		return 1
 	default:
 		return 0

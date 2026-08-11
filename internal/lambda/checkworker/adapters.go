@@ -36,6 +36,11 @@ func (s paperBooksStore) PaperBook(ctx context.Context, paperASIN string) (book.
 	return s.inner.Book(ctx, paperASIN)
 }
 
+// UpsertChanged は新刊ISBN候補による paper_books への冪等upsertと変更検知を newrelease.PaperCandidateStore へ適合させる bridge。
+func (s paperBooksStore) UpsertChanged(ctx context.Context, b book.KindleBook) (bool, error) {
+	return s.inner.UpsertChanged(ctx, b)
+}
+
 type paperKnownStateQuerier struct{ inner *storage.KnownStateQuerier }
 
 // KnownState は storage.KnownState を papertokindle.KnownState へ変換する Papertokindle.KnownStateQuerier bridge。

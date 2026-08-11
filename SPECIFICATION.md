@@ -227,11 +227,12 @@ Amazon系の1件が再試行中は、`amazon-requests`の後続ジョブを待�
 | `new_release_search` | `author_name` |
 | `new_release_result` | `asin`、`author_name`と型付き`product` |
 | `new_release_detail` | `asin`、`author_name` |
+| `new_release_paper_detail` | `asin`（ISBN）、`author_name` |
 | `paper_to_kindle_check` | `asin` |
 | `paper_to_kindle_detail` | Kindle版の`asin`、紙書籍の`source_asin` |
 | `gist_update` | `gist_type` |
 
-`new_release_result`の`product`は検索HTMLから抽出したASIN、タイトル、URL、Kindle価格、発売日、作者表記、商品種別だけを持つ。`MaxPrice`、`CreatedAt`、通知状態等の管理値を入れない。商品種別`item_type`の正規値は小文字`kindle`のみとし、検索結果でKindle版と確定できた候補だけがこの値を持つ。未知・非Kindle候補は`new_release_result`へ進めず`new_release_detail`へ回すため、`item_type`へ推測値や空文字を入れない。
+`new_release_result`の`product`は検索HTMLから抽出したASIN、タイトル、URL、Kindle価格、発売日、作者表記、商品種別だけを持つ。`MaxPrice`、`CreatedAt`、通知状態等の管理値を入れない。商品種別`item_type`の正規値は小文字`kindle`のみとし、検索結果でKindle版と確定できた候補だけがこの値を持つ。未知・非Kindle候補は`new_release_result`へ進めないため、`item_type`へ推測値や空文字を入れない。検索結果の候補ASINが10〜13桁の数字だけの紙書籍ISBNの場合はKindle候補とせず、`new_release_paper_detail`（§13.4）へ回す。ISBN候補は`new_release_result`の`product`に含めない。
 
 メッセージへS3レコード全体を入れない。workerはASINまたは作者名をキーに、処理開始時の最新S3レコードを読み直す。手動削除済みの対象は再追加せず、`target_removed`として正常終了する。
 
@@ -248,11 +249,12 @@ Amazon系の1件が再試行中は、`amazon-requests`の後続ジョブを待�
 | `new_release_search` | `amazon-requests` | 検索ページ1回 | 作者の候補ASIN抽出 |
 | `new_release_result` | `amazon-requests` | 0回 | 必須項目が揃った検索候補の判定・保存 |
 | `new_release_detail` | `amazon-requests` | 商品ページ1回 | 候補の発売日、価格、Kindle版確認 |
+| `new_release_paper_detail` | `amazon-requests` | 商品ページ1回 | ISBN紙書籍候補の検証と`paper_books_asins.json`への保存 |
 | `paper_to_kindle_check` | `amazon-requests` | 紙書籍ページ1回 | Kindle版スウォッチ確認 |
 | `paper_to_kindle_detail` | `amazon-requests` | Kindle商品ページ1回 | Kindle版候補の検証と保存 |
 | `gist_update` | `external-updates` | 0回 | Sale、Author、Paper-to-Kindle Gistの再生成 |
 
-検索結果で必須項目が揃った候補は候補ごとに`new_release_result`、不足する候補は候補ごとに`new_release_detail`を投入する。検索job自身は候補のS3保存と商品通知を行わない。紙書籍ページでKindle版を検出した場合も同様に`paper_to_kindle_detail`を投入する。
+検索結果で必須項目が揃った候補は候補ごとに`new_release_result`、不足する候補は候補ごとに`new_release_detail`を投入する。検索job自身は候補のS3保存と商品通知を行わない。検索候補ASINが10〜13桁の数字だけのISBNの場合は`new_release_result`にも`new_release_detail`にも入れず、候補ごとに`new_release_paper_detail`を投入して紙書籍候補として検証する（§13.4）。ISBN候補を候補段階で除外しない。紙書籍ページでKindle版を検出した場合も同様に`paper_to_kindle_detail`を投入する。
 
 `schedule-checks`は`SendMessageBatch`の10件単位を順番に送信し、並列送信しない。セール周回では全`sale_check`の送信成功後にだけ`sale_finalize`を送る。batch内に失敗entryが1件でもあればdispatchを失敗させ、同じ`cycle_id`と`job_id`でScheduler再試行を受ける。
 
@@ -300,7 +302,7 @@ S3の複数object更新をtransactionとして扱わない。job再実行時は�
 | オブジェクト | 用途 | 新システムの扱い |
 |---|---|---|
 | `authors.json` | 新刊対象作者と最新作 | 読み書きする |
-| `paper_books_asins.json` | Kindle版待ちの紙書籍 | 読み書きする |
+| `paper_books_asins.json` | Kindle版待ちの紙書籍 | 読み書きする。新刊検索のISBN候補（§13.4）もここへupsertする |
 | `unprocessed_asins.json` | セール対象Kindle書籍 | 読み書きする |
 | `excluded_title_keywords.json` | 新刊除外語 | 読み取る |
 | `notified_asins.json` | 新刊通知履歴、既存発売日通知の入力 | 読み書きする |
@@ -633,15 +635,16 @@ https://www.amazon.co.jp/s?k={URLエンコードした作者名}&i=digital-text&
 次を候補から除外する。
 
 - タイトル、URL、ASINを取得できない
-- ASINが10〜13桁の数字だけで構成される紙書籍ISBN
-- `notified_asins.json`に同じASINがある
+- `notified_asins.json`に同じASINがある（ISBN候補は通知履歴の有無を確認しない）
 - タイトルに`excluded_title_keywords.json`の文字列を含む
 - タイトルに`\d{4}年\d{1,2}月`を含む
 - 検索結果の作者表記が対象作者と一致しない
 
+ASINが10〜13桁の数字だけで構成される紙書籍ISBN候補は、ここで除外せず`new_release_paper_detail`へ回す（§13.4）。ISBN候補は`notified_asins.json`の通知履歴確認対象外とし、重複除外は`paper_books_asins.json`のASIN単位upsertで冪等に行う。
+
 作者名の比較では、全角ASCIIを半角へ変換し、全角・半角スペースを除去した正規化名同士を比較する。contributor 表記は役割（`(著)`等）や販売者・日付が混入し得るため、各 contributor ごとに役割表記を除去して正規化した完全名を作り、対象作者の正規化名と完全一致する contributor が1つでもあれば一致とする。空白で分解した姓・名トークン単位の部分一致は見逃しや誤検出を生むため行わない（例: contributor`山田 太郎`を`山田`/`太郎`に分けて対象`山田次郎`へ部分一致させることはしない）。
 
-UserScriptの`MIN_PRICE`による221円以下の除外と、直近7日間という判定窓は使用しない。これらはGo側の新刊管理仕様に存在しないためである。
+UserScriptの直近7日間という判定窓は使用しない。これはGo側の新刊管理仕様に存在しないためである。UserScriptの`MIN_PRICE`に相当する最低価格除外は、`checker_configs.json`の`NewReleaseChecker.MinPrice`を用いる（§13.4, §16）。検索段階でのMinPriceによる事前除外は必須ではなく、Kindle詳細確認と紙書籍詳細確認の両方で最終保証する。
 
 ### 13.4 商品詳細確認
 
@@ -665,6 +668,26 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 - 除外キーワードと年月タイトル条件に該当しない
 
 商品詳細でも発売日を取得できない場合は解析失敗として再試行する。
+
+#### Kindle候補のMinPrice除外
+
+取得できたKindle価格（`CurrentPrice`）が`NewReleaseChecker.MinPrice`以下の場合、候補を`min_price_excluded`として保存・通知せず終了する。`MinPrice=221`なら220円と221円を除外し、222円以上を通す。MinPrice判定は商品詳細確認と検索結果判定（§13.3）の共通の入口で行い、`new_release_result`と`new_release_detail`のどちら経由でも1箇所で保証する。検索段階での事前除外は必須ではなく、ここを最終保証とする。価格を取得できなかった候補（0円）はMinPrice除外の対象にせず、既存の価格判定へ進める。
+
+#### ISBN紙書籍候補の詳細確認（`new_release_paper_detail`）
+
+検索候補ASINが10〜13桁の数字だけのISBNの場合は紙書籍候補として商品ページを最大1回取得し、次を確認する。
+
+- 要求したASINの商品ページである
+- タイトルを取得できる（空・未取得は再試行可能とする）
+- 発売日を取得できる（未取得は再試行可能とする）
+- 作者が一致する（不一致は除外）
+- 除外キーワードと年月タイトル条件に該当しない（該当は除外）
+
+紙書籍価格の取得を試みる。取得できた場合は`CurrentPrice`と`MaxPrice`をその価格へ設定し、その価格が`MinPrice`以下なら`min_price_excluded`として保存・Gist投入せず終了する。取得できなかった場合はunknownとして両者を0のまま保存し、価格0はMinPrice除外の対象にしない。紙書籍価格の本来の初期化は既存のPaper-to-Kindle Scheduler/Checker（§14）へ委ねる。
+
+ISBN紙書籍候補は`paper_books_asins.json`へ既存schema・ASIN単位・既保存ルールでupsertする。手動レコード・未知フィールド・`CreatedAt`・ETag競合時merge・重複排除・並び順・手動削除復活禁止の既存契約（§9.2, §9.4, §9.5）を維持する。ISBN候補を`notified_asins.json`、`upcoming_asins.json`、`unprocessed_asins.json`へ入れず、`authors.json`の`LatestRelease`を更新しない。Kindle版スウォッチ検出後の振る舞いは既存のPaper-to-Kindle Scheduler/Checker（§14）へ委ねる。
+
+`paper_books_asins.json`へ内容が実際に追加・変更された場合だけ、Paper-to-Kindle用`gist_update`を決定的なIDで投入する（§15）。同一内容の重複upsertではGist更新jobを投入せず、不要なGist更新を増やさない。
 
 ### 13.5 作者の最新作更新
 
@@ -752,7 +775,7 @@ Amazon内検索によるKindle候補探索は行わない。UserScriptと同様�
 |---|---|---|
 | Sale | `sale_finalize`が`gist_update`を投入 | 発売日降順の`unprocessed_asins.json` |
 | New Release | accepted candidate処理後に`gist_update`を投入 | 作者、作者URL、最新発売日、最新作、最新作URLの表 |
-| Paper-to-Kindle | 紙書籍価格を取得できたcheck成功時と候補検出後のdetail成功時に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
+| Paper-to-Kindle | 紙書籍価格を取得できたcheck成功時、候補検出後のdetail成功時、ISBN紙書籍候補の`new_release_paper_detail`成功かつ`paper_books_asins.json`へ追加・変更があった場合に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
 
 Gist IDとfilenameは既存`checker_configs.json`の値を使用する。`gist_update`は実行時点のS3全体からMarkdownを再生成する。GitHub API失敗は当該Gistジョブのエラーとして再試行し、先に完了したS3更新は巻き戻さない。
 
@@ -778,7 +801,7 @@ Author Gistは次の形式を使用する。
 
 ## 16. Checker設定
 
-既存`checker_configs.json`の形は変更しない。新システムで使用するフィールドは次のとおりとする。
+`checker_configs.json`は新システム用の小さな業務設定だけを持つ。新システムで使用するフィールドは次のとおりとする。
 
 | 設定 | 使用 |
 |---|---|
@@ -788,20 +811,20 @@ Author Gistは次の形式を使用する。
 | `SaleChecker.SaleThreshold` | 価格差とポイント数に使用 |
 | `SaleChecker.PointPercent` | ポイント還元率に使用 |
 | `SaleChecker.PriceChangeAmount` | 価格変動通知に使用 |
+| `NewReleaseChecker.MinPrice` | 新刊候補（Kindle・紙）の最低価格除外に使用（§13.4）。必須・正値 |
 
-次のPA API・旧スロット向けフィールドはJSONに残してよいが、新システムでは読み取っても使用しない。
+次のPA API・旧スロット向けフィールドは新システムで使用しないため、移行（§20.5）で削除する。JSONへ残さない。
 
-- `ReportFailure`
-- `ExecutionIntervalMinutes`
-- `CycleDays`
-- `GetItemsPaapiRetryCount`
-- `GetItemsInitialRetrySeconds`
-- `SearchItemsPaapiRetryCount`
-- `SearchItemsInitialRetrySeconds`
+- top-level `ReportFailure`
+- `SaleChecker.ExecutionIntervalMinutes`、`SaleChecker.GetItemsPaapiRetryCount`、`SaleChecker.GetItemsInitialRetrySeconds`
+- `NewReleaseChecker.CycleDays`、`NewReleaseChecker.SearchItemsPaapiRetryCount`、`NewReleaseChecker.SearchItemsInitialRetrySeconds`、`NewReleaseChecker.GetItemsPaapiRetryCount`、`NewReleaseChecker.GetItemsInitialRetrySeconds`
+- `PaperToKindleChecker.CycleDays`、`PaperToKindleChecker.SearchItemsPaapiRetryCount`、`PaperToKindleChecker.SearchItemsInitialRetrySeconds`、`PaperToKindleChecker.GetItemsPaapiRetryCount`、`PaperToKindleChecker.GetItemsInitialRetrySeconds`
+
+`NewReleaseChecker.MinPrice`は必須とし、0・負値・未設定は起動時validationで拒否しデフォルト値で補完しない。decodeはJSONへ旧フィールドが残っていても許容するが、config型へは現れない。
 
 周期はEventBridge Scheduler、再試行はSQS redrive設定を正とする。workerエラーを`ReportFailure=false`で成功に変換してはならない。
 
-起動時に、使用する閾値が正の値であること、EnabledなCheckerにGist設定があることを検証する。不正値をデフォルト値で補完しない。
+起動時に、使用する閾値が正の値であること、`NewReleaseChecker.MinPrice`が正の値であること、EnabledなCheckerにGist設定があることを検証する。不正値をデフォルト値で補完しない。
 
 ## 17. 通知
 
@@ -1006,15 +1029,19 @@ MaxPrice = CurrentPrice
 前提: 対象S3 bucket の Versioning が `Enabled` であること。`Suspended` や未設定の場合は本番切り替えを行わない（§20.4 の version 指定 rollback が成立しないため）。Versioning=Enabled なら backup prefix への object copy は作らず、切り替え直前の各 object の現時点 VersionId を記録して rollback 基準にする。
 
 1. 新しいSAMリソースをScheduler無効状態でデプロイする
-2. bucket の Versioning が `Enabled` であることを確認する。Enabled でなければ切り替えを中止する。Enabled なら対象 object（`authors.json`、`paper_books_asins.json`、`unprocessed_asins.json`、`upcoming_asins.json`、`notified_asins.json`）の現時点 VersionId を記録し、backup prefix への copy は行わない
+2. bucket の Versioning が `Enabled` であることを確認する。Enabled でなければ切り替えを中止する。Enabled なら対象 object（`authors.json`、`paper_books_asins.json`、`unprocessed_asins.json`、`upcoming_asins.json`、`notified_asins.json`、`checker_configs.json`）の現時点 VersionId を記録し、backup prefix への copy は行わない
 3. 既存の新刊・セール・紙書籍CheckerのEventBridge triggerを無効にする
-4. `MaxPrice`初期化パッチをdry-runし、変更件数を確認する
-5. パッチを実行し、JSON schema、ASIN集合、価格差分を再検証する
-6. 既知HTML fixtureを使って新Lambdaを確認する
-7. 明示的な手動invokeでSQSから1件ずつ疎通確認する
-8. SQS event source mappingを有効にする
-9. 3つのSchedulerを有効にする
-10. 既存`release-notifier`が有効なことを確認する
+4. `checker_configs.json`移行パッチ（§20.5）をdry-runし、削除件数とMinPrice追加有無を確認する
+5. 移行パッチを`-apply`で実行し、`NewReleaseChecker.MinPrice`追加と旧フィールド削除を再検証する
+6. `MaxPrice`初期化パッチをdry-runし、変更件数を確認する
+7. パッチを実行し、JSON schema、ASIN集合、価格差分を再検証する
+8. 既知HTML fixtureを使って新Lambdaを確認する
+9. 明示的な手動invokeでSQSから1件ずつ疎通確認する
+10. SQS event source mappingを有効にする
+11. 3つのSchedulerを有効にする
+12. 既存`release-notifier`が有効なことを確認する
+
+旧3 Checker停止（step3）後かつ新Scheduler有効化（step11）前の間に、`checker_configs.json`移行（step4-5）を行う。新Schedulerは`NewReleaseChecker.MinPrice`必須で起動するため、移行前に有効化すると起動validationに失敗する。
 
 ### 20.4 ロールバック
 
@@ -1026,6 +1053,18 @@ rollback は §20.3 step2 で記録した VersionId を基準とする。切り�
 4. 新システムだけが変更した部分のみ、記録した旧 version の内容へ選択的に戻す。切り替え後に手動で追加・変更・削除されたレコードは保持する
 
 S3 backupを配列全体で無条件に上書きしてロールバックしない。Versioning が `Enabled` でない場合は version 指定での選択的復元ができないため、切り替えへ進まない（§20.3 前提）。
+
+### 20.5 Checker設定移行
+
+`scripts/migrate-checker-config`は`checker_configs.json`から§16の旧フィールドを削除し、`NewReleaseChecker.MinPrice`が未設定なら`221`を追加する一回限りの移行CLIである。未知のフィールド・未知のChecker sectionは保持する。
+
+- デフォルトはdry-run。`-apply`を明示指定した場合だけS3へ書き込む（AGENTS.md 13）
+- 書込は取得時ETagの`If-Match`条件付きで行い、競合時は失敗させる
+- 移行後の本文が`DecodeCheckerConfigs`+`Validate`へ通ることを書込前に検証する
+- MinPriceが既に存在する場合は上書きせず、既存値を維持する（冪等）
+- 既に移行済みの本文へ再実行しても変更しない（冪等）
+
+今回はAWS apply/deployを実行しない。CLI本体と単体テストの提供のみとし、実適用は§20.3の手順内で行う。
 
 ## 21. PoCで確認済みの事実
 
@@ -1051,12 +1090,17 @@ S3 backupを配列全体で無条件に上書きしてロールバックしな�
 - 複数セール条件を同時に列挙する
 - `MaxPrice`、`CurrentPrice`、初回価格の更新
 - 値上がり・値下がりとセール通知の排他
-- 作者名正規化、除外キーワード、年月タイトル、ISBN除外
+- 作者名正規化、除外キーワード、年月タイトル
 - 通知履歴の将来発売分だけを残す処理
 - 紙書籍とKindle版の発売日一致
 - Book、Authorの重複排除と並び順
 - `cycle_id`、`job_id`の決定性
 - SQS job schema validation
+- ISBN候補が`new_release_paper_detail`へ回り、Kindle候補経路へ入らない
+- 紙書籍候補の詳細確認（ASIN・タイトル・作者・発売日検証、価格0/未取得の保存）
+- MinPrice除外（Kindle候補と紙書籍候補の220/221除外・222通過、価格0は除外対象外）
+- `paper_books_asins.json`の変更検知によるPaper Gist投入と、未変更重複のスキップ
+- `checker_configs.json`設定対象形状、旧フィールド削除、MinPrice必須validation
 
 ### 22.2 HTML fixtureテスト
 
@@ -1095,7 +1139,10 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - 検索・紙書籍確認から後続ジョブを投入する
 - 新刊検索job自身がS3保存と商品通知を行わない
 - 検索項目が揃う候補は`new_release_result`、不足候補は`new_release_detail`になる
+- ISBN候補が`new_release_paper_detail`へ投入され、商品ページを最大1回取得する
+- ISBN紙書籍候補が`notified`/`upcoming`/`unprocessed`へ入らず`authors.LatestRelease`を更新しない
 - S3変更後のGist更新を0リクエストの別ジョブとして再試行できる
+- `checker_configs.json`移行のdry-run/apply/`If-Match`回帰テスト
 - retryable errorをLambdaエラーとして返す
 - terminal resultを再試行せず対象リストへ残す
 - S3保存失敗時に商品通知しない

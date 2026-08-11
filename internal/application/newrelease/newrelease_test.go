@@ -34,6 +34,20 @@ func detailJob(asin, author string) job.Job {
 		Target: job.Target{ASIN: asin, AuthorName: author}}
 }
 
+func paperDetailJob(asin, author string) job.Job {
+	return job.Job{Version: job.Version, JobID: "p", Kind: job.KindNewReleasePaperDetail,
+		CheckType: job.CheckNewRelease, CycleID: "nr:c",
+		Target: job.Target{ASIN: asin, AuthorName: author}}
+}
+
+func paperPaperPageInfo(asin string) PaperPageInfo {
+	return PaperPageInfo{
+		ASIN: asin, Title: "紙タイトル", URL: "https://u/" + asin,
+		PaperPrice: book.NewPrice(900), ReleaseDate: futureDate, HasReleaseDate: true,
+		Contributors: []string{"海李"},
+	}
+}
+
 type fakeSearchFetcher struct {
 	result SearchResult
 	err    error
@@ -54,6 +68,35 @@ type fakeProductFetcher struct {
 func (f *fakeProductFetcher) FetchProduct(_ context.Context, _ string) (ProductResult, error) {
 	f.calls++
 	return f.result, f.err
+}
+
+type fakePaperPageFetcher struct {
+	result PaperPageResult
+	err    error
+	calls  int
+}
+
+func (f *fakePaperPageFetcher) FetchPaperPage(_ context.Context, _ string) (PaperPageResult, error) {
+	f.calls++
+	return f.result, f.err
+}
+
+type fakePaperCandidateStore struct {
+	changed   bool
+	upserts   []book.KindleBook
+	upsertErr error
+	changeFor map[string]bool
+}
+
+func (s *fakePaperCandidateStore) UpsertChanged(_ context.Context, b book.KindleBook) (bool, error) {
+	if s.upsertErr != nil {
+		return false, s.upsertErr
+	}
+	s.upserts = append(s.upserts, b)
+	if s.changeFor != nil {
+		return s.changeFor[b.ASIN], nil
+	}
+	return s.changed, nil
 }
 
 type fakeNotifiedStore struct {
@@ -134,15 +177,17 @@ func (n *fakeNotifier) Notify(_ context.Context, message string) error {
 
 func baseDeps() Dependencies {
 	return Dependencies{
-		SearchFetcher:  &fakeSearchFetcher{},
-		ProductFetcher: &fakeProductFetcher{},
-		NotifiedStore:  &fakeNotifiedStore{},
-		UpcomingStore:  &fakeUpcomingStore{},
-		AuthorStore:    &fakeAuthorStore{},
-		Enqueuer:       &fakeEnqueuer{},
-		Notifier:       &fakeNotifier{},
-		Config:         Config{ExcludedKeywords: []string{"除外"}},
-		Clock:          fixedClock,
+		SearchFetcher:       &fakeSearchFetcher{},
+		ProductFetcher:      &fakeProductFetcher{},
+		PaperPageFetcher:    &fakePaperPageFetcher{},
+		NotifiedStore:       &fakeNotifiedStore{},
+		UpcomingStore:       &fakeUpcomingStore{},
+		AuthorStore:         &fakeAuthorStore{},
+		PaperCandidateStore: &fakePaperCandidateStore{},
+		Enqueuer:            &fakeEnqueuer{},
+		Notifier:            &fakeNotifier{},
+		Config:              Config{ExcludedKeywords: []string{"除外"}},
+		Clock:               fixedClock,
 	}
 }
 
@@ -289,7 +334,6 @@ func TestHandleNewReleaseSearch_DoesNotSaveOrNotify(t *testing.T) {
 }
 
 func TestHandleNewReleaseSearch_SkipsExcludedCandidates(t *testing.T) {
-	isbn := completeHit("1234567890")
 	keyword := completeHit("B0KEYWORD01")
 	keyword.Title = "除外タイトル"
 	yearMonth := completeHit("B0YEARMONT1")
@@ -298,7 +342,7 @@ func TestHandleNewReleaseSearch_SkipsExcludedCandidates(t *testing.T) {
 	authorMismatch.Contributors = []string{"別人"}
 	missing := completeHit("B0MISSING01")
 	missing.URL = ""
-	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn, keyword, yearMonth, authorMismatch, missing}}}
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{keyword, yearMonth, authorMismatch, missing}}}
 	deps := baseDeps()
 	deps.SearchFetcher = fetcher
 
@@ -1061,5 +1105,289 @@ func TestApplyCandidate_AuthorStoreFailureReturnsError(t *testing.T) {
 	}
 	if oc.ErrorType != errorTypeAuthorStore {
 		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeAuthorStore)
+	}
+}
+
+func TestHandleNewReleaseSearch_RoutesISBNCandidateToPaperDetail(t *testing.T) {
+	isbn := completeHit("1234567890123")
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+
+	if _, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李")); err != nil {
+		t.Fatalf("HandleNewReleaseSearch: %v", err)
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindNewReleasePaperDetail {
+		t.Fatalf("ISBN candidate must enqueue new_release_paper_detail, got %+v", enq.jobs)
+	}
+	if enq.jobs[0].Target.ASIN != "1234567890123" {
+		t.Errorf("paper detail ASIN = %q, want ISBN", enq.jobs[0].Target.ASIN)
+	}
+}
+
+func TestHandleNewReleaseSearch_ISBNCandidateSkipsNotifiedCheck(t *testing.T) {
+	isbn := completeHit("1234567890")
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.NotifiedStore.(*fakeNotifiedStore).exists = true
+
+	if _, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李")); err != nil {
+		t.Fatalf("HandleNewReleaseSearch: %v", err)
+	}
+	if got := len(deps.Enqueuer.(*fakeEnqueuer).jobs); got != 1 {
+		t.Errorf("ISBN candidate must still enqueue paper detail when notified exists, got %d", got)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_FetchesOnceAndUpsertsPaperBook(t *testing.T) {
+	fetcher := &fakePaperPageFetcher{result: PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}}
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher = fetcher
+	deps.PaperCandidateStore = store
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	if fetcher.calls != 1 {
+		t.Errorf("paper page fetch calls = %d, want 1", fetcher.calls)
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("paper upsert count = %d, want 1", len(store.upserts))
+	}
+	got := store.upserts[0]
+	if got.CurrentPrice.Yen() != 900 || got.MaxPrice.Yen() != 900 {
+		t.Errorf("paper price not set as CurrentPrice=MaxPrice: %+v", got)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_TerminalCasesReturnNil(t *testing.T) {
+	cases := []struct {
+		name string
+		cat  ProductCategory
+		info PaperPageInfo
+	}{
+		{name: "not_found", cat: ProductNotFound},
+		{name: "asin_mismatch", cat: ProductOK, info: PaperPageInfo{ASIN: "9999999999", Title: "T", HasReleaseDate: true, Contributors: []string{"海李"}}},
+		{name: "author_mismatch", cat: ProductOK, info: PaperPageInfo{ASIN: "1234567890", Title: "T", HasReleaseDate: true, Contributors: []string{"別人"}}},
+		{name: "excluded_keyword", cat: ProductOK, info: PaperPageInfo{ASIN: "1234567890", Title: "除外タイトル", HasReleaseDate: true, Contributors: []string{"海李"}}},
+		{name: "excluded_year_month", cat: ProductOK, info: PaperPageInfo{ASIN: "1234567890", Title: "2026年8月号", HasReleaseDate: true, Contributors: []string{"海李"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := baseDeps()
+			deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: tc.cat, Info: tc.info}
+			if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+				t.Fatalf("terminal must return nil: %v", err)
+			}
+			if len(deps.PaperCandidateStore.(*fakePaperCandidateStore).upserts) != 0 {
+				t.Errorf("terminal must not upsert paper book")
+			}
+		})
+	}
+}
+
+func TestHandleNewReleasePaperDetail_EmptyTitleIsRetryable(t *testing.T) {
+	info := PaperPageInfo{ASIN: "1234567890", Title: "", HasReleaseDate: true, Contributors: []string{"海李"}}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: info}
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err == nil {
+		t.Fatal("empty title must be retryable error")
+	}
+}
+
+func TestHandleNewReleasePaperDetail_DateUnavailableIsRetryable(t *testing.T) {
+	info := PaperPageInfo{ASIN: "1234567890", Title: "T", HasReleaseDate: false, Contributors: []string{"海李"}}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: info}
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err == nil {
+		t.Fatal("release date unavailable must be retryable error")
+	}
+}
+
+func TestHandleNewReleasePaperDetail_PriceUnknownSavesZeroAndEnqueuesGistOnChange(t *testing.T) {
+	info := paperPaperPageInfo("1234567890")
+	info.PaperPrice = book.UnknownPrice()
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: info}
+	deps.PaperCandidateStore = store
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	got := store.upserts[0]
+	if got.CurrentPrice.Valid() || got.MaxPrice.Valid() {
+		t.Errorf("unknown paper price must save 0/0, got %+v", got)
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Target.GistType != "paper_to_kindle" {
+		t.Errorf("changed paper_books must enqueue paper gist, got %+v", enq.jobs)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_UnchangedSkipsGist(t *testing.T) {
+	store := &fakePaperCandidateStore{changed: false}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
+	deps.PaperCandidateStore = store
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	if len(store.upserts) != 1 {
+		t.Errorf("upsert still runs to keep idempotency, got %d", len(store.upserts))
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 0 {
+		t.Errorf("unchanged paper_books must not enqueue gist, got %+v", enq.jobs)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_DoesNotTouchKindleListsOrAuthors(t *testing.T) {
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
+	deps.PaperCandidateStore = store
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+		t.Errorf("paper detail must not upsert notified")
+	}
+	if len(deps.UpcomingStore.(*fakeUpcomingStore).upserts) != 0 {
+		t.Errorf("paper detail must not upsert upcoming")
+	}
+	if deps.Notifier.(*fakeNotifier).called {
+		t.Errorf("paper detail must not notify")
+	}
+	if deps.AuthorStore.(*fakeAuthorStore).gotAuthor != "" {
+		t.Errorf("paper detail must not update authors")
+	}
+}
+
+func TestHandleNewReleasePaperDetail_StoreFailureReturnsError(t *testing.T) {
+	store := &fakePaperCandidateStore{upsertErr: errors.New("paper_books s3 conflict")}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
+	deps.PaperCandidateStore = store
+
+	oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+	if err == nil {
+		t.Fatal("store failure must return error")
+	}
+	if oc.ErrorType != errorTypePaperStore {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypePaperStore)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_MinPriceExcludesPaperPriceAtOrBelow(t *testing.T) {
+	cases := []struct {
+		name     string
+		price    float64
+		excluded bool
+	}{
+		{name: "220は除外", price: 220, excluded: true},
+		{name: "221は除外", price: 221, excluded: true},
+		{name: "222は通過", price: 222, excluded: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := paperPaperPageInfo("1234567890")
+			info.PaperPrice = book.NewPrice(tc.price)
+			store := &fakePaperCandidateStore{changed: true}
+			deps := baseDeps()
+			deps.Config.MinPrice = 221
+			deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: info}
+			deps.PaperCandidateStore = store
+
+			oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+			if err != nil {
+				t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+			}
+			if tc.excluded {
+				if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypeMinPriceExcluded {
+					t.Errorf("price %v must be excluded: %+v", tc.price, oc)
+				}
+				if len(store.upserts) != 0 {
+					t.Errorf("excluded paper must not upsert")
+				}
+			} else {
+				if len(store.upserts) != 1 {
+					t.Errorf("price %v must upsert paper book", tc.price)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyCandidate_MinPriceExcludesKindleAtOrBelow(t *testing.T) {
+	cases := []struct {
+		name     string
+		price    float64
+		excluded bool
+	}{
+		{name: "220は除外", price: 220, excluded: true},
+		{name: "221は除外", price: 221, excluded: true},
+		{name: "222は通過", price: 222, excluded: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			product := futureProduct("B0FX3X569X")
+			product.KindlePrice = tc.price
+			deps := baseDeps()
+			deps.Config.MinPrice = 221
+
+			oc, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", product))
+			if err != nil {
+				t.Fatalf("HandleNewReleaseResult: %v", err)
+			}
+			if tc.excluded {
+				if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypeMinPriceExcluded {
+					t.Errorf("Kindle price %v must be excluded: %+v", tc.price, oc)
+				}
+				if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+					t.Errorf("excluded Kindle must not upsert notified")
+				}
+			} else {
+				if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 1 {
+					t.Errorf("Kindle price %v must upsert notified", tc.price)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleNewReleasePaperDetail_RetryableCategoryReturnsErrRetryableFetch(t *testing.T) {
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductRetryable}
+
+	_, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+	if err == nil {
+		t.Fatal("retryable must return error")
+	}
+}
+
+func TestHandleNewReleasePaperDetail_GistJobIdIsDeterministicPerASIN(t *testing.T) {
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
+	deps.PaperCandidateStore = store
+
+	if _, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李")); err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 {
+		t.Fatalf("want 1 gist job, got %d", len(enq.jobs))
+	}
+	want := scheduling.JobID(string(job.KindGistUpdate), "nr:c", "paper_to_kindle:nr_paper:1234567890")
+	if enq.jobs[0].JobID != want {
+		t.Errorf("gist job_id = %q, want %q", enq.jobs[0].JobID, want)
 	}
 }

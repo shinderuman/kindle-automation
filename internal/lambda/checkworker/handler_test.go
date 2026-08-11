@@ -37,12 +37,14 @@ func (f *countSaleFetcher) FetchProduct(_ context.Context, _ string) (sale.Fetch
 	return f.result, nil
 }
 
-// countNRFetcher は新刊の SearchFetcher と ProductFetcher の両方を満たし呼出を個別カウントする。
+// countNRFetcher は新刊の SearchFetcher・ProductFetcher・PaperPageFetcher の3つを満たし呼出を個別カウントする。
 type countNRFetcher struct {
-	searchCalls   int
-	productCalls  int
-	searchResult  newrelease.SearchResult
-	productResult newrelease.ProductResult
+	searchCalls     int
+	productCalls    int
+	paperPageCalls  int
+	searchResult    newrelease.SearchResult
+	productResult   newrelease.ProductResult
+	paperPageResult newrelease.PaperPageResult
 }
 
 func (f *countNRFetcher) FetchSearch(_ context.Context, _ string) (newrelease.SearchResult, error) {
@@ -53,6 +55,11 @@ func (f *countNRFetcher) FetchSearch(_ context.Context, _ string) (newrelease.Se
 func (f *countNRFetcher) FetchProduct(_ context.Context, _ string) (newrelease.ProductResult, error) {
 	f.productCalls++
 	return f.productResult, nil
+}
+
+func (f *countNRFetcher) FetchPaperPage(_ context.Context, _ string) (newrelease.PaperPageResult, error) {
+	f.paperPageCalls++
+	return f.paperPageResult, nil
 }
 
 type countPaperFetcher struct {
@@ -74,6 +81,13 @@ func (f *countPaperFetcher) FetchKindlePage(_ context.Context, _ string) (papert
 
 const testCheckerConfig = `{"SaleChecker":{"Enabled":true,"GistID":"gist-test","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
 
+// nrPaperStoreStub は newrelease.PaperCandidateStore の no-op stub。
+type nrPaperStoreStub struct{}
+
+func (nrPaperStoreStub) UpsertChanged(context.Context, book.KindleBook) (bool, error) {
+	return false, nil
+}
+
 func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperFetcher, gistDeps gist.Dependencies) *Worker {
 	clock := func() time.Time { return time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC) }
 	store := storage.NewMemStore()
@@ -86,10 +100,12 @@ func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperF
 			Clock:   clock,
 		},
 		NRDeps: newrelease.Dependencies{
-			SearchFetcher:  nrF,
-			ProductFetcher: nrF,
-			Config:         newrelease.Config{},
-			Clock:          clock,
+			SearchFetcher:       nrF,
+			ProductFetcher:      nrF,
+			PaperPageFetcher:    nrF,
+			PaperCandidateStore: nrPaperStoreStub{},
+			Config:              newrelease.Config{},
+			Clock:               clock,
 		},
 		PaperDeps: papertokindle.Dependencies{
 			PaperPageFetcher:  paperF,
@@ -107,8 +123,9 @@ func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperF
 func retryableFetchers() (*countSaleFetcher, *countNRFetcher, *countPaperFetcher) {
 	return &countSaleFetcher{result: sale.FetchResult{Category: sale.CategoryRetryable}},
 		&countNRFetcher{
-			searchResult:  newrelease.SearchResult{Category: newrelease.SearchRetryable},
-			productResult: newrelease.ProductResult{Category: newrelease.ProductRetryable},
+			searchResult:    newrelease.SearchResult{Category: newrelease.SearchRetryable},
+			productResult:   newrelease.ProductResult{Category: newrelease.ProductRetryable},
+			paperPageResult: newrelease.PaperPageResult{Category: newrelease.ProductRetryable},
 		},
 		&countPaperFetcher{
 			paperResult:  papertokindle.PaperCheckResult{Category: papertokindle.CategoryRetryable},
@@ -125,6 +142,7 @@ func TestRoute_AmazonJobsCallFetcherExactlyOnce(t *testing.T) {
 		{name: "sale_check", kind: job.KindSaleCheck, target: job.Target{ASIN: "B0FX3X569X"}},
 		{name: "new_release_search", kind: job.KindNewReleaseSearch, target: job.Target{AuthorName: "海李"}},
 		{name: "new_release_detail", kind: job.KindNewReleaseDetail, target: job.Target{ASIN: "B0FX3X569X", AuthorName: "海李"}},
+		{name: "new_release_paper_detail", kind: job.KindNewReleasePaperDetail, target: job.Target{ASIN: "1234567890", AuthorName: "海李"}},
 		{name: "paper_to_kindle_check", kind: job.KindPaperToKindleCheck, target: job.Target{ASIN: "4434361325"}},
 		{name: "paper_to_kindle_detail", kind: job.KindPaperToKindleDetail, target: job.Target{ASIN: "B0FX3X569X", SourceASIN: "4434361325"}},
 	}
@@ -150,6 +168,9 @@ func TestRoute_AmazonJobsCallFetcherExactlyOnce(t *testing.T) {
 			case job.KindNewReleaseDetail:
 				assertCount(t, "nr.product", nrF.productCalls, 1)
 				assertCount(t, "nr.search", nrF.searchCalls, 0)
+			case job.KindNewReleasePaperDetail:
+				assertCount(t, "nr.paper", nrF.paperPageCalls, 1)
+				assertCount(t, "nr.product", nrF.productCalls, 0)
 			case job.KindPaperToKindleCheck:
 				assertCount(t, "paper", paperF.paperCalls, 1)
 				assertCount(t, "paper.kindle", paperF.kindleCalls, 0)

@@ -93,15 +93,17 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 			Clock: clock,
 		},
 		NRDeps: newrelease.Dependencies{
-			SearchFetcher:  nrFetcher,
-			ProductFetcher: nrFetcher,
-			NotifiedStore:  storage.NewBookFileStore(store, env.NotifiedKey),
-			UpcomingStore:  storage.NewBookFileStore(store, env.UpcomingKey),
-			AuthorStore:    storage.NewAuthorFileStore(store, env.AuthorsKey),
-			Enqueuer:       enqueuer,
-			Notifier:       notifier,
-			Config:         newrelease.Config{},
-			Clock:          clock,
+			SearchFetcher:       nrFetcher,
+			ProductFetcher:      nrFetcher,
+			PaperPageFetcher:    nrFetcher,
+			NotifiedStore:       storage.NewBookFileStore(store, env.NotifiedKey),
+			UpcomingStore:       storage.NewBookFileStore(store, env.UpcomingKey),
+			AuthorStore:         storage.NewAuthorFileStore(store, env.AuthorsKey),
+			PaperCandidateStore: paperBooksStore{inner: storage.NewBookFileStore(store, env.PaperBooksKey)},
+			Enqueuer:            enqueuer,
+			Notifier:            notifier,
+			Config:              newrelease.Config{},
+			Clock:               clock,
 		},
 		PaperDeps: papertokindle.Dependencies{
 			PaperPageFetcher:  paperPageFetcher{client: amazonClient},
@@ -183,6 +185,7 @@ func (w *Worker) refreshVariableConfig(ctx context.Context) error {
 	}
 	w.SaleDeps.Config.Thresholds = checker.SaleThresholds()
 	w.NRDeps.Config.ExcludedKeywords = excluded
+	w.NRDeps.Config.MinPrice = checker.NewReleaseMinPrice()
 	w.GistDeps.Settings = gistSettings(checker)
 	return nil
 }

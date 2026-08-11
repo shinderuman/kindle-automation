@@ -38,6 +38,8 @@ type NewReleaseCheckerConfig struct {
 	Enabled      bool   `json:"Enabled"`
 	GistID       string `json:"GistID"`
 	GistFilename string `json:"GistFilename"`
+	// MinPrice は新刊候補の最低価格（円）。Kindle/紙とも取得できた価格が MinPrice 以下なら候補から除外する（SPECIFICATION.md 13.4）。
+	MinPrice int `json:"MinPrice"`
 }
 
 // PaperToKindleCheckerConfig は紙書籍・Kindle版チェックの checker_configs.json 設定（SPECIFICATION.md 16）。
@@ -71,6 +73,9 @@ func (c CheckerConfigs) Validate() error {
 	if c.NewReleaseChecker.Enabled {
 		if err := requireGist("NewReleaseChecker", c.NewReleaseChecker.GistID, c.NewReleaseChecker.GistFilename); err != nil {
 			return err
+		}
+		if c.NewReleaseChecker.MinPrice <= 0 {
+			return fmt.Errorf("%w: NewReleaseChecker.MinPrice must be positive", ErrInvalidCheckerConfig)
 		}
 	}
 	if c.PaperToKindleChecker.Enabled {
@@ -110,6 +115,11 @@ func (c CheckerConfigs) SaleThresholds() domainsale.Thresholds {
 		PointPercent:      float64(c.SaleChecker.PointPercent),
 		PriceChangeAmount: float64(c.SaleChecker.PriceChangeAmount),
 	}
+}
+
+// NewReleaseMinPrice は NewReleaseChecker.MinPrice を返す（SPECIFICATION.md 16, 13.4）。
+func (c CheckerConfigs) NewReleaseMinPrice() int {
+	return c.NewReleaseChecker.MinPrice
 }
 
 // GistMeta は gist_type に対応する GistID と GistFilename を返す。
