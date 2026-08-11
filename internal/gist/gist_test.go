@@ -131,9 +131,7 @@ func TestUpdate_ReaderErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestUpdate_ReaderErrorDoesNotCallUpdater は S3 object 欠落等で reader が error を返した場合、
-// 3つの gist_type いずれでも Updater を呼ばない（Gist の空上書き・正本の0件再生成をしない）ことを検証する。
-// 必須 object 不存在を空配列へ fallback しない契約（SPECIFICATION.md 9.1）の末端保証。
+// 必須 object 不存在を空配列へ fallback しない契約（SPECIFICATION.md 9.1）。reader error 時は3 gist_type いずれも Updater を呼ばない。
 func TestUpdate_ReaderErrorDoesNotCallUpdater(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -251,7 +249,6 @@ func TestGitHubClient_Update_SuccessContract(t *testing.T) {
 	if gotCT != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", gotCT)
 	}
-	// request JSON は files.{filename}.content を持つ（SPECIFICATION.md 15, GitHub Gist API）。
 	var payload gistPayload
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
 		t.Fatalf("decode request body: %v: %s", err, gotBody)
@@ -268,8 +265,7 @@ func TestGitHubClient_Update_SuccessContract(t *testing.T) {
 	}
 }
 
-// TestGitHubClient_Update_HTTPErrorStatuses は 2xx 以外の status を全て error とする（SPECIFICATION.md 15）。
-// 401/403/404/409/429/5xx は retryable 扱いの error へ分類される呼出側への原因として返す。
+// 2xx 以外の status は全て error とする（SPECIFICATION.md 15）。
 func TestGitHubClient_Update_HTTPErrorStatuses(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -297,7 +293,6 @@ func TestGitHubClient_Update_HTTPErrorStatuses(t *testing.T) {
 			if err == nil {
 				t.Fatal("want error on non-2xx")
 			}
-			// error 文へ status と応答本文が含まれること。token は出ないこと。
 			if !strings.Contains(err.Error(), "gist api http") {
 				t.Errorf("error must mention http status: %v", err)
 			}
@@ -308,7 +303,6 @@ func TestGitHubClient_Update_HTTPErrorStatuses(t *testing.T) {
 	}
 }
 
-// TestGitHubClient_Update_TimeoutReturnsRequestError は client timeout 超過が request error になることを検証する。
 // gist_update の失敗は job error となり SQS へ再試行される（SPECIFICATION.md 9/15）。
 func TestGitHubClient_Update_TimeoutReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +320,6 @@ func TestGitHubClient_Update_TimeoutReturnsRequestError(t *testing.T) {
 	}
 }
 
-// TestGitHubClient_Update_ContextCancellationReturnsRequestError は ctx cancel が request error になることを検証する。
 func TestGitHubClient_Update_ContextCancellationReturnsRequestError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
@@ -344,8 +337,6 @@ func TestGitHubClient_Update_ContextCancellationReturnsRequestError(t *testing.T
 	}
 }
 
-// TestGitHubClient_Update_ErrorBodyIsLimited は error 応答本文が上限付きで読まれることを検証する。
-// 上限を超える応答は切り詰められ、上限以降の内容は error 文へ現れない。巨大な応答で OOM しない。
 func TestGitHubClient_Update_ErrorBodyIsLimited(t *testing.T) {
 	// errorBodyLimit まで埋めた本文の末尾に、上限外へ追い出される一意の marker を置く。
 	body := strings.Repeat("A", errorBodyLimit) + "TRAILING-MARKER-BEYOND-LIMIT"
@@ -364,11 +355,9 @@ func TestGitHubClient_Update_ErrorBodyIsLimited(t *testing.T) {
 	if !strings.Contains(err.Error(), "gist api http 502") {
 		t.Errorf("error must mention http 502: %v", err)
 	}
-	// 上限以降の marker は切り詰められて error 文へ出ないこと。
 	if strings.Contains(err.Error(), "TRAILING-MARKER-BEYOND-LIMIT") {
 		t.Errorf("error must not include body beyond errorBodyLimit")
 	}
-	// token は error 文へ漏れないこと。
 	if strings.Contains(err.Error(), "ghtoken") {
 		t.Errorf("error must not leak token: %v", err)
 	}

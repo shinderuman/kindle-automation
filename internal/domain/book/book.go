@@ -9,12 +9,14 @@ import (
 	"time"
 )
 
-// Valid=false は未取得を示し、Kindle Unlimited 等の 0円とは区別する（SPECIFICATION.md 11.2）。
+// Price は円建て価格と有効性の組（SPECIFICATION.md 11.2）。
+// Valid=false は未取得を示し、Kindle Unlimited 等の 0円とは区別する。
 type Price struct {
 	yen   float64
 	valid bool
 }
 
+// NewPrice は yen が正の場合だけ有効な Price を構築する。0 以下は未取得扱いとなる。
 func NewPrice(yen float64) Price {
 	if yen <= 0 {
 		return Price{}
@@ -22,10 +24,13 @@ func NewPrice(yen float64) Price {
 	return Price{yen: yen, valid: true}
 }
 
+// UnknownPrice は価格未取得を示す Price を返す。
 func UnknownPrice() Price { return Price{} }
 
+// Yen は価格の円額を返す。未取得の場合は 0 を返す。
 func (p Price) Yen() float64 { return p.yen }
 
+// Valid は取得済みの有効な価格かを返す。
 func (p Price) Valid() bool { return p.valid }
 
 // KindleBook は paper_books_asins / unprocessed_asins / notified_asins / upcoming_asins
@@ -49,7 +54,6 @@ type Author struct {
 	LatestReleaseURL   string
 }
 
-// 取得済み候補が1つもない場合は未取得を返す。
 func maxPrice(candidates ...Price) Price {
 	var best Price
 	for _, c := range candidates {
@@ -63,9 +67,8 @@ func maxPrice(candidates ...Price) Price {
 	return best
 }
 
-// old が新規レコード（CreatedAt ゼロ値）の場合は now を作成時刻にする。
-// old.MaxPrice が未取得の場合は今回価格が初回基準になる。
-// 既存Go実装にあった「セール成立書籍を保存対象から外す」挙動は引き継がない（SPECIFICATION.md 12.3）。
+// UpdatePriceHistory は current 価格で CurrentPrice と MaxPrice を更新した KindleBook を返す（SPECIFICATION.md 12.3）。
+// 既存Go実装にあった「セール成立書籍を保存対象から外す」挙動は引き継がない。
 func UpdatePriceHistory(old KindleBook, current Price, now time.Time) KindleBook {
 	updated := old
 	updated.CurrentPrice = current
@@ -76,7 +79,7 @@ func UpdatePriceHistory(old KindleBook, current Price, now time.Time) KindleBook
 	return updated
 }
 
-// DedupBooks は ASIN で重複排除する。
+// DedupBooks は ASIN が同一の書籍を先頭出現優先で重複排除する（SPECIFICATION.md 9.2/10）。
 // SPECIFICATION.md 10 の「重複時は既存 unprocessed 側を優先」は、
 // 呼び出し側で append(original, upcoming...) の順序を保証することで実現する。
 // ASIN が空のレコードは重複排除の判定対象にできず、そのまま残す。
@@ -98,7 +101,6 @@ func DedupBooks(books []KindleBook) []KindleBook {
 }
 
 // SortBooks は発売日降順、同日の場合はタイトル昇順へ並べる（SPECIFICATION.md 9.2）。
-// 入力スライスは変更せず、並び替えた新しいスライスを返す。
 func SortBooks(books []KindleBook) []KindleBook {
 	sorted := append([]KindleBook(nil), books...)
 	sort.SliceStable(sorted, func(i, j int) bool {
@@ -110,6 +112,7 @@ func SortBooks(books []KindleBook) []KindleBook {
 	return sorted
 }
 
+// DedupAuthors は Name が同一の作者を先頭出現優先で重複排除する（SPECIFICATION.md 9.3）。
 func DedupAuthors(authors []Author) []Author {
 	seen := make(map[string]struct{})
 	out := make([]Author, 0, len(authors))

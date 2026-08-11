@@ -16,7 +16,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/logging"
 )
 
-// parseLogLine は JSON 1行を map へ復元する。
 func parseLogLine(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -26,7 +25,6 @@ func parseLogLine(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-// cycle_dispatched は target_count/enqueued_count/upcoming_merged を含む（SPECIFICATION.md 18.3）。
 func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -59,7 +57,6 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	}
 }
 
-// Checker 無効時は cycle_disabled とし、件数 field を含めない（SPECIFICATION.md 18.3）。
 func TestLogCycle_DisabledWhenCheckerOff(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -85,9 +82,6 @@ func TestLogCycle_DisabledWhenCheckerOff(t *testing.T) {
 	}
 }
 
-// TestLogAlarm_HasSingleEventKey は alarm_notification ログが本番 logging 設定
-// （replaceAttr が message を event へ map）でも event key を1つだけ持つことを検証する
-// （SPECIFICATION.md 18.3）。
 func TestLogAlarm_HasSingleEventKey(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -105,8 +99,6 @@ func TestLogAlarm_HasSingleEventKey(t *testing.T) {
 	}
 }
 
-// logTerminal は event token を1つだけ event key へ出す（msg と event attr の二重出力回避）。
-// level=ERROR で result/error/source を含む（SPECIFICATION.md 18.1/18.3）。
 func TestLogTerminal_HasSingleEventKey(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -134,7 +126,6 @@ func TestLogTerminal_HasSingleEventKey(t *testing.T) {
 	}
 }
 
-// source 無しの terminal ログは source field を出さない（eventSource 空の呼び出し）。
 func TestLogTerminal_NoSourceWhenEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -150,7 +141,6 @@ func TestLogTerminal_NoSourceWhenEmpty(t *testing.T) {
 	}
 }
 
-// 非 ALARM 状態の受領ログは event key を1つだけ持つ（msg/event attr の二重出力回避）。
 func TestHandleEvent_NonAlarmLogHasSingleEventKey(t *testing.T) {
 	var buf bytes.Buffer
 	sched := &Scheduler{
@@ -174,7 +164,6 @@ func TestHandleEvent_NonAlarmLogHasSingleEventKey(t *testing.T) {
 	}
 }
 
-// logCycle は Logger 未設定でも何も出力せず結果を変えない。
 func TestLogCycle_NilLoggerIsNoOp(t *testing.T) {
 	s := &Scheduler{Logger: nil}
 	event := dispatch.Event{CheckType: job.CheckSale, ScheduledAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)}

@@ -29,10 +29,12 @@ type Conditions struct {
 	Coupon    bool
 }
 
+// Any はいずれかのセール条件が成立しているかを返す（SPECIFICATION.md 12.4）。
 func (c Conditions) Any() bool {
 	return c.PriceDrop || c.Points || c.PointRate || c.Coupon
 }
 
+// Evaluate は入力と閾値から4つの独立したセール条件を判定する（SPECIFICATION.md 12.4）。
 func Evaluate(in Input, th Thresholds) Conditions {
 	c := Conditions{}
 	if in.MaxPrice-in.CurrentPrice >= th.SaleThreshold {
@@ -56,7 +58,6 @@ func pointRatePercent(in Input) float64 {
 }
 
 // NotificationLines は成立した条件を通知条件名として列挙する（SPECIFICATION.md 12.4/17.1）。
-// couponText が空でなければクーポン条件へ括弧内に文言を追加する。
 func NotificationLines(in Input, c Conditions, couponText string) []string {
 	var lines []string
 	if c.PriceDrop {
@@ -78,11 +79,15 @@ func NotificationLines(in Input, c Conditions, couponText string) []string {
 	return lines
 }
 
+// PriceChangeKind は価格変動の分類（SPECIFICATION.md 12.5）。
 type PriceChangeKind int
 
 const (
+	// NoChange は変動なし（または oldCurrent==0 で通知しない）。
 	NoChange PriceChangeKind = iota
+	// PriceUp は閾値以上の値上がり。
 	PriceUp
+	// PriceDown は閾値以上の値下がり。
 	PriceDown
 )
 

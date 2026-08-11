@@ -27,8 +27,6 @@ func detailJob(kindleASIN, paperASIN string) job.Job {
 		Target: job.Target{ASIN: kindleASIN, SourceASIN: paperASIN}}
 }
 
-// --- stubs ---
-
 type fakePaperPageFetcher struct {
 	result PaperCheckResult
 	err    error
@@ -205,8 +203,6 @@ func kindleInfo(asin string) KindlePageInfo {
 	}
 }
 
-// --- 純粋関数 ---
-
 func TestIsSameReleaseDayJST(t *testing.T) {
 	utcMidnight := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC) // JST 7/1 09:00
 	other := time.Date(2026, 7, 1, 20, 0, 0, 0, time.UTC)      // JST 7/2 05:00
@@ -217,8 +213,6 @@ func TestIsSameReleaseDayJST(t *testing.T) {
 		t.Errorf("異なるJST暦日はfalse")
 	}
 }
-
-// --- HandlePaperToKindleCheck ---
 
 func TestCheck_FetchesOnceAndEnqueuesDetail(t *testing.T) {
 	fetcher := &fakePaperPageFetcher{result: PaperCheckResult{Category: CategoryOK, Info: paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")}}
@@ -232,7 +226,6 @@ func TestCheck_FetchesOnceAndEnqueuesDetail(t *testing.T) {
 		t.Errorf("paper page fetch calls = %d, want 1", fetcher.calls)
 	}
 	enq := deps.Enqueuer.(*fakeEnqueuer)
-	// 価格初期化（旧レコードは価格未設定）で gist、Kindle候補で detail を投入する。
 	var detailJob, gistJob *job.Job
 	for i := range enq.jobs {
 		switch enq.jobs[i].Kind {
@@ -267,14 +260,12 @@ func TestCheck_InitializesPaperPriceWhenZero(t *testing.T) {
 	if !store.updateCalled {
 		t.Errorf("paper price initialization must be called when PaperPrice is available")
 	}
-	// CurrentPrice と MaxPrice を PaperPrice へ初期化した。
 	if !store.lastUpdate.CurrentPrice.Valid() || store.lastUpdate.CurrentPrice.Yen() != 792 {
 		t.Errorf("lastUpdate CurrentPrice = %+v, want 792", store.lastUpdate.CurrentPrice)
 	}
 	if !store.lastUpdate.MaxPrice.Valid() || store.lastUpdate.MaxPrice.Yen() != 792 {
 		t.Errorf("lastUpdate MaxPrice = %+v, want 792", store.lastUpdate.MaxPrice)
 	}
-	// 価格初期化成功後に Paper 用 gist_update を投入する（SPECIFICATION.md 14.2/15）。
 	enq := deps.Enqueuer.(*fakeEnqueuer)
 	found := false
 	for i := range enq.jobs {
@@ -287,7 +278,6 @@ func TestCheck_InitializesPaperPriceWhenZero(t *testing.T) {
 	}
 }
 
-// 価格初期化の S3 保存失敗時は gist も detail も投入せず store_update の retryable error にする。
 func TestCheck_PriceInitFailureEnqueuesNoGist(t *testing.T) {
 	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
 	deps := baseDeps()
@@ -389,8 +379,6 @@ func TestCheck_RetryableReturnsError(t *testing.T) {
 	}
 }
 
-// --- HandlePaperToKindleDetail ---
-
 func TestDetail_FetchesOnceAndApplies(t *testing.T) {
 	fetcher := &fakeKindlePageFetcher{result: KindleDetailResult{Category: CategoryOK, Info: kindleInfo("B0KINDLE01")}}
 	deps := baseDeps()
@@ -419,7 +407,6 @@ func TestDetail_EditionMismatchCasesReturnNil(t *testing.T) {
 		name string
 		info KindlePageInfo
 	}{
-		// 取得KindleページのASINが要求ASINと異なる（SPEC 14.3 候補URL/ASIN不一致）。asin_mismatch terminal。
 		{name: "asin_mismatch", info: KindlePageInfo{ASIN: "B0PAPER001", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: releaseDay}},
 		{name: "not_kindle", info: KindlePageInfo{ASIN: "B0KINDLE01", Title: "T", HasKindleSwatch: false}},
 		{name: "release_date_mismatch", info: KindlePageInfo{ASIN: "B0KINDLE01", Title: "T", HasKindleSwatch: true, CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}},
@@ -457,8 +444,6 @@ func TestDetail_ParseFailureIsRetryable(t *testing.T) {
 		})
 	}
 }
-
-// --- applyDetectedBook ---
 
 func TestApply_AlreadyKnownSkipsNotifyButUpsertsAndEnqueuesGist(t *testing.T) {
 	deps := baseDeps()
@@ -511,7 +496,6 @@ func TestApply_ManualDeleteWhenPaperBookAbsentAndCandidateUnknown(t *testing.T) 
 
 func TestApply_PreviousRunSuccessReEnqueuesGist(t *testing.T) {
 	deps := baseDeps()
-	// paper_books 既削除 + 候補保存済み = 先行実行成功として gist job 再投入。
 	deps.KnownStateQuerier.(*fakeKnownStateQuerier).state = KnownState{
 		NotifiedExists: true, UpcomingExists: true, UnprocessedExists: false, PaperBookExists: false,
 	}
@@ -548,8 +532,6 @@ func TestApply_PartialFailureReturnsError(t *testing.T) {
 	}
 }
 
-// 通知失敗は Notifier adapter が notification_error（SPECIFICATION.md 18.3）で記録するため、
-// paper_to_kindle ユースケースでは job を completed のままにし、保存済み状態を巻き戻さない。
 func TestApply_NotifyFailureDoesNotRollback(t *testing.T) {
 	deps := baseDeps()
 	deps.Notifier.(*fakeNotifier).err = errors.New("slack down")
@@ -590,7 +572,6 @@ func TestApply_NotificationMessageShowsPaperPriceUnavailableWhenAbsent(t *testin
 }
 
 func TestApply_SavedKindleURLContainsPartnerTag(t *testing.T) {
-	// SPECIFICATION.md 9.2: 保存用 Kindle URL へ Affiliate Tag を付ける。
 	deps := baseDeps()
 	deps.Config = Config{PartnerTag: "testtag-22"}
 
@@ -609,7 +590,6 @@ func TestApply_SavedKindleURLContainsPartnerTag(t *testing.T) {
 }
 
 func TestApply_SavedKindleURLHasNoTagWhenPartnerTagEmpty(t *testing.T) {
-	// partnerTag 未設定時は ?tag= を付けない（既存挙動の保護）。
 	deps := baseDeps()
 
 	if _, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001")); err != nil {
@@ -637,7 +617,6 @@ func TestApply_NotificationKindleURLContainsPartnerTag(t *testing.T) {
 	if !strings.Contains(notifier.message, "https://www.amazon.co.jp/dp/B0KINDLE01?tag=testtag-22") {
 		t.Errorf("通知 Kindle URL に partner tag を含むこと: %s", notifier.message)
 	}
-	// 紙書籍URLは既存レコード由来のため partner tag を付けない。
 	if strings.Contains(notifier.message, "B0PAPER001?tag=") {
 		t.Errorf("紙書籍URLには partner tag を付けない: %s", notifier.message)
 	}
@@ -661,40 +640,29 @@ func TestBuildDetailJob_IsDeterministicAndUsesAmazonRequests(t *testing.T) {
 	}
 }
 
-// TestBuildPaperGistJob_DiscriminatorIsDeterministic は同一 cycle でも異なる S3 状態変更
-// （価格初期化 vs 削除、異なる紙書籍ASIN）で別 job_id となり、同一状態変更の再試行は同一 job_id になることを検証する。
-// SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、別 job_id で dedup 衝突を回避する（SPECIFICATION.md 7.2）。
-// Target.GistType は paper_to_kindle のまま変えない（job schema 互換）。
 func TestBuildPaperGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	j := checkJob("B0PAPER001")
 	priceInitA := buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER001")
 	deleteA := buildPaperToKindleGistJob(j, gistStagePaperDelete, "B0PAPER001")
 	priceInitB := buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER002")
 
-	// 同一紙書籍の価格初期化と削除は別状態変更 → 別 job_id / 別 dedup。
 	if priceInitA.JobID == deleteA.JobID {
 		t.Errorf("price_init and delete must differ: %s", priceInitA.JobID)
 	}
 	if scheduling.DedupID(priceInitA.JobID) == scheduling.DedupID(deleteA.JobID) {
 		t.Errorf("price_init and delete dedup must differ")
 	}
-	// 異なる紙書籍ASINは別 job_id。
 	if priceInitA.JobID == priceInitB.JobID {
 		t.Errorf("different paper ASIN must differ: %s", priceInitA.JobID)
 	}
-	// 同一状態変更の再試行は同一 job_id（決定的）。
 	if buildPaperToKindleGistJob(j, gistStagePaperPriceInit, "B0PAPER001").JobID != priceInitA.JobID {
 		t.Errorf("same state change must be deterministic")
 	}
-	// GistType は paper_to_kindle で不変（gist updater 契約）。
 	if priceInitA.Target.GistType != gistPaperID {
 		t.Errorf("GistType = %q, want %q", priceInitA.Target.GistType, gistPaperID)
 	}
 }
 
-// --- 取得分類と通信失敗の補完（check） ---
-
-// check job の Amazon 取得の通信失敗は fetch_error の retryable error にする（SPECIFICATION.md 11.3/18.1）。
 func TestCheck_FetchErrorIsRetryable(t *testing.T) {
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).err = errors.New("dial tcp: timeout")
@@ -711,7 +679,6 @@ func TestCheck_FetchErrorIsRetryable(t *testing.T) {
 	}
 }
 
-// 未知の Category は unknown_category の retryable error にする（Amazon adapter の分類漏れ検知）。
 func TestCheck_UnknownCategoryIsError(t *testing.T) {
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: Category(99)}
@@ -725,7 +692,6 @@ func TestCheck_UnknownCategoryIsError(t *testing.T) {
 	}
 }
 
-// 取得した紙書籍ページのASINが要求ASINと異なる場合は asin_mismatch terminal とする（SPECIFICATION.md 11.3）。
 func TestCheck_PaperPageASINMismatchIsTerminal(t *testing.T) {
 	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
 	info.ASIN = "B0WRONG0001" // 要求 B0PAPER001 と異なる
@@ -744,7 +710,6 @@ func TestCheck_PaperPageASINMismatchIsTerminal(t *testing.T) {
 	}
 }
 
-// 恒久的 4xx は permanent_client_error terminal とする（SPECIFICATION.md 11.3）。対象は paper_books へ残す。
 func TestCheck_PermanentClientErrorIsTerminal(t *testing.T) {
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperCheckResult{Category: CategoryPermanentClientError, HTTPStatus: 401}
@@ -761,8 +726,6 @@ func TestCheck_PermanentClientErrorIsTerminal(t *testing.T) {
 	}
 }
 
-// 価格初期化で gist を投入する際の失敗は enqueue_failed の retryable error にする。
-// gist(251) が最初の Enqueue 呼び出しになる（旧レコードは価格未設定）。
 func TestCheck_GistEnqueueFailureAfterPriceInitIsError(t *testing.T) {
 	info := paperInfoWithSwatch("B0PAPER001", "B0KINDLE01")
 	deps := baseDeps()
@@ -778,7 +741,6 @@ func TestCheck_GistEnqueueFailureAfterPriceInitIsError(t *testing.T) {
 	}
 }
 
-// 価格保存成功後にGist enqueueだけが失敗した場合、再配信で価格設定済みの同じ状態からGistをreconcileする（7.5）。
 func TestCheck_RedeliveryReconcilesMissingGistAfterPriceInit(t *testing.T) {
 	info := PaperPageInfo{
 		ASIN: "B0PAPER001", Title: "紙タイトル", PaperPrice: book.NewPrice(792),
@@ -839,8 +801,6 @@ func TestCheck_DetailEnqueueFailureIsError(t *testing.T) {
 	}
 }
 
-// SPEC 14.2: 紙書籍価格を取得できなくても、両スウォッチとKindle候補が確認できる場合は詳細確認を続ける。
-// 価格初期化も gist 投入も行わず、detail だけ投入する。
 func TestCheck_EnqueuesDetailWhenPaperPriceUnavailable(t *testing.T) {
 	info := PaperPageInfo{
 		ASIN: "B0PAPER001", Title: "紙タイトル", PaperPrice: book.UnknownPrice(),
@@ -867,8 +827,6 @@ func TestCheck_EnqueuesDetailWhenPaperPriceUnavailable(t *testing.T) {
 	}
 }
 
-// --- 取得分類と通信失敗の補完（detail） ---
-
 func TestDetail_FetchErrorIsRetryable(t *testing.T) {
 	deps := baseDeps()
 	deps.KindlePageFetcher.(*fakeKindlePageFetcher).err = errors.New("dial tcp: timeout")
@@ -894,13 +852,11 @@ func TestDetail_RetryableReturnsError(t *testing.T) {
 	if !errors.As(err, &re) {
 		t.Fatalf("error must be ErrRetryableFetch, got %T", err)
 	}
-	// ASIN を含む構造化メッセージで、SQS 再配信時の対象特定に使えること（SPECIFICATION.md 18.1）。
 	if re.ASIN != "B0KINDLE01" || !strings.Contains(re.Error(), "B0KINDLE01") {
 		t.Errorf("ErrRetryableFetch must carry ASIN: ASIN=%q msg=%q", re.ASIN, re.Error())
 	}
 }
 
-// 404 と恒久 4xx は terminal（SPECIFICATION.md 11.3）。
 func TestDetail_NotFoundAndPermanentAreTerminal(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -938,8 +894,6 @@ func TestDetail_UnknownCategoryIsError(t *testing.T) {
 	}
 }
 
-// SPEC 14.3: Kindle候補ASINが紙書籍ASINと異なることを確認。同一ASINの場合は same_asin terminal。
-// 候補ページASINは要求ASINと一致（asin_mismatch(294)を通過）させ、kindleASIN == paperASIN で same_asin(298)へ。
 func TestDetail_SameAsinIsTerminal(t *testing.T) {
 	info := KindlePageInfo{ASIN: "B0PAPER001", Title: "T", HasKindleSwatch: true,
 		CurrentPrice: book.NewPrice(1), HasReleaseDate: true, ReleaseDate: releaseDay}
@@ -958,7 +912,6 @@ func TestDetail_SameAsinIsTerminal(t *testing.T) {
 	}
 }
 
-// 取得KindleページのASINが要求ASINと異なる場合は asin_mismatch terminal（候補URL/ASIN不一致、SPEC 14.3）。
 func TestDetail_AsinMismatchIsTerminal(t *testing.T) {
 	info := kindleInfo("B0WRONG0001") // 要求 B0KINDLE01 と異なる
 	deps := baseDeps()
@@ -973,7 +926,6 @@ func TestDetail_AsinMismatchIsTerminal(t *testing.T) {
 	}
 }
 
-// 紙書籍レコード読込失敗は store_failed の retryable error にする（SPECIFICATION.md 7.5 途中失敗）。
 func TestDetail_PaperBookLoadFailureIsError(t *testing.T) {
 	deps := baseDeps()
 	deps.KindlePageFetcher.(*fakeKindlePageFetcher).result = KindleDetailResult{Category: CategoryOK, Info: kindleInfo("B0KINDLE01")}
@@ -988,7 +940,6 @@ func TestDetail_PaperBookLoadFailureIsError(t *testing.T) {
 	}
 }
 
-// KnownState 取得失敗は known_state の retryable error にする（SPECIFICATION.md 14.4 step1/7.5）。
 func TestDetail_KnownStateFailureIsError(t *testing.T) {
 	deps := baseDeps()
 	deps.KnownStateQuerier.(*fakeKnownStateQuerier).err = errors.New("s3 down")
@@ -1002,11 +953,6 @@ func TestDetail_KnownStateFailureIsError(t *testing.T) {
 	}
 }
 
-// --- reconcile と副作用順序（SPECIFICATION.md 14.4/7.5） ---
-
-// 途中で S3 保存に失敗した場合でも、先行して成功した保存対象を失わない。
-// notified upsert 成功後に upcoming upsert が失敗した場合、notified は保存されたまま job を失敗させ、
-// 再実行で不足する upcoming だけを補う（SPECIFICATION.md 14.4 step2/7.5）。
 func TestApply_PartialFailurePreservesPriorSideEffects(t *testing.T) {
 	deps := baseDeps()
 	deps.UpcomingStore.(*fakeUpcomingStore).upsertErr = errors.New("s3 down")
@@ -1018,21 +964,16 @@ func TestApply_PartialFailurePreservesPriorSideEffects(t *testing.T) {
 	if oc.ErrorType != errorTypeUpcomingUpsert {
 		t.Errorf("error_type = %q, want upcoming_upsert", oc.ErrorType)
 	}
-	// notified は先行して保存済みのため対象を失わない。
 	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 1 {
 		t.Errorf("notified must be persisted before upcoming failure, got %d", len(deps.NotifiedStore.(*fakeNotifiedStore).upserts))
 	}
-	// 保存済み paper_books は失敗前のため削除されない。
 	if len(deps.PaperBooksStore.(*fakePaperBooksStore).deleted) != 0 {
 		t.Errorf("paper book must not be deleted before upcoming succeeds")
 	}
 }
 
-// 紙書籍価格をセール条件（MaxPrice）へ使わないことの構造的確認（SPECIFICATION.md 12.1/14）。
-// toBook は KindlePrice を CurrentPrice/MaxPrice へ設定し、PaperPrice は通知用だけで保存値へ入れない。
 func TestApply_SavedBookMaxPriceUsesKindlePriceNotPaper(t *testing.T) {
 	deps := baseDeps()
-	// 紙書籍レコードの価格（PaperPrice 由来候補）は Kindle 価格より高い。
 	deps.PaperBooksStore.(*fakePaperBooksStore).paperBook.CurrentPrice = book.NewPrice(792)
 
 	if _, err := HandlePaperToKindleDetail(context.Background(), deps, detailJob("B0KINDLE01", "B0PAPER001")); err != nil {
@@ -1047,7 +988,6 @@ func TestApply_SavedBookMaxPriceUsesKindlePriceNotPaper(t *testing.T) {
 	}
 }
 
-// 同一job重複配信（SQS少なくとも1回）でも、各副作用が idempotent に再実行され対象を失わない（SPECIFICATION.md 7.4/7.5）。
 func TestApply_IdempotentAcrossDuplicateDelivery(t *testing.T) {
 	deps := baseDeps()
 	j := detailJob("B0KINDLE01", "B0PAPER001")
@@ -1055,11 +995,9 @@ func TestApply_IdempotentAcrossDuplicateDelivery(t *testing.T) {
 	if _, err := HandlePaperToKindleDetail(context.Background(), deps, j); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	// 同じ KnownState（実S3は idempotent upsert/delete で同一状態）で再配信されたとみなし再実行。
 	if _, err := HandlePaperToKindleDetail(context.Background(), deps, j); err != nil {
 		t.Fatalf("duplicate delivery must reconcile without error: %v", err)
 	}
-	// gist job は決定的 job_id のため再投入も同じ job_id（FIFO dedup で冪等）。
 	jobs := deps.Enqueuer.(*fakeEnqueuer).jobs
 	if len(jobs) < 2 {
 		t.Fatalf("gist job enqueued on both runs, got %d", len(jobs))

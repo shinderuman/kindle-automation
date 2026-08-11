@@ -17,8 +17,11 @@ const (
 
 // gist_type（SPECIFICATION.md 15）。sale/new_release/paper_to_kindle。
 const (
-	TypeSale          = "sale"
-	TypeNewRelease    = "new_release"
+	// TypeSale は Sale Gist 再生成を指定する gist_type 値。
+	TypeSale = "sale"
+	// TypeNewRelease は New Release（作者）Gist 再生成を指定する gist_type 値。
+	TypeNewRelease = "new_release"
+	// TypePaperToKindle は Paper-to-Kindle Gist 再生成を指定する gist_type 値。
 	TypePaperToKindle = "paper_to_kindle"
 )
 

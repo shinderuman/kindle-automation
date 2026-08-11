@@ -91,7 +91,6 @@ func existingBook(asin string, price float64) book.KindleBook {
 	}
 }
 
-// deps は標準的な sale.Dependencies を組み立てる。
 func deps(fetcher *fakeFetcher, store *fakeStore, notifier *fakeNotifier) Dependencies {
 	return Dependencies{
 		Fetcher: fetcher, Store: store, Notifier: notifier,
@@ -206,7 +205,6 @@ func TestHandleSaleCheck_PriceUnavailableIsRetryable(t *testing.T) {
 	if oc.Result != execution.ResultError || oc.ErrorType != errorTypePriceUnavailable {
 		t.Errorf("outcome = %+v, want result=error error_type=%s", oc, errorTypePriceUnavailable)
 	}
-	// 価格不明は保存前に弾き、0円を保存しない（SPEC 11.2/12.6）。
 	if store.calls != 0 {
 		t.Errorf("store calls = %d, want 0 (must not save when price unavailable)", store.calls)
 	}
@@ -292,8 +290,6 @@ func TestHandleSaleCheck_StoreErrorSkipsNotify(t *testing.T) {
 	}
 }
 
-// 通知失敗は Notifier adapter が notification_error（SPECIFICATION.md 18.3）で記録するため、
-// sale ユースケースでは job を completed のままにし、保存済み状態を巻き戻さない（SPEC 17.1）。
 func TestHandleSaleCheck_NotifyFailureDoesNotRollback(t *testing.T) {
 	info := okInfo("B0FX3X569X", 600)
 	info.Points = 200
@@ -327,8 +323,6 @@ func TestHandleSaleCheck_UpdatesPriceHistory(t *testing.T) {
 	}
 }
 
-// セール不成立かつ価格変動も閾値未満のとき、通知せずとも価格履歴を正しく更新する（SPEC 12.3/12.5/12.6）。
-// CurrentPrice は今回価格へ更新し、MaxPrice は過去最高を維持する。
 func TestHandleSaleCheck_SubThresholdChangeUpdatesStateWithoutNotify(t *testing.T) {
 	info := okInfo("B0FX3X569X", 870) // 900→870 は差30で PriceChangeAmount(100) 未満
 	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
@@ -380,21 +374,15 @@ func TestHandleSaleFinalize_EnqueuesSaleGistUpdate(t *testing.T) {
 	}
 }
 
-// TestBuildGistJob_DiscriminatorIsDeterministic は Sale 用 gist job_id の決定性を検証する
-// （SPECIFICATION.md 7.2/15）。sale_finalize は1周1回で Gist は S3 全体から再生成するため
-// discriminator は cycleID+gist_type で十分（最終状態が常に勝つ）。同一 cycle の再試行は同一 job_id で
-// 冪等、異なる cycle は別 job_id となる。SQS FIFO の MessageDeduplicationId は job_id の SHA-256。
 func TestBuildGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	j := job.Job{Version: job.Version, JobID: "f", Kind: job.KindSaleFinalize, CheckType: job.CheckSale, CycleID: "sale:2026-07-23T00:00:00Z"}
 	first := buildGistJob(j, "sale")
-	// 同一 cycle の再試行（SQS 再配信）は同一 job_id で冪等。
 	if buildGistJob(j, "sale").JobID != first.JobID {
 		t.Errorf("sale gist job_id is not deterministic")
 	}
 	if scheduling.DedupID(buildGistJob(j, "sale").JobID) != scheduling.DedupID(first.JobID) {
 		t.Errorf("sale gist dedup id is not deterministic")
 	}
-	// 異なる cycle は別 job_id（5分 dedup で前周に吸われない）。
 	other := job.Job{Version: job.Version, JobID: "f2", Kind: job.KindSaleFinalize, CheckType: job.CheckSale, CycleID: "sale:2026-07-24T00:00:00Z"}
 	if buildGistJob(other, "sale").JobID == first.JobID {
 		t.Errorf("different cycle must differ: %s", first.JobID)
@@ -476,7 +464,7 @@ func TestHandleSaleCheck_FirstFetchNoPriceDropButPointsCouponNotify(t *testing.T
 	info.Points = 200
 	info.Coupon = true
 	fetcher := &fakeFetcher{result: FetchResult{Category: CategoryOK, Info: info}}
-	// 未取得レコード(価格ゼロ)の初回取得: 価格差セールは成立せず、ポイントとクーポンは成立する（SPEC 12.3）。
+	// 未取得レコード(価格ゼロ)の初回取得: 価格差セールは成立せず、ポイントとクーポンは成立する。
 	store := &fakeStore{
 		oldBook: book.KindleBook{ASIN: "B0FX3X569X", Title: "タイトル", URL: "https://u"},
 		applied: true,
@@ -513,7 +501,6 @@ func TestHandleSaleCheck_DuplicateDeliveryIsIdempotent(t *testing.T) {
 		Config: Config{Thresholds: baseThresholds()}, Clock: fixedClock,
 	}
 
-	// SQSの少なくとも1回配信を前提に同じjobを2回処理しても、価格履歴は冪等に収束する（SPEC 7.4）。
 	for i := 0; i < 2; i++ {
 		if _, err := HandleSaleCheck(context.Background(), d, saleCheckJob("B0FX3X569X")); err != nil {
 			t.Fatalf("call %d: HandleSaleCheck: %v", i, err)

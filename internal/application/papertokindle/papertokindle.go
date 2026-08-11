@@ -49,7 +49,7 @@ const (
 type Category int
 
 const (
-	// CategoryOK は必須構造あり。
+	// CategoryOK は商品ページの正常取得を表す。
 	CategoryOK Category = iota
 	// CategoryNotFound は 404 または商品不存在。terminal。
 	CategoryNotFound
@@ -59,6 +59,7 @@ const (
 	CategoryRetryable
 )
 
+// PaperPageInfo は紙書籍ページ1回から取得した情報を表す。
 // 紙書籍ページ（check job）から取得する。
 type PaperPageInfo struct {
 	ASIN             string
@@ -78,6 +79,7 @@ type PaperCheckResult struct {
 	ResponseBytes int
 }
 
+// KindlePageInfo はKindle商品ページ1回から取得した情報を表す。
 // Kindle商品ページ（detail job）から取得する。
 type KindlePageInfo struct {
 	ASIN            string
@@ -97,6 +99,7 @@ type KindleDetailResult struct {
 	ResponseBytes int
 }
 
+// DetectedBook は紙→Kindle 判定で保存・通知する候補1件を表す。
 type DetectedBook struct {
 	ASIN        string
 	Title       string
@@ -114,16 +117,19 @@ type KnownState struct {
 	PaperBookExists   bool
 }
 
+// PaperPageFetcher は紙書籍ページ取得の最小依存インターフェース。
 // 1起動で最大1回。
 type PaperPageFetcher interface {
 	FetchPaperPage(ctx context.Context, paperASIN string) (PaperCheckResult, error)
 }
 
+// KindlePageFetcher はKindle商品ページ取得の最小依存インターフェース。
 // 1起動で最大1回。
 type KindlePageFetcher interface {
 	FetchKindlePage(ctx context.Context, kindleASIN string) (KindleDetailResult, error)
 }
 
+// PaperBooksStore は paper_books の取得・更新・削除を担う最小依存インターフェース。
 type PaperBooksStore interface {
 	// 手動削除時 applied=false。
 	UpdateOneBook(ctx context.Context, paperASIN string, update func(book.KindleBook) book.KindleBook) (bool, error)
@@ -133,10 +139,12 @@ type PaperBooksStore interface {
 	PaperBook(ctx context.Context, paperASIN string) (book.KindleBook, bool, error)
 }
 
+// NotifiedStore は notified_asins への冪等upsertを担う最小依存インターフェース。
 type NotifiedStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
 
+// UpcomingStore は upcoming_asins への冪等upsertを担う最小依存インターフェース。
 type UpcomingStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
@@ -146,6 +154,7 @@ type KnownStateQuerier interface {
 	KnownState(ctx context.Context, kindleASIN, paperASIN string) (KnownState, error)
 }
 
+// Enqueuer は後続jobの投入を担う最小依存インターフェース。
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job job.Job) error
 }
@@ -156,11 +165,13 @@ type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
 
+// Config は紙→Kindle ジョブの実行設定を表す。
 type Config struct {
 	// 保存用 Kindle URL へ付ける Amazon Affiliate Tag（SPECIFICATION.md 9.2）。
 	PartnerTag string
 }
 
+// Dependencies は紙→Kindle 2ジョブが依存する adapter・設定・時刻源をまとめる。
 type Dependencies struct {
 	PaperPageFetcher  PaperPageFetcher
 	KindlePageFetcher KindlePageFetcher
@@ -177,6 +188,7 @@ type Dependencies struct {
 // ErrRetryableFetch は Amazon 取得の再試行可能エラー。Lambda error として SQS へ再配信させる。
 type ErrRetryableFetch struct{ ASIN string }
 
+// Error は Amazon 取得の再試行可能エラーである旨のメッセージを返す。
 func (e *ErrRetryableFetch) Error() string { return "retryable fetch for " + e.ASIN }
 
 var (
@@ -193,7 +205,7 @@ const (
 	gistStagePaperDelete    = "delete"
 )
 
-// 紙書籍ページへ1回アクセスし、紙価格初期化とKindle候補有無を確認する。
+// HandlePaperToKindleCheck は紙→Kindle check jobのユースケース entry point。
 // Kindle候補がスウォッチから得られた場合は paper_to_kindle_detail を投入し、同じ起動で詳細へはアクセスしない。
 func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	paperASIN := j.Target.ASIN
@@ -256,6 +268,7 @@ func HandlePaperToKindleCheck(ctx context.Context, deps Dependencies, j job.Job)
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
+// HandlePaperToKindleDetail は紙→Kindle detail jobのユースケース entry point。
 // Kindle商品ページへ最大1回アクセスし、SPEC 14.3 の対応判定後、notified/upcoming/paper_books を更新する。
 func HandlePaperToKindleDetail(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	kindleASIN := j.Target.ASIN
@@ -434,6 +447,7 @@ func kindleURL(asin, partnerTag string) string {
 	return u
 }
 
+// IsSameReleaseDayJST は2つの時刻が同じJST暦日かを返す。
 // 2つの時刻が同じJST暦日か（SPECIFICATION.md 14.3）。
 func IsSameReleaseDayJST(a, b time.Time) bool {
 	return a.In(jst).Format("2006-01-02") == b.In(jst).Format("2006-01-02")

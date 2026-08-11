@@ -3,7 +3,6 @@
 // 未知 field 保持と日付読込互換性を追加する（SPECIFICATION.md 9.2/9.4, AGENTS.md 7）。
 package storage
 
-
 import (
 	"bytes"
 	"encoding/json"
@@ -16,13 +15,15 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/domain/book"
 )
 
-// 書籍JSONの1レコード。Book は既知業務 field、Extra は未知 field を保持する。
+// BookRecord は書籍JSONの1レコード。Book は既知業務 field、Extra は未知 field を保持する（SPECIFICATION.md 9.2/9.4）。
 // 既知 field のうち解釈できなかった値（不正日付等）も Extra へ保持し、再保存時の黙ったゼロ値化を防ぐ。
 type BookRecord struct {
 	Book  book.KindleBook
 	Extra map[string]json.RawMessage
 }
 
+// AuthorRecord は著者JSONの1レコード。Author は既知業務 field、Extra は未知 field を保持する（SPECIFICATION.md 9.2/9.4）。
+// 既知 field のうち解釈できなかった値も Extra へ保持し、再保存時の黙ったゼロ値化を防ぐ。
 type AuthorRecord struct {
 	Author book.Author
 	Extra  map[string]json.RawMessage
@@ -45,6 +46,7 @@ var dateTemplates = []string{
 	"2006T",
 }
 
+// MarshalJSON は既知 field と未知 field を既存 kindle_bot 互換の並びで JSON object へ出力する（SPECIFICATION.md 9.2/9.4）。
 // 既知 field を struct 順に、未知 field を key 昇順で出力する。Extra に既知 field と同名 key があれば
 // （解釈できなかった日付等）そちらを優先し値を壊さない。HTML escape は encoding/json 標準（< > & を Unicode escape）
 // へ従い、& の復元は EncodeBooks で行う。
@@ -61,8 +63,8 @@ func (r BookRecord) MarshalJSON() ([]byte, error) {
 	return marshalRecord(omitFieldsInExtra(fields, r.Extra), r.Extra)
 }
 
-// JSON object から既知 field を Book へ、残りを Extra へ復号する。日付が entity.Date 受容形式なら time.Time へ、
-// 解釈できない場合は元値を Extra へ保持する。
+// UnmarshalJSON は JSON object から既知 field を Book へ、残りを Extra へ復号する（SPECIFICATION.md 9.2/9.4）。
+// 日付が entity.Date 受容形式なら time.Time へ、解釈できない場合は元値を Extra へ保持する。
 func (r *BookRecord) UnmarshalJSON(data []byte) error {
 	m, err := decodeObject(data)
 	if err != nil {
@@ -79,6 +81,8 @@ func (r *BookRecord) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MarshalJSON は既知 field と未知 field を既存 kindle_bot 互換の並びで JSON object へ出力する（SPECIFICATION.md 9.2/9.4）。
+// 並びと Extra の優先規則は BookRecord.MarshalJSON と同じ。
 func (r AuthorRecord) MarshalJSON() ([]byte, error) {
 	fields := []marshalField{
 		{"Name", r.Author.Name},
@@ -90,6 +94,8 @@ func (r AuthorRecord) MarshalJSON() ([]byte, error) {
 	return marshalRecord(omitFieldsInExtra(fields, r.Extra), r.Extra)
 }
 
+// UnmarshalJSON は JSON object から既知 field を Author へ、残りを Extra へ復号する（SPECIFICATION.md 9.2/9.4）。
+// 日付の受容と Extra 保持の規則は BookRecord.UnmarshalJSON と同じ。
 func (r *AuthorRecord) UnmarshalJSON(data []byte) error {
 	m, err := decodeObject(data)
 	if err != nil {
@@ -104,7 +110,7 @@ func (r *AuthorRecord) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// SPECIFICATION.md 9.2: 4 スペース indent・& 復元済みの JSON 配列へ符号化する。
+// EncodeBooks は BookRecord 配列を既存 kindle_bot 互換（4スペース indent・& 復元・< > は Unicode escape 残存）の JSON へ符号化する（SPECIFICATION.md 9.2）。
 // < > は Unicode escape のまま残し、既存 kindle_bot の出力と一致させる。
 func EncodeBooks(records []BookRecord) ([]byte, error) {
 	encoders := make([]bookRecordEncoder, len(records))
@@ -114,6 +120,7 @@ func EncodeBooks(records []BookRecord) ([]byte, error) {
 	return encodeRecords(encoders)
 }
 
+// EncodeAuthors は AuthorRecord 配列を既存 kindle_bot 互換（4スペース indent・& 復元・< > は Unicode escape 残存）の JSON へ符号化する（SPECIFICATION.md 9.2）。
 func EncodeAuthors(records []AuthorRecord) ([]byte, error) {
 	encoders := make([]bookRecordEncoder, len(records))
 	for i, r := range records {
@@ -122,7 +129,7 @@ func EncodeAuthors(records []AuthorRecord) ([]byte, error) {
 	return encodeRecords(encoders)
 }
 
-// 未知 field と解釈不能な既知 field は Extra へ保持する。
+// DecodeBooks は JSON 配列を BookRecord 配列へ復号し、未知 field と解釈不能な既知 field は Extra へ保持する（SPECIFICATION.md 9.2/9.4）。
 func DecodeBooks(data []byte) ([]BookRecord, error) {
 	raws, err := decodeArray(data)
 	if err != nil {
@@ -139,6 +146,7 @@ func DecodeBooks(data []byte) ([]BookRecord, error) {
 	return records, nil
 }
 
+// DecodeAuthors は JSON 配列を AuthorRecord 配列へ復号し、未知 field と解釈不能な既知 field は Extra へ保持する（SPECIFICATION.md 9.2/9.4）。
 func DecodeAuthors(data []byte) ([]AuthorRecord, error) {
 	raws, err := decodeArray(data)
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/application/sale"
 )
 
-// saleFetcher は amazon.Client を sale.ProductFetcher へ適合させる。
 type saleFetcher struct {
 	client *amazon.Client
 }
@@ -23,8 +22,7 @@ func (f saleFetcher) FetchProduct(ctx context.Context, asin string) (sale.FetchR
 	return toSaleResult(r), nil
 }
 
-// newReleaseFetcher は amazon.Client を新刊の SearchFetcher と ProductFetcher の両方へ適合させる。
-// partnerTag は候補・商品の保存用 URL 構築に使う。
+// newReleaseFetcher は SearchFetcher と ProductFetcher の両方を満たす。partnerTag は保存用 URL 構築に使う。
 type newReleaseFetcher struct {
 	client      *amazon.Client
 	partnerTag  string
@@ -56,7 +54,6 @@ func (f newReleaseFetcher) FetchProduct(ctx context.Context, asin string) (newre
 	return toNewReleaseProductResult(r, f.partnerTag), nil
 }
 
-// paperPageFetcher は amazon.Client を papertokindle.PaperPageFetcher へ適合させる。
 type paperPageFetcher struct {
 	client *amazon.Client
 }
@@ -70,7 +67,6 @@ func (f paperPageFetcher) FetchPaperPage(ctx context.Context, paperASIN string) 
 	return toPaperCheckResult(r), nil
 }
 
-// kindlePageFetcher は amazon.Client を papertokindle.KindlePageFetcher へ適合させる。
 type kindlePageFetcher struct {
 	client *amazon.Client
 }

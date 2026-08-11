@@ -28,8 +28,7 @@ var scheduleChecksSecretKeys = []string{
 	config.KeySlackErrorChannel,
 }
 
-// Start は schedule-checks Lambda のエントリポイント。依存を組み立て Lambda runtime へ登録する。
-// 起動時の依存組み立て失敗は継続不能のため標準エラーへ出力し非0で終了する。
+// Start は依存組み立て失敗時は標準エラーへ出力し非0で終了する。
 func Start() {
 	scheduler, err := buildScheduler(context.Background())
 	if err != nil {
@@ -39,7 +38,6 @@ func Start() {
 	lambda.Start(scheduler.HandleEvent)
 }
 
-// buildScheduler は環境変数・S3・SSM から依存を組み立てて Scheduler を返す。
 func buildScheduler(ctx context.Context) (*Scheduler, error) {
 	env, err := config.LoadEnv(os.Getenv)
 	if err != nil {
@@ -93,7 +91,6 @@ func buildScheduler(ctx context.Context) (*Scheduler, error) {
 	}, nil
 }
 
-// loadCheckerConfigs は checker_configs.json を読み取り validation する。
 func loadCheckerConfigs(ctx context.Context, store storage.ObjectStore, key string) (config.CheckerConfigs, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
@@ -117,6 +114,7 @@ type checkerConfigReader struct {
 	key   string
 }
 
+// IsEnabled は dispatch.ConfigReader への bridge で、呼び出しごとに checker_configs.json を読んで有効判定を返す。
 func (r checkerConfigReader) IsEnabled(ctx context.Context, checkType job.CheckType) (bool, error) {
 	checker, err := loadCheckerConfigs(ctx, r.store, r.key)
 	if err != nil {

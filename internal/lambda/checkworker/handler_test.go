@@ -27,8 +27,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// --- カウンタ付き stub fetcher 群 ---
-
 type countSaleFetcher struct {
 	calls  int
 	result sale.FetchResult
@@ -74,8 +72,6 @@ func (f *countPaperFetcher) FetchKindlePage(_ context.Context, _ string) (papert
 	return f.kindleResult, nil
 }
 
-// testCheckerConfig は HandleSQSEvent が refreshVariableConfig で読める有効な checker 設定。
-// SaleChecker 有効・閾値正・Gist 設定ありで Validate を通す。
 const testCheckerConfig = `{"SaleChecker":{"Enabled":true,"GistID":"gist-test","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
 
 func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperFetcher, gistDeps gist.Dependencies) *Worker {
@@ -138,12 +134,10 @@ func TestRoute_AmazonJobsCallFetcherExactlyOnce(t *testing.T) {
 			w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
 			j := job.Job{Version: job.Version, JobID: "id", Kind: tc.kind, CheckType: job.CheckSale, CycleID: "c", Target: tc.target}
 
-			// retryable は error（SQS 再配信）となる。
 			if _, err := w.route(context.Background(), j); err == nil {
 				t.Fatalf("route should return retryable error")
 			}
 
-			// 各 job は Amazon へ最大1回。他の fetcher は呼ばれない。
 			switch tc.kind {
 			case job.KindSaleCheck:
 				assertCount(t, "sale", saleF.calls, 1)
@@ -174,7 +168,6 @@ func assertCount(t *testing.T, label string, got, want int) {
 	}
 }
 
-// gist_update は Amazon を1回も呼ばず Gist 更新だけを行う（SPECIFICATION.md 7.3, job.AmazonRequests==0）。
 func TestRoute_GistUpdateDoesNotCallAmazon(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	updater := &recordingGistUpdater{}
@@ -200,7 +193,6 @@ func TestRoute_GistUpdateDoesNotCallAmazon(t *testing.T) {
 	}
 }
 
-// SQS event の decode 失敗は error として伝播し再配信させる。
 func TestHandleSQSEvent_DecodeFailurePropagates(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
@@ -211,7 +203,6 @@ func TestHandleSQSEvent_DecodeFailurePropagates(t *testing.T) {
 	}
 }
 
-// route の業務 error も event から伝播する。
 func TestHandleSQSEvent_RouteFailurePropagates(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
@@ -229,10 +220,7 @@ func TestHandleSQSEvent_RouteFailurePropagates(t *testing.T) {
 	}
 }
 
-// --- 可変設定読込失敗の構造化ログ ---
-
-// failingConfigStore は Get で常に S3 一時障害を模倣した error を返す ObjectStore stub。
-// refreshVariableConfig の読込失敗ログと再試行 error 伝播を検証するため checker 設定読込を必ず失敗させる。
+// failingConfigStore は Get で常に S3 一時障害を模倣した error を返す。
 type failingConfigStore struct{}
 
 func (failingConfigStore) Get(_ context.Context, _ string) (storage.Object, error) {
@@ -243,8 +231,6 @@ func (failingConfigStore) Put(_ context.Context, _ string, _ []byte, _ storage.P
 	return nil
 }
 
-// 設定読込失敗時も Lambda error を返して SQS 再試行させつつ、level=ERROR の job_error を1件だけ出す。
-// record 処理は設定読込成功前に開始せず、返却 error は保持される（SPECIFICATION.md 18.1/18.3）。
 func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	var buf bytes.Buffer
@@ -270,11 +256,9 @@ func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	if err == nil {
 		t.Fatal("HandleSQSEvent should return error on config load failure")
 	}
-	// 返却 error は保持され "load variable config" で wrap される。
 	if !strings.Contains(err.Error(), "load variable config") {
 		t.Errorf("err = %v, want wrap of load variable config", err)
 	}
-	// ERROR ログは1件だけ（同一失敗で ErrorCount を複数増やさない）。
 	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
 		t.Fatalf("ERROR log lines = %d, want 1", n)
 	}
@@ -288,14 +272,12 @@ func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	if m["error_type"] != "config_load" {
 		t.Errorf("error_type = %v, want config_load", m["error_type"])
 	}
-	// 設定読込失敗でも識別子は最初の record から best-effort で埋まる。
 	if m["job_id"] != "job-1" {
 		t.Errorf("job_id = %v, want job-1", m["job_id"])
 	}
 	if m["receive_count"] != float64(3) {
 		t.Errorf("receive_count = %v, want 3", m["receive_count"])
 	}
-	// 設定読込成功前に Amazon 処理は開始しない。
 	if saleF.calls != 0 || nrF.searchCalls != 0 || nrF.productCalls != 0 ||
 		paperF.paperCalls != 0 || paperF.kindleCalls != 0 {
 		t.Errorf("amazon fetchers must not be called before config load: %d/%d/%d/%d/%d",
@@ -303,9 +285,6 @@ func TestHandleSQSEvent_ConfigLoadFailureLogsErrorAndPropagates(t *testing.T) {
 	}
 }
 
-// checker 設定は有効でも excluded_title_keywords.json が不在なら設定読込 error にする（SPECIFICATION.md 9.1）。
-// warm invocation で NRDeps.Config.ExcludedKeywords に前回の古い値が残っていても、それで処理を継続せず
-// 失敗する。object 不在は空 fallback せず error_type=config_load の ERROR 1件へ集約し、Amazon 取得は始めない。
 func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	store := storage.NewMemStore()
@@ -321,7 +300,7 @@ func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
 		excludedTitleKeywordsKey: "excluded_title_keywords.json",
 		Logger:                   logging.New(&buf, slog.LevelInfo),
 	}
-	// 前回の成功 invocation で残った古い除外語を模倣し、これが再利用されないことを検証する。
+	// warm invocation で前回成功時の古い除外語が残っている状態を模倣する。
 	w.NRDeps.Config.ExcludedKeywords = []string{"stale-warm-value"}
 	body := mustEncode(t, job.Job{
 		Version: job.Version, JobID: "job-excl", Kind: job.KindNewReleaseSearch,
@@ -339,7 +318,6 @@ func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
 	if !strings.Contains(err.Error(), "load variable config") {
 		t.Errorf("err = %v, want wrap of load variable config", err)
 	}
-	// config_load の ERROR ログは1件だけ（ErrorCount を複数増やさない）。
 	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
 		t.Fatalf("ERROR log lines = %d, want 1", n)
 	}
@@ -350,7 +328,6 @@ func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
 	if m["error_type"] != "config_load" {
 		t.Errorf("error_type = %v, want config_load", m["error_type"])
 	}
-	// 古い値で処理を継続せず、Amazon 取得は一切開始しない。
 	if saleF.calls != 0 || nrF.searchCalls != 0 || nrF.productCalls != 0 ||
 		paperF.paperCalls != 0 || paperF.kindleCalls != 0 {
 		t.Errorf("amazon fetchers must not be called when excluded object is missing: %d/%d/%d/%d/%d",
@@ -358,8 +335,6 @@ func TestHandleSQSEvent_MissingExcludedKeywordsFailsConfigLoad(t *testing.T) {
 	}
 }
 
-// 設定読込失敗かつ message decode も不能な状態でも ERROR ログを失わない。
-// 設定読込が先に失敗するため decode ログとは重複せず config_load の1件だけになる。
 func TestHandleSQSEvent_ConfigLoadFailureWithUndecodableMessage(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{
@@ -374,7 +349,6 @@ func TestHandleSQSEvent_ConfigLoadFailureWithUndecodableMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("HandleSQSEvent should return error on config load failure")
 	}
-	// config_load ログ1件だけ（decode 失敗ログとは重複しない）。
 	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
 		t.Fatalf("log lines = %d, want 1 (decode 不能でもログを失わない・重複しない)", n)
 	}
@@ -387,7 +361,6 @@ func TestHandleSQSEvent_ConfigLoadFailureWithUndecodableMessage(t *testing.T) {
 	}
 }
 
-// 正常時は config_load の ERROR ログを出さない（設定読込成功時は余分な ERROR なし）。
 func TestHandleSQSEvent_SuccessEmitsNoConfigLoadError(t *testing.T) {
 	store := storage.NewMemStore()
 	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("g1"))
@@ -439,8 +412,6 @@ func mustEncode(t *testing.T, j job.Job) string {
 	return string(b)
 }
 
-// --- gist テスト用 stub ---
-
 type recordingGistUpdater struct {
 	called bool
 	ids    []string
@@ -464,7 +435,6 @@ func (emptyAuthorList) Authors(_ context.Context) ([]book.Author, error) { retur
 func TestHandleSQSEvent_UnknownKindIsTerminal(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
-	// version は正しいが kind が未知 → Encode は通るが Decode/Validate で ErrUnknownKind。
 	body := `{"version":1,"job_id":"id","kind":"bogus","check_type":"sale","cycle_id":"c","scheduled_at":"2026-08-09T00:00:00Z","target":{"asin":"B0FX3X569X"}}`
 	event := events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: body}}}
 
@@ -477,8 +447,6 @@ func TestHandleSQSEvent_UnknownKindIsTerminal(t *testing.T) {
 	}
 }
 
-// 同一 Worker（composition root 相当）を再構築せず HandleSQSEvent を2回呼び、間に stub S3 の
-// checker 設定を変更すると2回目が新値を読むことを検証する（warm execution environment でも反映）。
 func TestHandleSQSEvent_RefreshesCheckerConfigPerInvocation(t *testing.T) {
 	store := storage.NewMemStore()
 	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("gist-v1"))
@@ -504,7 +472,6 @@ func TestHandleSQSEvent_RefreshesCheckerConfigPerInvocation(t *testing.T) {
 	if err := w.HandleSQSEvent(context.Background(), event); err != nil {
 		t.Fatalf("first HandleSQSEvent: %v", err)
 	}
-	// Worker を再構築せず S3 の checker 設定だけ変更する。
 	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("gist-v2"))
 	if err := w.HandleSQSEvent(context.Background(), event); err != nil {
 		t.Fatalf("second HandleSQSEvent: %v", err)
@@ -520,10 +487,7 @@ func checkerConfigWithSaleGistID(gistID string) string {
 	return `{"SaleChecker":{"Enabled":true,"GistID":"` + gistID + `","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
 }
 
-// --- secret key 集合の回帰テスト ---
-
-// stubSecretGetter は SSM GetParameter の stub。値があれば返し、なければ ParameterNotFound。
-// requested は GetParameter へ渡された parameter path を呼出順に記録し、不要 key を要求していないか検証する。
+// stubSecretGetter は SSM GetParameter の stub。requested に呼出順の path を記録し不要 key 要求を検証する。
 type stubSecretGetter struct {
 	values    map[string]string
 	requested []string
@@ -537,7 +501,6 @@ func (g *stubSecretGetter) GetParameter(_ context.Context, in *ssm.GetParameterI
 	return nil, &smithy.GenericAPIError{Code: "ParameterNotFound"}
 }
 
-// newCheckWorkerSecretGetter は check-worker の全 required key を secure 側へ設定した stub を返す。
 func newCheckWorkerSecretGetter() *stubSecretGetter {
 	g := &stubSecretGetter{values: map[string]string{}}
 	for _, key := range checkWorkerRequiredSecretKeys {
@@ -546,8 +509,6 @@ func newCheckWorkerSecretGetter() *stubSecretGetter {
 	return g
 }
 
-// check-worker が起動に必須とする secret key は商品通知込の6個。SLACK_ERROR_CHANNEL・
-// MASTODON_CLIENT_ID/SECRET 等、check-worker が使わない key は required に含めない。
 func TestCheckWorkerRequiredSecretKeys(t *testing.T) {
 	want := []string{
 		config.KeyAmazonPartnerTag,
@@ -567,7 +528,6 @@ func TestCheckWorkerRequiredSecretKeys(t *testing.T) {
 	}
 }
 
-// 全 required key が SSM に存在すれば LoadSecrets は成功する。不要 key は1度も要求しない。
 func TestCheckWorkerSecrets_AllPresentSucceedsAndOmitsUnnecessary(t *testing.T) {
 	g := newCheckWorkerSecretGetter()
 	secrets, err := config.LoadSecrets(context.Background(), g, checkWorkerRequiredSecretKeys, nil)
@@ -579,7 +539,6 @@ func TestCheckWorkerSecrets_AllPresentSucceedsAndOmitsUnnecessary(t *testing.T) 
 		secrets.MastodonServer == "" || secrets.MastodonAccessToken == "" {
 		t.Errorf("required secrets not populated: %+v", secrets)
 	}
-	// check-worker が使わない key は secure/plain いずれの path も要求されていない。
 	for _, key := range []string{config.KeySlackErrorChannel, config.KeyMastodonClientID, config.KeyMastodonClientSecret} {
 		if containsKey(g.requested, "/myapp/secure/"+key) || containsKey(g.requested, "/myapp/plain/"+key) {
 			t.Errorf("check-worker must not request unnecessary key %s", key)
@@ -587,9 +546,6 @@ func TestCheckWorkerSecrets_AllPresentSucceedsAndOmitsUnnecessary(t *testing.T) 
 	}
 }
 
-// 各 required key が1つでも SSM に存在しなければ起動エラー。Slack・Mastodon の片側だけ設定された
-// 部分設定（token だけ / channel だけ、server だけ / accessToken だけ）も全てここで捕捉される。
-// 部分設定を理由に adapter を黙って無効化して正常起動してはならない。
 func TestCheckWorkerSecrets_RequiredMissingErrors(t *testing.T) {
 	cases := []struct {
 		name string

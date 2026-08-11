@@ -17,7 +17,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/logging"
 )
 
-// parseLog は JSON 1行を map へ復元する。
 func parseLog(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -27,8 +26,6 @@ func parseLog(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-// TestLogJobResult_EmitsFixedFieldsForEachResult は正常・terminal・retryable・gist の各結果分類が
-// 固定共通fieldを同じ形式で出すことを検証する（SPECIFICATION.md 18.1/18.3）。
 func TestLogJobResult_EmitsFixedFieldsForEachResult(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -111,7 +108,6 @@ func TestLogJobResult_EmitsFixedFieldsForEachResult(t *testing.T) {
 			if dm, ok := m["duration_ms"].(float64); !ok || dm < 0 {
 				t.Errorf("duration_ms = %v, want >=0", m["duration_ms"])
 			}
-			// aws_request_id は context に Lambda 情報が無い場合は空。
 			if m["aws_request_id"] != "" {
 				t.Errorf("aws_request_id = %v, want empty", m["aws_request_id"])
 			}
@@ -125,7 +121,6 @@ func TestLogJobResult_EmitsFixedFieldsForEachResult(t *testing.T) {
 	}
 }
 
-// http_status は Amazon 未送信（0）のとき空文字列になる（SPECIFICATION.md 18.1）。
 func TestLogJobResult_HTTPStatusEmptyWhenZero(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -141,7 +136,6 @@ func TestLogJobResult_HTTPStatusEmptyWhenZero(t *testing.T) {
 	}
 }
 
-// decode 失敗は job_error として記録する（SPECIFICATION.md 18.3）。
 func TestLogDecodeFailure_EmitsJobErrorWithDecodeType(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -172,8 +166,6 @@ func TestLogDecodeFailure_EmitsJobErrorWithDecodeType(t *testing.T) {
 	}
 }
 
-// 設定読込失敗は level=ERROR・event=job_error・error_type=config_load の構造化ログを1件だけ出す
-// （SPECIFICATION.md 18.1/18.3）。識別子は最初の record から best-effort で埋まる。
 func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -188,7 +180,6 @@ func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 
 	w.logConfigLoadFailure(context.Background(), event, errors.New("get checker_configs.json: s3 timeout"))
 
-	// ERROR ログは1行だけ（同一失敗で ErrorCount を複数増やさない）。
 	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
 		t.Fatalf("log lines = %d, want 1", n)
 	}
@@ -205,7 +196,6 @@ func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 	if m["error_type"] != "config_load" {
 		t.Errorf("error_type = %v, want config_load", m["error_type"])
 	}
-	// 識別子は最初の record から best-effort 取得される。
 	if m["job_id"] != "job-1" {
 		t.Errorf("job_id = %v, want job-1", m["job_id"])
 	}
@@ -221,7 +211,6 @@ func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 	if m["receive_count"] != float64(2) {
 		t.Errorf("receive_count = %v, want 2", m["receive_count"])
 	}
-	// 値の無い field は既存契約に従い http_status 空・数値0。
 	if m["http_status"] != "" {
 		t.Errorf("http_status = %v, want empty", m["http_status"])
 	}
@@ -236,7 +225,6 @@ func TestLogConfigLoadFailure_EmitsSingleJobError(t *testing.T) {
 	}
 }
 
-// message が decode 不能でもログ自体を失わない。識別子は空になるが receive_count は属性から埋まる。
 func TestLogConfigLoadFailure_UndecodableMessageStillLogs(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
@@ -257,11 +245,9 @@ func TestLogConfigLoadFailure_UndecodableMessageStillLogs(t *testing.T) {
 	if m["level"] != "ERROR" {
 		t.Errorf("level = %v, want ERROR", m["level"])
 	}
-	// decode 不能なら識別子は空。
 	if m["job_id"] != "" || m["cycle_id"] != "" || m["check_type"] != "" || m["target"] != "" {
 		t.Errorf("decoded identifiers must be empty for undecodable body: %+v", m)
 	}
-	// receive_count は SQS 属性由来のため decode 非依存で埋まる。
 	if m["receive_count"] != float64(4) {
 		t.Errorf("receive_count = %v, want 4", m["receive_count"])
 	}
@@ -270,18 +256,14 @@ func TestLogConfigLoadFailure_UndecodableMessageStillLogs(t *testing.T) {
 	}
 }
 
-// raw body・HTML・token・秘密情報はログへ出さない（SPECIFICATION.md 18.1/19）。
 func TestLogConfigLoadFailure_OmitsRawBodyAndSecrets(t *testing.T) {
 	var buf bytes.Buffer
 	w := &Worker{Logger: logging.New(&buf, slog.LevelInfo)}
-	// body に秘密らしき値と raw 構造を仕込み、かつ decode 失敗させる（識別子は空になる）。
 	secretBody := `{"version":1,"job_id":"leak","kind":"sale_check","check_type":"sale","cycle_id":"leak-cycle","target":{"asin":"SECRET-TOKEN-XYZ"}}`
 	event := events.SQSEvent{Records: []events.SQSMessage{{
 		MessageId: "m1", Body: secretBody,
 	}}}
 
-	// job.Decode は通る本文だが、設定読込失敗ログの error 本文に秘密を含めないよう、
-	// 呼び出し側の error とは別に body 内の秘密がログ文字列へ漏れないことを検証する。
 	w.logConfigLoadFailure(context.Background(), event, errors.New("get checker_configs.json: connection reset"))
 
 	out := buf.String()
@@ -292,23 +274,18 @@ func TestLogConfigLoadFailure_OmitsRawBodyAndSecrets(t *testing.T) {
 	}
 }
 
-// Logger が未設定でも panic せず何も出さない（sibling の logJobResult/logDecodeFailure と同じ null-guard）。
 func TestLogConfigLoadFailure_NilLoggerIsNoOp(t *testing.T) {
 	w := &Worker{Logger: nil}
 	event := events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: "not-json"}}}
-	// panic せず呼び出し元へ戻ることだけを検証する。
 	w.logConfigLoadFailure(context.Background(), event, errors.New("load variable config"))
 }
 
-// bestEffortLogFields は record 無し・decode 成功・decode 失敗を安全に扱う。
 func TestBestEffortLogFields(t *testing.T) {
-	// record 無しは全て空・0。
 	jobID, cycleID, checkType, target, recv := bestEffortLogFields(events.SQSEvent{})
 	if jobID != "" || cycleID != "" || checkType != "" || target != "" || recv != 0 {
 		t.Errorf("empty event = (%q,%q,%q,%q,%d), want empties/0", jobID, cycleID, checkType, target, recv)
 	}
 
-	// decode 成功は識別子と receive_count を返す。
 	body := mustEncode(t, job.Job{
 		Version: job.Version, JobID: "j9", Kind: job.KindGistUpdate,
 		CheckType: job.CheckSale, CycleID: "c9", Target: job.Target{GistType: "sale"},
@@ -323,7 +300,6 @@ func TestBestEffortLogFields(t *testing.T) {
 		t.Errorf("receive_count = %d, want 5", rc)
 	}
 
-	// decode 失敗は識別子空・receive_count は属性から。
 	_, _, _, _, rc2 := bestEffortLogFields(events.SQSEvent{Records: []events.SQSMessage{{
 		Body: "garbage", Attributes: map[string]string{"ApproximateReceiveCount": "6"},
 	}}})
@@ -353,15 +329,12 @@ func TestHTTPStatusString(t *testing.T) {
 	}
 }
 
-// Logger 未設定でも logJobResult は panic せず何も出さない（処理結果は変わらない）。
 func TestLogJobResult_NilLoggerIsNoOp(t *testing.T) {
 	w := &Worker{Logger: nil}
 	j := job.Job{Kind: job.KindSaleCheck, CheckType: job.CheckSale}
-	// panic せず呼び出し元へ戻ることだけを検証する。
 	w.logJobResult(context.Background(), events.SQSMessage{}, j, execution.Completed(200, 10), nil, time.Millisecond)
 }
 
-// Logger 未設定でも logDecodeFailure は panic せず何も出さない。
 func TestLogDecodeFailure_NilLoggerIsNoOp(t *testing.T) {
 	w := &Worker{Logger: nil}
 	w.logDecodeFailure(context.Background(), events.SQSMessage{MessageId: "m1"}, errors.New("bad"))

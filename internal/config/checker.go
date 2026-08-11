@@ -33,18 +33,21 @@ type SaleCheckerConfig struct {
 	PriceChangeAmount int    `json:"PriceChangeAmount"`
 }
 
+// NewReleaseCheckerConfig は新刊チェックの checker_configs.json 設定（SPECIFICATION.md 16）。
 type NewReleaseCheckerConfig struct {
 	Enabled      bool   `json:"Enabled"`
 	GistID       string `json:"GistID"`
 	GistFilename string `json:"GistFilename"`
 }
 
+// PaperToKindleCheckerConfig は紙書籍・Kindle版チェックの checker_configs.json 設定（SPECIFICATION.md 16）。
 type PaperToKindleCheckerConfig struct {
 	Enabled      bool   `json:"Enabled"`
 	GistID       string `json:"GistID"`
 	GistFilename string `json:"GistFilename"`
 }
 
+// DecodeCheckerConfigs は checker_configs.json を CheckerConfigs へ decode する（SPECIFICATION.md 16）。
 func DecodeCheckerConfigs(data []byte) (CheckerConfigs, error) {
 	var result CheckerConfigs
 	if err := json.Unmarshal(data, &result); err != nil {
@@ -100,6 +103,7 @@ func (c CheckerConfigs) IsEnabled(_ context.Context, checkType job.CheckType) (b
 	}
 }
 
+// SaleThresholds は SaleChecker の閾値を sale.Thresholds へ詰め直して返す（SPECIFICATION.md 16）。
 func (c CheckerConfigs) SaleThresholds() domainsale.Thresholds {
 	return domainsale.Thresholds{
 		SaleThreshold:     float64(c.SaleChecker.SaleThreshold),
@@ -108,7 +112,7 @@ func (c CheckerConfigs) SaleThresholds() domainsale.Thresholds {
 	}
 }
 
-// GistMeta は gist_type に対応する GistID と filename を返す。
+// GistMeta は gist_type に対応する GistID と GistFilename を返す。
 // gist_type は sale / new_release / paper_to_kindle（SPECIFICATION.md 15）。
 func (c CheckerConfigs) GistMeta(gistType string) (string, string, error) {
 	switch gistType {

@@ -48,9 +48,7 @@ func TestAuthorsMarkdown_Table(t *testing.T) {
 	}
 }
 
-// TestAuthorsMarkdown_Empty は作者0件の空リスト表現を検証する（SPECIFICATION.md 15）。
-// ヘッダ・count=0 を維持し、data 行はない。空配列は GitHub API を呼ぶ gist_update ではなく
-// reader 側で必須 object 欠落として扱うため、ここへ到達するのは S3 が空配列の正常時のみ。
+// 空配列は gist_update ではなく reader 側で必須 object 欠落として扱うため、ここへ到達するのは S3 が空配列の正常時のみ（SPECIFICATION.md 15）。
 func TestAuthorsMarkdown_Empty(t *testing.T) {
 	got := AuthorsMarkdown(nil)
 	if !strings.HasPrefix(got, "## 合計 0人(最新の単行本発売日降順)\n") {
@@ -59,7 +57,6 @@ func TestAuthorsMarkdown_Empty(t *testing.T) {
 	if !strings.Contains(got, "| 作者 | 最新作 |") || !strings.Contains(got, "|------|--------|") {
 		t.Errorf("table header missing: %q", got)
 	}
-	// data 行が1つもないこと。"| [" を含まなければ空リスト。
 	if strings.Contains(got, "| [") {
 		t.Errorf("empty authors must have no data rows: %q", got)
 	}

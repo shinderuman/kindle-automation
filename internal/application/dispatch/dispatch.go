@@ -12,42 +12,48 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
-// SPECIFICATION.md 6。
+// Event は schedule-checks Lambda への入力イベント（check_type + scheduled_at、SPECIFICATION.md 6）。
 type Event struct {
 	CheckType   job.CheckType
 	ScheduledAt time.Time
 }
 
+// Keys は dispatch が読み出す対象リストの S3 object key 集。
 type Keys struct {
 	Unprocessed string
 	Authors     string
 	PaperBooks  string
 }
 
+// AsinListReader は ASIN リスト S3 object の読み出し抽象。
 // unprocessed_asins, paper_books_asins 用。
 type AsinListReader interface {
 	LoadAsins(ctx context.Context, key string) ([]string, error)
 }
 
+// AuthorReader は著者名リスト S3 object の読み出し抽象。
 // authors.json の Name 用。
 type AuthorReader interface {
 	LoadAuthorNames(ctx context.Context, key string) ([]string, error)
 }
 
+// ConfigReader は Checker の有効/無効設定の読み出し抽象。
 type ConfigReader interface {
 	IsEnabled(ctx context.Context, checkType job.CheckType) (bool, error)
 }
 
+// Enqueuer はジョブの SQS バッチ投入抽象。
 // batch 内の1件でも失敗すれば error を返す（SPECIFICATION.md 7.3）。
 type Enqueuer interface {
 	EnqueueBatch(ctx context.Context, jobs []job.Job) error
 }
 
-// セール周期開始時の Upcoming→Unprocessed 条件付き merge（SPECIFICATION.md 10）。
+// UpcomingMerger はセール周期開始時の Upcoming→Unprocessed 条件付き merge 抽象（SPECIFICATION.md 10）。
 type UpcomingMerger interface {
 	MergeUpcoming(ctx context.Context) (int, error)
 }
 
+// Dependencies は Run へ注入する dispatch ユースケースの依存セット。
 type Dependencies struct {
 	AsinListReader AsinListReader
 	AuthorReader   AuthorReader
@@ -57,7 +63,7 @@ type Dependencies struct {
 	Keys           Keys
 }
 
-// SPECIFICATION.md 18.3 cycle_dispatched/cycle_disabled。
+// DispatchResult は1周期分のジョブ投入結果（SPECIFICATION.md 18.3 cycle_dispatched/cycle_disabled）。
 // Disabled が true のときは Checker 無効で投入を省略したことを表す。
 // composition root がこの値から cycle_dispatched または cycle_disabled を出す。
 type DispatchResult struct {
@@ -67,6 +73,7 @@ type DispatchResult struct {
 	UpcomingMerged int // sale 周回の Upcoming→Unprocessed 取り込み件数。sale 以外は 0。
 }
 
+// Run は EventBridge Scheduler イベントをジョブ化して SQS へ投入する。
 func Run(ctx context.Context, deps Dependencies, event Event) (DispatchResult, error) {
 	cycleID := scheduling.CycleID(string(event.CheckType), event.ScheduledAt)
 	enabled, err := deps.ConfigReader.IsEnabled(ctx, event.CheckType)
@@ -144,7 +151,6 @@ func runPaperToKindle(ctx context.Context, deps Dependencies, event Event, cycle
 
 const finalizeTargetID = "finalize"
 
-// job_id は kind+cycleID+ASIN で決定的。
 func buildAsinJobs(kind job.Kind, checkType job.CheckType, cycleID string, scheduledAt time.Time, asins []string) []job.Job {
 	jobs := make([]job.Job, 0, len(asins))
 	for _, asin := range asins {
@@ -188,7 +194,6 @@ func enqueueBatched(ctx context.Context, enq Enqueuer, jobs []job.Job) error {
 	return nil
 }
 
-// dedup は空を除き最初の出現を優先して重複排除する。
 func dedup(values []string) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(values))

@@ -40,7 +40,6 @@ func TestParseScheduleInput_RejectsInvalid(t *testing.T) {
 	}
 }
 
-// CloudWatch Alarm の直接 invoke payload（AWS 公式形式）から alarmName/state を取り出す。
 func TestParseAlarmInput_Valid(t *testing.T) {
 	body := `{"source":"aws.cloudwatch","alarmArn":"arn:aws:cloudwatch:us-east-1:111122223333:alarm:kindle-automation-work-dlq","accountId":"111122223333","time":"2026-08-04T12:36:15.490+0000","region":"us-east-1","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"ALARM","reason":"test","timestamp":"2026-08-04T12:36:15.490+0000"},"previousState":{"value":"OK","reason":"","timestamp":"2026-08-04T12:31:29.595+0000"}}}`
 	name, state, err := parseAlarmInput([]byte(body))

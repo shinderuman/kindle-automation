@@ -16,9 +16,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// --- 0-Amazon kind の routing 検証用 stub ---
-
-// singleEnqueuer は sale/newrelease 両 Enqueuer（Enqueue1件）を満たし投入を記録する。
 type singleEnqueuer struct {
 	jobs []job.Job
 	err  error
@@ -54,10 +51,8 @@ type silentNotifier struct{}
 
 func (silentNotifier) Notify(context.Context, string) error { return nil }
 
-// pastReleaseClock は newWorker の固定 clock（2026-08-09）より過去へ評価される候補日を返す。
 func pastReleaseDate() time.Time { return time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC) }
 
-// nrDepsWithStubs は new_release_result を Amazon 未アクセスで完了できる最小 stub 依存を返す。
 func nrDepsWithStubs(enq *singleEnqueuer) newrelease.Dependencies {
 	return newrelease.Dependencies{
 		NotifiedStore: nrNotifiedStore{},
@@ -70,8 +65,6 @@ func nrDepsWithStubs(enq *singleEnqueuer) newrelease.Dependencies {
 	}
 }
 
-// sale_finalize と new_release_result は Amazon へ 0 回で各ユースケースへ routing される。
-// 未知 kind の default 分岐（unknown_kind）へ落ちないことを outcome/error で検証する（SPECIFICATION.md 7.3）。
 func TestRoute_NonAmazonKindsDispatchWithoutAmazon(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	enq := &singleEnqueuer{}
@@ -124,7 +117,6 @@ func TestRoute_NonAmazonKindsDispatchWithoutAmazon(t *testing.T) {
 	})
 }
 
-// 空 record の event は設定読込後、処理対象なしで成功する（BatchSize=1 だが空も正常終了）。
 func TestHandleSQSEvent_EmptyRecordsSucceeds(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
@@ -136,7 +128,6 @@ func TestHandleSQSEvent_EmptyRecordsSucceeds(t *testing.T) {
 	}
 }
 
-// 複数 record は順に処理される。全て成功なら error にならない（SPECIFICATION.md 7.1 BatchSize=1 でも handler は逐次処理）。
 func TestHandleSQSEvent_MultipleRecordsProcessedInOrder(t *testing.T) {
 	store := storage.NewMemStore()
 	store.Seed("checker_configs.json", checkerConfigWithSaleGistID("g1"))
@@ -171,7 +162,6 @@ func TestHandleSQSEvent_MultipleRecordsProcessedInOrder(t *testing.T) {
 	}
 }
 
-// 未対応 version は job schema error となり Amazon へ進まず error を返す（SPECIFICATION.md 7.2）。
 func TestHandleSQSEvent_UnsupportedVersionErrors(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
@@ -190,11 +180,9 @@ func TestHandleSQSEvent_UnsupportedVersionErrors(t *testing.T) {
 	}
 }
 
-// 必須 field 欠落（sale_check の asin）も job schema error となり Amazon へ進まない（SPECIFICATION.md 7.2）。
 func TestHandleSQSEvent_MissingRequiredFieldErrors(t *testing.T) {
 	saleF, nrF, paperF := retryableFetchers()
 	w := newWorker(saleF, nrF, paperF, gist.Dependencies{})
-	// asin 無し → requireASIN → ErrMissingField。
 	body := `{"version":1,"job_id":"id","kind":"sale_check","check_type":"sale","cycle_id":"c","scheduled_at":"2026-08-09T00:00:00Z","target":{}}`
 	event := events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: body}}}
 

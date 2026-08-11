@@ -23,7 +23,7 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// Worker は1起動で1つのジョブを処理する。ジョブ種別ごとに対応する application ユースケースへ振り分ける。
+// Worker は1起動で1つのジョブを処理する。
 type Worker struct {
 	SaleDeps  sale.Dependencies
 	NRDeps    newrelease.Dependencies
@@ -37,8 +37,7 @@ type Worker struct {
 	Logger                   *slog.Logger
 }
 
-// route は1つのジョブを種別に応じたユースケースへ振り分ける。
-// 戻り値の Outcome は結果分類とHTTP計測値を、error は再試行させる原因を表す。
+// route の戻り値は、Outcome が結果分類とHTTP計測値、error が再試行させる原因を表す。
 func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error) {
 	switch j.Kind {
 	case job.KindSaleCheck:
@@ -62,9 +61,8 @@ func (w *Worker) route(ctx context.Context, j job.Job) (execution.Outcome, error
 	}
 }
 
-// HandleSQSEvent は SQS イベントを受け取り各レコードをジョブへ decode して振り分ける。
-// 正常・terminal・retryable を問わず各ジョブ結果を固定共通fieldでログへ出す（SPECIFICATION.md 18.1）。
-// decode・業務処理の失敗は error として返し Lambda 経由で SQS へ再配信させる（SPECIFICATION.md 7.2/12）。
+// HandleSQSEvent は各ジョブ結果を固定共通fieldでログへ出し（SPECIFICATION.md 18.1）、
+// decode・業務処理の失敗は error として Lambda 経由で SQS へ再配信させる（SPECIFICATION.md 7.2/12）。
 func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) error {
 	// 可変 S3 設定を invocation ごとに最新へ反映する（cold start に固定しない）。
 	// 読込失敗時も record 処理は開始せず Lambda error で SQS 再試行させる既存挙動を維持しつつ、
@@ -89,9 +87,9 @@ func (w *Worker) HandleSQSEvent(ctx context.Context, event events.SQSEvent) erro
 	return nil
 }
 
-// logJobResult は1ジョブの処理結果を固定共通fieldで出す（SPECIFICATION.md 18.1/18.3）。
-// result に応じて job_completed(INFO)/job_terminal(WARN)/job_error または gist_error(ERROR) へ振り分ける。
-// 取得不能な値は string は空、数値は 0 とする。http_status は未送信時（0）は空文字列（SPECIFICATION.md 18.1）。
+// logJobResult は result に応じて job_completed/job_terminal/job_error/gist_error へ振り分け、
+// 固定共通fieldを出す（SPECIFICATION.md 18.1/18.3）。取得不能な値は string は空、数値は 0、
+// http_status は未送信時（0）は空文字列とする。
 func (w *Worker) logJobResult(ctx context.Context, record events.SQSMessage, j job.Job, oc execution.Outcome, cause error, duration time.Duration) {
 	if w.Logger == nil {
 		return
@@ -181,8 +179,7 @@ func bestEffortLogFields(event events.SQSEvent) (jobID, cycleID, checkType, targ
 	return j.JobID, j.CycleID, string(j.CheckType), targetOf(j), receiveCount(record)
 }
 
-// levelEventFor は結果分類と job kind から level と固定イベント名を決める。
-// gist_update の失敗は gist_error、それ以外の処理エラーは job_error（SPECIFICATION.md 18.3）。
+// levelEventFor は gist_update の失敗を gist_error、それ以外の処理エラーを job_error へ振り分ける（SPECIFICATION.md 18.3）。
 func levelEventFor(result string, kind job.Kind) (slog.Level, string) {
 	switch result {
 	case execution.ResultCompleted:
@@ -197,7 +194,6 @@ func levelEventFor(result string, kind job.Kind) (slog.Level, string) {
 	}
 }
 
-// targetOf は job の対象識別子（ASIN/作者名/gist_type）を1つ取り出す。いずれも無ければ空。
 func targetOf(j job.Job) string {
 	switch {
 	case j.Target.ASIN != "":
@@ -211,7 +207,6 @@ func targetOf(j job.Job) string {
 	}
 }
 
-// receiveCount は SQS の ApproximateReceiveCount 属性を読み取る。属性がない場合は 0。
 func receiveCount(record events.SQSMessage) int {
 	if v, ok := record.Attributes["ApproximateReceiveCount"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -221,7 +216,7 @@ func receiveCount(record events.SQSMessage) int {
 	return 0
 }
 
-// httpStatusString は HTTP status を文字列へ正規化する。未送信（0）の時は空（SPECIFICATION.md 18.1）。
+// httpStatusString は HTTP status 未送信（0）の時は空文字列とする（SPECIFICATION.md 18.1）。
 func httpStatusString(status int) string {
 	if status == 0 {
 		return ""
@@ -229,7 +224,6 @@ func httpStatusString(status int) string {
 	return strconv.Itoa(status)
 }
 
-// requestID は Lambda request ID を取り出す。コンテキストに無い場合は空。
 func requestID(ctx context.Context) string {
 	if lctx, ok := lambdacontext.FromContext(ctx); ok {
 		return lctx.AwsRequestID

@@ -74,11 +74,9 @@ func TestEncodeBooks_UnescapesAmpButKeepsAngleBrackets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeBooks: %v", err)
 	}
-	// & は & へ復元する。
 	if !bytes.Contains(encoded, []byte("c&d")) {
 		t.Errorf("& should be unescaped: %s", encoded)
 	}
-	// < > は Unicode escape のまま残す（既存 kindle_bot 互換）。
 	if bytes.Contains(encoded, []byte("a<b>c")) {
 		t.Errorf("< > should stay escaped: %s", encoded)
 	}
@@ -93,7 +91,6 @@ func TestEncodeBooks_FourSpaceIndent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeBooks: %v", err)
 	}
-	// 配列要素は4スペース、要素内 field は8スペース。
 	if !bytes.Contains(encoded, []byte("    {")) {
 		t.Errorf("array element not 4-space indented:\n%s", encoded)
 	}
@@ -135,7 +132,6 @@ func TestEncodeBooks_KeepsFieldOrder(t *testing.T) {
 }
 
 func TestDecodeBooks_AcceptsLegacyDateFormatsAndNormalizesToRFC3339(t *testing.T) {
-	// 既存 kindle_bot entity.Date が受容する旧形式（date-only, slash 区切り）を decode で受容する。
 	src := `[{"ASIN":"B0FX3X569X","Title":"T","ReleaseDate":"2026-08-28","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026/01/02"}]`
 	records, err := DecodeBooks([]byte(src))
 	if err != nil {
@@ -153,7 +149,6 @@ func TestDecodeBooks_AcceptsLegacyDateFormatsAndNormalizesToRFC3339(t *testing.T
 		t.Errorf("解析成功した ReleaseDate が Extra に入っている")
 	}
 
-	// 書込は SPEC どおり UTC RFC3339 へ正規化する。
 	encoded, err := EncodeBooks(records)
 	if err != nil {
 		t.Fatalf("EncodeBooks: %v", err)
@@ -167,7 +162,6 @@ func TestDecodeBooks_AcceptsLegacyDateFormatsAndNormalizesToRFC3339(t *testing.T
 }
 
 func TestDecodeBooks_PreservesInvalidDateWithoutZeroing(t *testing.T) {
-	// 解釈できない日付はゼロ値へ黙って変換せず、元値を Extra へ保持して再保存時も壊さない。
 	src := `[{"ASIN":"B0FX3X569X","Title":"T","ReleaseDate":"not-a-date","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"}]`
 	records, err := DecodeBooks([]byte(src))
 	if err != nil {
@@ -209,8 +203,6 @@ func TestEncodeAuthors_KeepsFieldOrder(t *testing.T) {
 	}
 }
 
-// TestEncodeAuthors_RoundTripPreservesUnknownFields は作者レコードの未知 field 保持と
-// & 復元を検証する（SPECIFICATION.md 9.3/9.4）。book 側の契約検証と同等の保証を author にも適用する。
 func TestEncodeAuthors_RoundTripPreservesUnknownFields(t *testing.T) {
 	src := `[
     {
@@ -244,8 +236,6 @@ func TestEncodeAuthors_RoundTripPreservesUnknownFields(t *testing.T) {
 	}
 }
 
-// TestDecodeAuthors_AcceptsLegacyDateFormats は author の LatestReleaseDate が
-// 旧形式（date-only/slash）を受容し RFC3339 へ正規化されることを検証する（SPECIFICATION.md 9.3）。
 func TestDecodeAuthors_AcceptsLegacyDateFormats(t *testing.T) {
 	src := `[{"Name":"海李","URL":"u","LatestReleaseDate":"2025/12/28","LatestReleaseTitle":"作","LatestReleaseURL":"u"}]`
 	records, err := DecodeAuthors([]byte(src))
@@ -266,7 +256,6 @@ func TestDecodeAuthors_AcceptsLegacyDateFormats(t *testing.T) {
 }
 
 func TestDecodeBooks_NullAndEmptyDateAreZero(t *testing.T) {
-	// null / 空文字は entity.Date と同じくゼロ値扱いとし、Extra へは入れない。
 	src := `[{"ASIN":"B0FX3X569X","Title":"T","ReleaseDate":null,"CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":""}]`
 	records, err := DecodeBooks([]byte(src))
 	if err != nil {

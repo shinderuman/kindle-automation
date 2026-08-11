@@ -7,8 +7,7 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/application/sale"
 )
 
-// toSaleResult は amazon 商品ページ取得結果を sale ユースケースの結果へ変換する。
-// HTTP計測値（SPECIFICATION.md 18.1）も合わせて伝播する。
+// toSaleResult は HTTP計測値（SPECIFICATION.md 18.1）も伝播する。
 func toSaleResult(r amazon.FetchResult) sale.FetchResult {
 	return sale.FetchResult{
 		Category: mapSaleCategory(r.Category),
@@ -26,7 +25,6 @@ func toSaleResult(r amazon.FetchResult) sale.FetchResult {
 	}
 }
 
-// mapSaleCategory は amazon の取得分類を sale の業務分類へ写像する。
 func mapSaleCategory(c amazon.Category) sale.Category {
 	switch c {
 	case amazon.CategoryOK:
@@ -42,8 +40,7 @@ func mapSaleCategory(c amazon.Category) sale.Category {
 	}
 }
 
-// toNewReleaseProductResult は amazon 商品ページ取得結果を新刊 detail 用の結果へ変換する。
-// URL は Affiliate Tag 付きの保存用 URL を構築する（SPECIFICATION.md 9.2）。
+// toNewReleaseProductResult は Affiliate Tag 付きの保存用 URL を構築する（SPECIFICATION.md 9.2）。
 func toNewReleaseProductResult(r amazon.FetchResult, partnerTag string) newrelease.ProductResult {
 	info := r.Info
 	return newrelease.ProductResult{
@@ -63,7 +60,6 @@ func toNewReleaseProductResult(r amazon.FetchResult, partnerTag string) newrelea
 	}
 }
 
-// mapNRProductCategory は amazon の取得分類を新刊商品ページの業務分類へ写像する。
 func mapNRProductCategory(c amazon.Category) newrelease.ProductCategory {
 	switch c {
 	case amazon.CategoryOK:
@@ -79,9 +75,8 @@ func mapNRProductCategory(c amazon.Category) newrelease.ProductCategory {
 	}
 }
 
-// toNewReleaseSearchResult は amazon 検索ページ取得結果を新刊 search 用の結果へ変換する。
-// IsKindle は検索結果カードの形式表示でKindle版と確認できた候補だけ真とする（SPECIFICATION.md 13.4）。
-// URL は保存用 URL を構築する。
+// toNewReleaseSearchResult は IsKindle を形式表示でKindle版と確認できた候補だけ真とし（SPECIFICATION.md 13.4）、
+// 保存用 URL を構築する。
 func toNewReleaseSearchResult(r amazon.SearchResult, partnerTag string) newrelease.SearchResult {
 	hits := make([]newrelease.SearchHit, 0, len(r.Hits))
 	for _, h := range r.Hits {
@@ -104,8 +99,7 @@ func toNewReleaseSearchResult(r amazon.SearchResult, partnerTag string) newrelea
 	}
 }
 
-// mapNRSearchCategory は amazon の取得分類を新刊検索の業務分類へ写像する。
-// 検索結果0件（CategorySearchEmpty）は search_empty へ写像し、呼び出し側で retryable outcome にする。
+// mapNRSearchCategory は CategorySearchEmpty（検索0件）を search_empty へ写像し、呼び出し側で retryable outcome にする。
 func mapNRSearchCategory(c amazon.Category) newrelease.SearchCategory {
 	switch c {
 	case amazon.CategoryOK:
@@ -117,7 +111,6 @@ func mapNRSearchCategory(c amazon.Category) newrelease.SearchCategory {
 	}
 }
 
-// toPaperCheckResult は amazon 商品ページ取得結果を紙書籍ページ(check)用の結果へ変換する。
 func toPaperCheckResult(r amazon.FetchResult) papertokindle.PaperCheckResult {
 	info := r.Info
 	return papertokindle.PaperCheckResult{
@@ -135,7 +128,6 @@ func toPaperCheckResult(r amazon.FetchResult) papertokindle.PaperCheckResult {
 	}
 }
 
-// toKindleDetailResult は amazon 商品ページ取得結果を Kindle 商品ページ(detail)用の結果へ変換する。
 func toKindleDetailResult(r amazon.FetchResult) papertokindle.KindleDetailResult {
 	info := r.Info
 	return papertokindle.KindleDetailResult{
@@ -153,7 +145,6 @@ func toKindleDetailResult(r amazon.FetchResult) papertokindle.KindleDetailResult
 	}
 }
 
-// mapPaperCategory は amazon の取得分類を紙書籍・Kindle 版チェックの業務分類へ写像する。
 func mapPaperCategory(c amazon.Category) papertokindle.Category {
 	switch c {
 	case amazon.CategoryOK:

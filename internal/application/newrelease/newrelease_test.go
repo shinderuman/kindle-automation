@@ -213,19 +213,15 @@ func TestAuthorMatches(t *testing.T) {
 	if !AuthorMatches("ＡＢＣ", []string{"ABC"}) {
 		t.Errorf("全角半角違いは正規化で一致")
 	}
-	// 各 contributor ごとに役割表記を除去して比較する。
 	if !AuthorMatches("海李", []string{"海李 (著)"}) {
 		t.Errorf("役割括弧を除去したcontributorと一致する場合はtrue")
 	}
-	// 複数 contributor のいずれかと完全一致すればtrue。
 	if !AuthorMatches("やきいもほくほく", []string{"上原誠", "やきいもほくほく"}) {
 		t.Errorf("複数contributorのいずれかに完全一致する場合はtrue")
 	}
-	// 「山田 太郎」と対象「山田次郎」は姓だけ同じ別人。完全名が異なるためfalse。
 	if AuthorMatches("山田次郎", []string{"山田 太郎"}) {
 		t.Errorf("空白入り別人（山田 太郎 vs 山田次郎）は姓部分一致でもfalse")
 	}
-	// 完全名が異なる部分一致（上原 vs 上原誠）はfalse。
 	if AuthorMatches("上原", []string{"上原誠"}) {
 		t.Errorf("部分名（上原）は完全名（上原誠）と異なるためfalse")
 	}
@@ -362,8 +358,6 @@ func TestHandleNewReleaseSearch_RetryableReturnsError(t *testing.T) {
 	}
 }
 
-// --- HandleNewReleaseDetail ---
-
 func TestHandleNewReleaseDetail_FetchesOnceAndApplies(t *testing.T) {
 	info := ProductInfo{
 		ASIN: "B0FX3X569X", Title: "タイトル", URL: "https://u",
@@ -487,7 +481,6 @@ func TestApplyCandidate_AlreadyNotifiedSkipsNotifyButUpsertsAndReconciles(t *tes
 	if deps.Notifier.(*fakeNotifier).called {
 		t.Errorf("通知済みは通知しない")
 	}
-	// 通知済みでも upcoming 補完と Author gist を省略しない（SPEC 7.5）。
 	if len(deps.UpcomingStore.(*fakeUpcomingStore).upserts) != 1 {
 		t.Errorf("通知済みでも upcoming へ upsert する")
 	}
@@ -505,7 +498,6 @@ func TestApplyCandidate_NotifiedUpsertFailureReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("notified upsert failure must return error for reconcile")
 	}
-	// 通知は保存成功後のみなので呼ばれない。
 	if deps.Notifier.(*fakeNotifier).called {
 		t.Errorf("must not notify when save failed")
 	}
@@ -520,8 +512,6 @@ func TestApplyCandidate_UpcomingUpsertFailureReturnsError(t *testing.T) {
 	}
 }
 
-// 通知失敗は Notifier adapter が notification_error（SPECIFICATION.md 18.3）で記録するため、
-// new_release ユースケースでは job を completed のままにし、保存済み状態を巻き戻さない。
 func TestApplyCandidate_NotifyFailureDoesNotRollback(t *testing.T) {
 	deps := baseDeps()
 	deps.Notifier.(*fakeNotifier).err = errors.New("slack down")
@@ -531,10 +521,6 @@ func TestApplyCandidate_NotifyFailureDoesNotRollback(t *testing.T) {
 	}
 }
 
-// TestApplyCandidate_AuthorStoreUnchangedStillEnqueuesGist は UpdateLatestRelease が changed=false を
-// 返しても Author gist job を投入することを検証する（SPECIFICATION.md 13.6, 7.5）。
-// 別候補がより新しい日付で更新済みの場合や、同一候補の再配信で既に適用済みの場合も changed=false になるが、
-// いずれも authors.json 確定後の投入経路が Gist を reconcile する。
 func TestApplyCandidate_AuthorStoreUnchangedStillEnqueuesGist(t *testing.T) {
 	deps := baseDeps()
 	deps.AuthorStore.(*fakeAuthorStore).changed = false
@@ -593,11 +579,6 @@ func (e *reconcileEnqueuer) Enqueue(_ context.Context, j job.Job) error {
 	return nil
 }
 
-// TestApplyCandidate_GistReconcilesAcrossEnqueueFailureAndRedelivery は
-// authors.json 更新成功(changed=true) → Author gist enqueue 失敗 → 同一 job 再配信 →
-// UpdateLatestRelease=false → それでも同一決定的 gist job を再投入する、という2回連続シナリオを検証する
-// （SPECIFICATION.md 13.6, 7.5）。enqueue 失敗後の再実行で必ず再投入し、Gist job が永久欠落しない契約。
-// authors.json は巻き戻さず、Gist enqueue 失敗は job error として SQS 再試行させる。
 func TestApplyCandidate_GistReconcilesAcrossEnqueueFailureAndRedelivery(t *testing.T) {
 	author := &reconcileAuthorStore{}
 	enq := &reconcileEnqueuer{failFirst: true}
@@ -664,7 +645,6 @@ func TestApplyCandidate_PastReleaseWithAuthorChangedEnqueuesGist(t *testing.T) {
 }
 
 func TestApplyCandidate_LatestReleaseURLIsCleanedOfAffiliateQuery(t *testing.T) {
-	// SPECIFICATION.md 9.3: LatestReleaseURL から query/fragment を除去する。
 	deps := baseDeps()
 	deps.AuthorStore.(*fakeAuthorStore).changed = true
 	taggedURL := "https://www.amazon.co.jp/dp/B0FX3X569X?tag=partner-22#frag"
@@ -679,7 +659,6 @@ func TestApplyCandidate_LatestReleaseURLIsCleanedOfAffiliateQuery(t *testing.T) 
 	if gotURL != wantURL {
 		t.Errorf("LatestReleaseURL = %q, want %q (affiliate query/fragment 除去)", gotURL, wantURL)
 	}
-	// notified/upcoming は SPEC 9.2 の保存用 URL のため affiliate tag 付きのまま保持する。
 	notified := deps.NotifiedStore.(*fakeNotifiedStore)
 	if len(notified.upserts) != 1 || notified.upserts[0].URL != taggedURL {
 		t.Errorf("notified URL は affiliate tag を保持する: got %+v", notified.upserts)
@@ -704,14 +683,8 @@ func TestBuildJobs_AreDeterministicAndUseAmazonRequests(t *testing.T) {
 	}
 }
 
-// TestBuildAuthorGistJob_DiscriminatorIsDeterministic は Author 用 gist job_id の決定性と
-// 衝突回避を検証する。SQS FIFO の MessageDeduplicationId は job_id の SHA-256 のため、
-// job_id が衝突すると後続 job が5分 dedup で消失する（SPECIFICATION.md 7.2）。
-// 同一 cycle・同一作者でも候補 A/B（異なるASIN）は別 job_id、同一候補の再試行は同一 job_id、
-// 異なる作者も別 job_id になること。Target.GistType は new_release のまま変えない（gist updater 契約）。
 func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	const author = "海李"
-	// 同一作者の候補 A/B（異なるASIN）。これが新旧ASINごとに段階的に LatestReleaseDate を更新する経路。
 	candA := buildAuthorGistJob(detailJob("B0FX3X569X", author), "B0FX3X569X")
 	candB := buildAuthorGistJob(detailJob("B0FX3X5700", author), "B0FX3X5700")
 	if candA.JobID == candB.JobID {
@@ -720,11 +693,9 @@ func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	if scheduling.DedupID(candA.JobID) == scheduling.DedupID(candB.JobID) {
 		t.Errorf("same author different candidates dedup must differ")
 	}
-	// 同一候補の再試行（Lambda/SQS 再配信）は同一 job_id で冪等になる。
 	if buildAuthorGistJob(detailJob("B0FX3X569X", author), "B0FX3X569X").JobID != candA.JobID {
 		t.Errorf("same candidate retry must be deterministic")
 	}
-	// 異なる作者も別 job_id になる。
 	other := buildAuthorGistJob(detailJob("B0FX3X569X", "佐藤"), "B0FX3X569X")
 	if candA.JobID == other.JobID {
 		t.Errorf("different authors must differ: %s", candA.JobID)
@@ -732,7 +703,6 @@ func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	if scheduling.DedupID(candA.JobID) == scheduling.DedupID(other.JobID) {
 		t.Errorf("different authors dedup must differ")
 	}
-	// MessageGroupId は gist_update につき external-updates（SPECIFICATION.md 7.1/7.3）。
 	if got := job.MessageGroup(candA.Kind); got != "external-updates" {
 		t.Errorf("MessageGroup = %q, want external-updates", got)
 	}
@@ -741,11 +711,6 @@ func TestBuildAuthorGistJob_DiscriminatorIsDeterministic(t *testing.T) {
 	}
 }
 
-// --- retryable / terminal 分類の混同防止（SPECIFICATION.md 11.3, 13.4）---
-
-// TestHandleNewReleaseSearch_SearchEmptyReturnsRetryableError は検索0件が search_empty の
-// 再試行可能エラーになることを検証する（SPECIFICATION.md 11.3, 507）。
-// terminal ではなく retryable（Lambda error → SQS 再配信）でなければならない。
 func TestHandleNewReleaseSearch_SearchEmptyReturnsRetryableError(t *testing.T) {
 	deps := baseDeps()
 	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchEmpty, HTTPStatus: 200, ResponseBytes: 7}
@@ -765,8 +730,6 @@ func TestHandleNewReleaseSearch_SearchEmptyReturnsRetryableError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseSearch_FetchErrorReturnsError は FetchSearch の通信/decode エラーが
-// fetch_error の retryable になることを検証する（SPECIFICATION.md 11.3 通信失敗）。
 func TestHandleNewReleaseSearch_FetchErrorReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.SearchFetcher.(*fakeSearchFetcher).err = errors.New("dns failure")
@@ -783,8 +746,6 @@ func TestHandleNewReleaseSearch_FetchErrorReturnsError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseSearch_RetryableCategoryReturnsErrRetryableFetch は SearchRetryable が
-// 型付き ErrRetryableFetch を返すことを検証する（分類の混同防止）。
 func TestHandleNewReleaseSearch_RetryableCategoryReturnsErrRetryableFetch(t *testing.T) {
 	deps := baseDeps()
 	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchRetryable, HTTPStatus: 503}
@@ -799,8 +760,6 @@ func TestHandleNewReleaseSearch_RetryableCategoryReturnsErrRetryableFetch(t *tes
 	}
 }
 
-// TestHandleNewReleaseSearch_UnknownCategoryReturnsError は未知の検索分類が
-// unknown_category error になることを検証する（分類欠陥の表面化）。
 func TestHandleNewReleaseSearch_UnknownCategoryReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.SearchFetcher.(*fakeSearchFetcher).result = SearchResult{Category: SearchCategory(99)}
@@ -814,9 +773,6 @@ func TestHandleNewReleaseSearch_UnknownCategoryReturnsError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseSearch_EnqueueFailureReturnsError は候補 job 投入失敗が
-// enqueue_failed で起動全体を失敗させることを検証する（SPECIFICATION.md 524）。
-// 後続候補の投入は保証せず、失敗対象を失わず error を返す。
 func TestHandleNewReleaseSearch_EnqueueFailureReturnsError(t *testing.T) {
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
 	deps := baseDeps()
@@ -832,11 +788,8 @@ func TestHandleNewReleaseSearch_EnqueueFailureReturnsError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseResult_MissingProductReturnsError は result job の product 欠落が
-// missing_product で失敗することを検証する（job 投入側の schema 違反防御）。
 func TestHandleNewReleaseResult_MissingProductReturnsError(t *testing.T) {
 	deps := baseDeps()
-	// product を持たない result job。
 	j := job.Job{Version: job.Version, JobID: "r", Kind: job.KindNewReleaseResult,
 		CheckType: job.CheckNewRelease, CycleID: "nr:c",
 		Target: job.Target{ASIN: "B0FX3X569X", AuthorName: "海李"}}
@@ -850,9 +803,6 @@ func TestHandleNewReleaseResult_MissingProductReturnsError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseDetail_DateUnavailableIsRetryable は商品詳細で発売日を取得できない場合が
-// 解析失敗の retryable になることを検証する（SPECIFICATION.md 13.4, 11.3 522）。
-// terminal ではなく retryable で再試行しなければならない。
 func TestHandleNewReleaseDetail_DateUnavailableIsRetryable(t *testing.T) {
 	info := ProductInfo{
 		ASIN: "B0FX3X569X", Title: "T", HasKindleSwatch: true,
@@ -873,9 +823,6 @@ func TestHandleNewReleaseDetail_DateUnavailableIsRetryable(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseDetail_PermanentClientErrorIsTerminal は恒久 4xx が terminal になり、
-// error_type=permanent_client_error で対象をリストへ残すことを検証する（SPECIFICATION.md 11.3 517）。
-// not_found と区別し、retryable と混同しない。
 func TestHandleNewReleaseDetail_PermanentClientErrorIsTerminal(t *testing.T) {
 	deps := baseDeps()
 	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductPermanentClientError, HTTPStatus: 400}
@@ -895,7 +842,6 @@ func TestHandleNewReleaseDetail_PermanentClientErrorIsTerminal(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseDetail_NotFoundIsTerminal は 404/商品不存在が not_found terminal になることを検証する。
 func TestHandleNewReleaseDetail_NotFoundIsTerminal(t *testing.T) {
 	deps := baseDeps()
 	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductNotFound, HTTPStatus: 404}
@@ -912,8 +858,6 @@ func TestHandleNewReleaseDetail_NotFoundIsTerminal(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseDetail_ExcludedKeywordAndYearMonthAreTerminal は商品詳細で除外キーワード・
-// 年月タイトルに該当する候補が excluded terminal になることを検証する（SPECIFICATION.md 13.4/13.3）。
 func TestHandleNewReleaseDetail_ExcludedKeywordAndYearMonthAreTerminal(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -949,8 +893,6 @@ func TestHandleNewReleaseDetail_ExcludedKeywordAndYearMonthAreTerminal(t *testin
 	}
 }
 
-// TestHandleNewReleaseDetail_FetchErrorReturnsError は FetchProduct の通信エラーが
-// fetch_error の retryable になることを検証する（SPECIFICATION.md 11.3 通信失敗）。
 func TestHandleNewReleaseDetail_FetchErrorReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.ProductFetcher.(*fakeProductFetcher).err = errors.New("timeout")
@@ -964,9 +906,6 @@ func TestHandleNewReleaseDetail_FetchErrorReturnsError(t *testing.T) {
 	}
 }
 
-// TestHandleNewReleaseDetail_RetryableCategoryReturnsErrRetryableFetch は商品ページ取得の
-// retryable 分類（403/429/5xx/CAPTCHA/構造欠落）が型付き ErrRetryableFetch になることを検証する
-// （SPECIFICATION.md 11.3）。terminal や解析失敗と混同しない。
 func TestHandleNewReleaseDetail_RetryableCategoryReturnsErrRetryableFetch(t *testing.T) {
 	deps := baseDeps()
 	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductRetryable, HTTPStatus: 503}
@@ -990,8 +929,6 @@ func TestHandleNewReleaseDetail_RetryableCategoryReturnsErrRetryableFetch(t *tes
 	}
 }
 
-// TestHandleNewReleaseDetail_UnknownCategoryReturnsError は未知の商品分類が
-// unknown_category error になることを検証する（分類欠陥の表面化）。
 func TestHandleNewReleaseDetail_UnknownCategoryReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.ProductFetcher.(*fakeProductFetcher).result = ProductResult{Category: ProductCategory(99)}
@@ -1005,11 +942,6 @@ func TestHandleNewReleaseDetail_UnknownCategoryReturnsError(t *testing.T) {
 	}
 }
 
-// --- 候補振り分け境界（SPECIFICATION.md 13.4）---
-
-// TestHandleNewReleaseSearch_RoutesNonKindleAndInvalidPriceToDetail は検索結果で Kindle確定 or
-// 正のKindle価格 or 発売日 のいずれかを確定できない候補が new_release_detail へ回されることを検証する。
-// これらは result へ進めず、商品ページで再確認する（SPECIFICATION.md 13.4, 234）。
 func TestHandleNewReleaseSearch_RoutesNonKindleAndInvalidPriceToDetail(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1040,8 +972,6 @@ func TestHandleNewReleaseSearch_RoutesNonKindleAndInvalidPriceToDetail(t *testin
 	}
 }
 
-// TestHandleNewReleaseSearch_NotifiedExistsErrorPropagates は事前除外での notified 存在判定エラーが
-// 投入失敗として伝播し失敗対象を失わないことを検証する（SPECIFICATION.md 13.3, 524）。
 func TestHandleNewReleaseSearch_NotifiedExistsErrorPropagates(t *testing.T) {
 	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
 	deps := baseDeps()
@@ -1057,11 +987,6 @@ func TestHandleNewReleaseSearch_NotifiedExistsErrorPropagates(t *testing.T) {
 	}
 }
 
-// --- 純粋関数: 発売日境界・正規化・役割表記（SPECIFICATION.md 13.3, 13.6）---
-
-// TestIsFutureRelease_Boundary は ReleaseDate.After(now) の境界を検証する（SPECIFICATION.md 13.6）。
-// 発売日==now は将来ではないため false、発売日が now より1日後なら true。
-// これにより「ReleaseDateの時刻が処理時刻以前なら新刊予定として通知しない」境界を固定する。
 func TestIsFutureRelease_Boundary(t *testing.T) {
 	now := fixedClock()
 	if IsFutureRelease(now, now) {
@@ -1077,7 +1002,6 @@ func TestIsFutureRelease_Boundary(t *testing.T) {
 	}
 }
 
-// TestNormalizeAuthorName_EmptyAndMixedSpaces は空文字と半角/全角スペース混入を検証する。
 func TestNormalizeAuthorName_EmptyAndMixedSpaces(t *testing.T) {
 	if got := NormalizeAuthorName(""); got != "" {
 		t.Errorf("empty = %q, want empty", got)
@@ -1087,8 +1011,6 @@ func TestNormalizeAuthorName_EmptyAndMixedSpaces(t *testing.T) {
 	}
 }
 
-// TestAuthorMatches_FullWidthRoleParenAndEmptyAuthor は全角役割括弧（著）の除去と、
-// 対象作者名空の false を検証する（SPECIFICATION.md 13.3）。役割の半角/全角を問わない。
 func TestAuthorMatches_FullWidthRoleParenAndEmptyAuthor(t *testing.T) {
 	if !AuthorMatches("海李", []string{"海李（著）"}) {
 		t.Errorf("全角役割括弧（著）を除去したcontributorと一致する場合はtrue")
@@ -1101,10 +1023,6 @@ func TestAuthorMatches_FullWidthRoleParenAndEmptyAuthor(t *testing.T) {
 	}
 }
 
-// --- 副作用順序: 保存失敗時の通知抑制・retention/authorStore error（SPECIFICATION.md 13.6）---
-
-// TestApplyCandidate_UpcomingFailureSkipsNotify は upcoming 保存失敗時に通知しないことを検証する。
-// 通知は notified と upcoming の両方の S3 保存成功後（SPECIFICATION.md 13.6 手順5-7の順序）。
 func TestApplyCandidate_UpcomingFailureSkipsNotify(t *testing.T) {
 	deps := baseDeps()
 	deps.UpcomingStore.(*fakeUpcomingStore).upsertErr = errors.New("s3 conflict")
@@ -1112,18 +1030,14 @@ func TestApplyCandidate_UpcomingFailureSkipsNotify(t *testing.T) {
 	if _, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X"))); err == nil {
 		t.Fatal("upcoming failure must return error")
 	}
-	// upcoming 保存失敗時は通知しない（保存成功後のみ通知）。
 	if deps.Notifier.(*fakeNotifier).called {
 		t.Errorf("must not notify when upcoming save failed")
 	}
-	// notified は upcoming の前に保存されるため成功している。
 	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 1 {
 		t.Errorf("notified must be saved before upcoming")
 	}
 }
 
-// TestApplyCandidate_RetentionFailureReturnsError は notified 保存期間適用の読み直し失敗が
-// retention error になることを検証する（SPECIFICATION.md 13.6 手順1-3）。
 func TestApplyCandidate_RetentionFailureReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.NotifiedStore.(*fakeNotifiedStore).retentionErr = errors.New("s3 get failed")
@@ -1137,8 +1051,6 @@ func TestApplyCandidate_RetentionFailureReturnsError(t *testing.T) {
 	}
 }
 
-// TestApplyCandidate_AuthorStoreFailureReturnsError は Author 最新作更新失敗が
-// author_store error になり後続へ進まないことを検証する（SPECIFICATION.md 13.5）。
 func TestApplyCandidate_AuthorStoreFailureReturnsError(t *testing.T) {
 	deps := baseDeps()
 	deps.AuthorStore.(*fakeAuthorStore).err = errors.New("authors.json conflict")

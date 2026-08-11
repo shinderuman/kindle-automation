@@ -17,19 +17,31 @@ import (
 
 // 環境変数名（SAM テンプレートから Lambda 環境変数へ渡される）。
 const (
-	EnvS3Bucket                 = "S3_BUCKET"
-	EnvS3Region                 = "S3_REGION"
-	EnvUnprocessedKey           = "S3_UNPROCESSED_OBJECT_KEY"
-	EnvPaperBooksKey            = "S3_PAPER_BOOKS_OBJECT_KEY"
-	EnvAuthorsKey               = "S3_AUTHORS_OBJECT_KEY"
+	// EnvS3Bucket は対象 S3 bucket 名を受け取る。
+	EnvS3Bucket = "S3_BUCKET"
+	// EnvS3Region は対象 S3 bucket のリージョンを受け取る。
+	EnvS3Region = "S3_REGION"
+	// EnvUnprocessedKey は unprocessed_asins.json の object key を受け取る。
+	EnvUnprocessedKey = "S3_UNPROCESSED_OBJECT_KEY"
+	// EnvPaperBooksKey は paper_books_asins.json の object key を受け取る。
+	EnvPaperBooksKey = "S3_PAPER_BOOKS_OBJECT_KEY"
+	// EnvAuthorsKey は authors.json の object key を受け取る。
+	EnvAuthorsKey = "S3_AUTHORS_OBJECT_KEY"
+	// EnvExcludedTitleKeywordsKey は excluded_title_keywords.json の object key を受け取る。
 	EnvExcludedTitleKeywordsKey = "S3_EXCLUDED_TITLE_KEYWORDS_OBJECT_KEY"
-	EnvNotifiedKey              = "S3_NOTIFIED_OBJECT_KEY"
-	EnvUpcomingKey              = "S3_UPCOMING_OBJECT_KEY"
-	EnvCheckerConfigKey         = "S3_CHECKER_CONFIG_OBJECT_KEY"
-	EnvQueueURL                 = "SQS_QUEUE_URL"
-	EnvLogLevel                 = "LOG_LEVEL"
+	// EnvNotifiedKey は notified_asins.json の object key を受け取る。
+	EnvNotifiedKey = "S3_NOTIFIED_OBJECT_KEY"
+	// EnvUpcomingKey は upcoming_asins.json の object key を受け取る。
+	EnvUpcomingKey = "S3_UPCOMING_OBJECT_KEY"
+	// EnvCheckerConfigKey は checker_configs.json の object key を受け取る。
+	EnvCheckerConfigKey = "S3_CHECKER_CONFIG_OBJECT_KEY"
+	// EnvQueueURL はジョブ投入先 SQS queue URL を受け取る。
+	EnvQueueURL = "SQS_QUEUE_URL"
+	// EnvLogLevel は構造化ログの level 文字列を受け取る（空なら INFO）。
+	EnvLogLevel = "LOG_LEVEL"
 )
 
+// Env は環境変数から集約した起動設定（SPECIFICATION.md 8）。domain 層へ環境変数名を晒さないためここで構造体へ詰める。
 type Env struct {
 	S3Bucket                 string
 	S3Region                 string
@@ -75,7 +87,6 @@ func LoadEnv(getenv func(string) string) (Env, error) {
 			return Env{}, fmt.Errorf("env %s is required", item.name)
 		}
 	}
-	// log level は空なら INFO。非空の場合は有効な値を要求し、不正値を暗黙に補完しない。
 	level := env.LogLevel
 	if level == "" {
 		level = "INFO"

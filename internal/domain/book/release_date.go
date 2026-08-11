@@ -8,13 +8,12 @@ import (
 	"time"
 )
 
+// ErrInvalidReleaseDate は発売日文字列を解析できなかったことを示す。
 var ErrInvalidReleaseDate = errors.New("invalid release date")
 
 var (
-	// japaneseDateRe は "2026年8月28日" 形式へマッチする。
 	japaneseDateRe = regexp.MustCompile(`(\d{4})年(\d{1,2})月(\d{1,2})日`)
-	// slashDateRe は "2026/8/28" 形式へマッチする。
-	slashDateRe = regexp.MustCompile(`(\d{4})/(\d{1,2})/(\d{1,2})`)
+	slashDateRe    = regexp.MustCompile(`(\d{4})/(\d{1,2})/(\d{1,2})`)
 )
 
 // ParseReleaseDate は発売日文字列を UTC 00:00:00 へ正規化する（SPECIFICATION.md 11.2）。

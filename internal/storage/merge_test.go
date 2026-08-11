@@ -226,7 +226,6 @@ func TestClearUpcomingIfUnchanged_KeepsWhenChangedDuringMerge(t *testing.T) {
 	obj, _ := store.Get(context.Background(), "upcoming")
 	startETag := obj.ETag
 
-	// 処理中に Upcoming が追加された想定で本文を変更する。
 	seedBook(store, "upcoming",
 		book.KindleBook{ASIN: "C", Title: "original"},
 		book.KindleBook{ASIN: "D", Title: "added-during-merge"},
@@ -246,7 +245,6 @@ func TestClearUpcomingIfUnchanged_KeepsWhenChangedDuringMerge(t *testing.T) {
 	}
 }
 
-// asinOrder はレコードの ASIN を並び順どおりに取り出す（保存順検証用）。
 func asinOrder(records []BookRecord) []string {
 	out := make([]string, len(records))
 	for i, r := range records {
@@ -255,7 +253,6 @@ func asinOrder(records []BookRecord) []string {
 	return out
 }
 
-// asinsEqual は ASIN の並びが完全一致するかを返す。
 func asinsEqual(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -270,13 +267,11 @@ func asinsEqual(got, want []string) bool {
 
 func TestUpsertBookRecord_SavesSortOrder(t *testing.T) {
 	store := NewMemStore()
-	// 発売日昇順かつ同日ペアを逆順で seed。未知 field も混ぜる。
 	store.Seed("k", `[
         {"ASIN":"B0OLDEST001","Title":"Z","ReleaseDate":"2025-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2025-01-01T00:00:00Z"},
         {"ASIN":"B0SAME000001","Title":"BBB","ReleaseDate":"2026-03-03T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-03-03T00:00:00Z","Memo":"手動"},
         {"ASIN":"B0SAME000002","Title":"AAA","ReleaseDate":"2026-03-03T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-03-03T00:00:00Z"}
     ]`)
-	// 最新発売日の新規レコードを upsert し、保存順が発売日降順・同日タイトル昇順になるか。
 	if err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
 		ASIN: "B0NEWEST001", Title: "A", ReleaseDate: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC), CreatedAt: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 	}}); err != nil {
@@ -288,7 +283,6 @@ func TestUpsertBookRecord_SavesSortOrder(t *testing.T) {
 	if !asinsEqual(asinOrder(records), want) {
 		t.Errorf("order = %v, want %v\n%s", asinOrder(records), want, obj.Body)
 	}
-	// 同日タイトル昇順側の未知 field が保存順適用後も保持されるか（SPECIFICATION.md 9.4）。
 	if _, ok := records[findBookIndex(records, "B0SAME000001")].Extra["Memo"]; !ok {
 		t.Errorf("unknown field Memo lost after sort: %s", obj.Body)
 	}
@@ -296,7 +290,6 @@ func TestUpsertBookRecord_SavesSortOrder(t *testing.T) {
 
 func TestMergeUpcoming_SavesSortOrder(t *testing.T) {
 	store := NewMemStore()
-	// unprocessed 側は古く、upcoming 側に新しい日を混ぜる。統合後に発売日降順になるか。
 	seedBook(store, "unprocessed", book.KindleBook{
 		ASIN: "B0OLD", Title: "old", ReleaseDate: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	})
@@ -315,8 +308,7 @@ func TestMergeUpcoming_SavesSortOrder(t *testing.T) {
 	}
 }
 
-// failStore は Get/Put で固定の非前提不一致 error を返す検証用 store。
-// Get error と Put 非412 error が retry されず即時伝播することを検証する（SPECIFICATION.md 9.5 error 分類）。
+// failStore は Get/Put で非前提不一致（非412）error を返し、それが retry されず即時伝播することを検証する（SPECIFICATION.md 9.5）。
 type failStore struct {
 	getErr   error
 	putErr   error
@@ -342,8 +334,7 @@ func (s *failStore) Put(_ context.Context, _ string, _ []byte, opts PutOptions) 
 	return nil
 }
 
-// ctxErrStore は context の取消/超過を store 層が表面化した場合の検証用 store。
-// MemStore は ctx を無視するため、ctx.Err() を伝える store で cancel 伝播を検証する。
+// ctxErrStore は MemStore が ctx を無視するため ctx.Err() を伝える fake で cancel 伝播を検証する。
 type ctxErrStore struct{}
 
 func (s *ctxErrStore) Get(ctx context.Context, _ string) (Object, error) {
@@ -357,8 +348,7 @@ func (s *ctxErrStore) Put(ctx context.Context, _ string, _ []byte, _ PutOptions)
 	return ctx.Err()
 }
 
-// keyedGetErrStore は指定 key の Get だけ固定 error を返し、他は MemStore へ委譲する。
-// MergeUpcoming で特定 object の Get 失敗時の挙動（upcoming を消去しない等）を検証する。
+// keyedGetErrStore は指定 key の Get だけ固定 error を返し、MergeUpcoming での特定 object Get 失敗時の挙動（upcoming を消去しない等）を検証する。
 type keyedGetErrStore struct {
 	*MemStore
 	failKey string
@@ -381,10 +371,8 @@ type manualConflictStore struct {
 
 func (s *manualConflictStore) Put(ctx context.Context, key string, body []byte, opts PutOptions) error {
 	if key == "unprocessed" && !s.conflicted {
-		// 既存 unprocessed へ手動で1件追加された（ETag 変更）状態を再現する。
 		s.Seed("unprocessed", `[{"ASIN":"B0MANUAL001","Title":"手動","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"}]`)
 		s.conflicted = true
-		// 呼び出し元の If-Match は旧 ETag のため前提不一致になる。
 		return ErrPreconditionFailed
 	}
 	return s.MemStore.Put(ctx, key, body, opts)
@@ -393,7 +381,6 @@ func (s *manualConflictStore) Put(ctx context.Context, key string, body []byte, 
 // errMutateFailure は即時伝播テストで「retry で再呼び出しされない」ことを確認するための固有 error。
 var errMutateFailure = errors.New("mutate failure sentinel")
 
-// TestMutateBooks_GetErrorNotRetried は Get の非 NotFound error を retry せず即時返すことを検証する。
 func TestMutateBooks_GetErrorNotRetried(t *testing.T) {
 	store := &failStore{getErr: errMutateFailure}
 	err := mutateBooks(context.Background(), store, "k", 3, func(records []BookRecord) ([]BookRecord, error) {
@@ -408,7 +395,6 @@ func TestMutateBooks_GetErrorNotRetried(t *testing.T) {
 	}
 }
 
-// TestMutateBooks_PutErrorNotPreconditionNotRetried は Put の非412 error を retry せず即時返すことを検証する。
 func TestMutateBooks_PutErrorNotPreconditionNotRetried(t *testing.T) {
 	store := &failStore{putErr: errMutateFailure}
 	err := mutateBooks(context.Background(), store, "k", 3, func(records []BookRecord) ([]BookRecord, error) {
@@ -422,8 +408,6 @@ func TestMutateBooks_PutErrorNotPreconditionNotRetried(t *testing.T) {
 	}
 }
 
-// TestMutateBooks_ContextCancelPropagates は ctx 取消時に store が ctx.Err() を返せば
-// mutateBooks がそれを retry/握り潰しせず伝播することを検証する。
 func TestMutateBooks_ContextCancelPropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -436,8 +420,7 @@ func TestMutateBooks_ContextCancelPropagates(t *testing.T) {
 	}
 }
 
-// optsCaptureStore は MemStore へ委譲しつつ Put に渡された opts を記録する。
-// 既存 object 更新で必ず If-Match が設定される（無条件上書き経路がない）ことを検証する。
+// optsCaptureStore は Put の opts を記録し、既存 object 更新で常に If-Match が設定される（無条件上書き経路がない）ことを検証する。
 type optsCaptureStore struct {
 	*MemStore
 	lastOpts PutOptions
@@ -450,8 +433,6 @@ func (s *optsCaptureStore) Put(ctx context.Context, key string, body []byte, opt
 	return s.MemStore.Put(ctx, key, body, opts)
 }
 
-// TestMutateBooks_AlwaysUsesIfMatchOnExistingObject は既存 object の更新で
-// If-Match が空でない（無条件上書きでない）ことを回帰検証する（SPECIFICATION.md 9.5）。
 func TestMutateBooks_AlwaysUsesIfMatchOnExistingObject(t *testing.T) {
 	store := &optsCaptureStore{MemStore: NewMemStore()}
 	seedBook(store.MemStore, "k", book.KindleBook{ASIN: "B0TARGET001", Title: "旧"})
@@ -478,9 +459,6 @@ func TestMutateBooks_AlwaysUsesIfMatchOnExistingObject(t *testing.T) {
 	}
 }
 
-// TestMutateBooks_MissingObjectErrors は必須 object が存在しない場合に空配列へ fallback せず
-// If-None-Match: * で新規作成もせず、Get error を返すことを検証する（SPECIFICATION.md 9.1/9.5）。
-// 汎用 store が object 欠落を暗黙に空配列化・新規作成しない回帰保護。
 func TestMutateBooks_MissingObjectErrors(t *testing.T) {
 	store := &optsCaptureStore{MemStore: NewMemStore()}
 	err := UpsertBookRecord(context.Background(), store, "k", BookRecord{Book: book.KindleBook{ASIN: "B0FX3X569X"}})
@@ -498,7 +476,6 @@ func TestMutateBooks_MissingObjectErrors(t *testing.T) {
 func TestMergeUpcoming_EmptyUpcomingAddsNothing(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "unprocessed", book.KindleBook{ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
-	// upcoming は空配列。
 	store.Seed("upcoming", `[]`)
 
 	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
@@ -551,8 +528,6 @@ func TestMergeUpcoming_BothEmptyIsNoOp(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_RetriesOnUnprocessedConflict は unprocessed の Put が 412 になっても
-// 最新本文を再読込して merge を最大3回やり直すことを検証する（SPECIFICATION.md 9.5/10）。
 func TestMergeUpcoming_RetriesOnUnprocessedConflict(t *testing.T) {
 	store := &flakyStore{MemStore: NewMemStore(), conflicts: 2, conflictKey: "unprocessed"}
 	seedBook(store.MemStore, "unprocessed", book.KindleBook{
@@ -576,8 +551,6 @@ func TestMergeUpcoming_RetriesOnUnprocessedConflict(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_KeepsManualUnprocessedDuringRetry は retry 中に unprocessed へ
-// 手動追加されたレコードが、再 merge で失われずに残ることを検証する（SPECIFICATION.md 9.4/10）。
 func TestMergeUpcoming_KeepsManualUnprocessedDuringRetry(t *testing.T) {
 	store := &manualConflictStore{MemStore: NewMemStore()}
 	seedBook(store.MemStore, "unprocessed", book.KindleBook{
@@ -596,7 +569,6 @@ func TestMergeUpcoming_KeepsManualUnprocessedDuringRetry(t *testing.T) {
 	}
 	obj, _ := store.Get(context.Background(), "unprocessed")
 	records, _ := DecodeBooks(obj.Body)
-	// 処理中に紛れ込んだ手動追加 B0MANUAL001 と、upcoming 由来 B が両方残る。
 	if findBookIndex(records, "B0MANUAL001") == -1 {
 		t.Errorf("手動追加レコードが retry で失われた: %+v", records)
 	}
@@ -605,8 +577,6 @@ func TestMergeUpcoming_KeepsManualUnprocessedDuringRetry(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming は unprocessed の Get が
-// 非 NotFound error のとき、upcoming を消去せず error を返すことを検証する（部分失敗の安全性）。
 func TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming(t *testing.T) {
 	store := &keyedGetErrStore{MemStore: NewMemStore(), failKey: "unprocessed", getErr: errMutateFailure}
 	seedBook(store.MemStore, "unprocessed", book.KindleBook{ASIN: "A"})
@@ -616,7 +586,6 @@ func TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming(t *testing.T) 
 	if !errors.Is(err, errMutateFailure) {
 		t.Errorf("err = %v, want sentinel", err)
 	}
-	// upcoming は消去されず残る。
 	upcomingObj, _ := store.Get(context.Background(), "upcoming")
 	records, _ := DecodeBooks(upcomingObj.Body)
 	if len(records) != 1 || records[0].Book.ASIN != "B" {
@@ -624,8 +593,6 @@ func TestMergeUpcoming_UnprocessedGetErrorReturnsAndKeepsUpcoming(t *testing.T) 
 	}
 }
 
-// TestMergeUpcoming_UpcomingGetErrorReturns は upcoming の Get が非 NotFound error のとき
-// 即座に error を返すことを検証する。
 func TestMergeUpcoming_UpcomingGetErrorReturns(t *testing.T) {
 	store := &keyedGetErrStore{MemStore: NewMemStore(), failKey: "upcoming", getErr: errMutateFailure}
 
@@ -635,8 +602,6 @@ func TestMergeUpcoming_UpcomingGetErrorReturns(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_RerunIsIdempotent は2回目実行で added=0 となり、
-// unprocessed の内容が安定することを検証する（再実行安全性、SPECIFICATION.md 7.5）。
 func TestMergeUpcoming_RerunIsIdempotent(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "unprocessed", book.KindleBook{
@@ -653,7 +618,6 @@ func TestMergeUpcoming_RerunIsIdempotent(t *testing.T) {
 	if first != 1 {
 		t.Fatalf("first added = %d, want 1", first)
 	}
-	// 2回目: upcoming は空配列化済みのため added=0。
 	second, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
 	if err != nil {
 		t.Fatalf("second MergeUpcoming: %v", err)
@@ -668,8 +632,7 @@ func TestMergeUpcoming_RerunIsIdempotent(t *testing.T) {
 	}
 }
 
-// alwaysPreconditionStore は Put が常に前提不一致を返す検証用 store。
-// clearUpcomingIfUnchanged の clear Put が 412 でも error にせず added を返すことを検証する。
+// alwaysPreconditionStore は Put が常に前提不一致を返し、clearUpcomingIfUnchanged の clear Put が 412 でも error にせず added を返すことを検証する。
 type alwaysPreconditionStore struct {
 	*MemStore
 }
@@ -678,8 +641,6 @@ func (s *alwaysPreconditionStore) Put(_ context.Context, _ string, _ []byte, _ P
 	return ErrPreconditionFailed
 }
 
-// TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded は upcoming の clear Put が
-// 412 になった場合でも error にせず added を返し、upcoming を無理に消去しないことを検証する。
 func TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded(t *testing.T) {
 	store := &alwaysPreconditionStore{MemStore: NewMemStore()}
 	seedBook(store.MemStore, "upcoming", book.KindleBook{ASIN: "C"})
@@ -692,7 +653,6 @@ func TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded(t *testing.T) {
 	if added != 1 {
 		t.Errorf("added = %d, want 1 (clear conflict must not lose added count)", added)
 	}
-	// clear Put が失敗したため upcoming は元のままで残る。
 	upcomingObj, _ := store.Get(context.Background(), "upcoming")
 	records, _ := DecodeBooks(upcomingObj.Body)
 	if len(records) != 1 {
@@ -700,7 +660,6 @@ func TestClearUpcomingIfUnchanged_ClearConflictReturnsAdded(t *testing.T) {
 	}
 }
 
-// dedupExtraOf は対象 ASIN のレコードから Extra の指定 key だけを取り出す（保持検証用）。
 func dedupExtraOf(t *testing.T, records []BookRecord, asin, key string) json.RawMessage {
 	t.Helper()
 	idx := findBookIndex(records, asin)
@@ -710,7 +669,6 @@ func dedupExtraOf(t *testing.T, records []BookRecord, asin, key string) json.Raw
 	return records[idx].Extra[key]
 }
 
-// countASIN は records 内の指定 ASIN 出現数を返す（重複残存検出用）。
 func countASIN(records []BookRecord, asin string) int {
 	n := 0
 	for _, r := range records {
@@ -721,9 +679,6 @@ func countASIN(records []BookRecord, asin string) int {
 	return n
 }
 
-// TestUpsertBookRecord_DedupsExistingDuplicateASINs は upsert 前から同一 ASIN が重複していた入力に対し、
-// 保存後に BookRecord 単位で ASIN 重複排除されることを検証する（SPECIFICATION.md 9.2）。
-// 最初の出現レコードの Extra を含む全情報を保持し、別 ASIN は追加される。
 func TestUpsertBookRecord_DedupsExistingDuplicateASINs(t *testing.T) {
 	store := NewMemStore()
 	store.Seed("k", `[
@@ -743,11 +698,9 @@ func TestUpsertBookRecord_DedupsExistingDuplicateASINs(t *testing.T) {
 	if got := countASIN(records, "B0DUP0000001"); got != 1 {
 		t.Errorf("duplicate ASIN count = %d, want 1 (保存後に重複排除)", got)
 	}
-	// 最初の出現（Memo=first）の Extra が保持され、2件目（Memo=second）は失われる。
 	if !bytes.Equal(dedupExtraOf(t, records, "B0DUP0000001", "Memo"), []byte(`"first"`)) {
 		t.Errorf("first occurrence Extra not kept: %s", obj.Body)
 	}
-	// 別 ASIN はそのまま残り、新規 ASIN は追加される。
 	if findBookIndex(records, "B0KEEP000001") == -1 || findBookIndex(records, "B0NEW0000001") == -1 {
 		t.Errorf("other ASINs lost: %+v", asinOrder(records))
 	}
@@ -756,8 +709,6 @@ func TestUpsertBookRecord_DedupsExistingDuplicateASINs(t *testing.T) {
 	}
 }
 
-// TestUpsertBookRecord_UpdatesFirstAndDropsDuplicateOnTargetUpsert は対象 ASIN 自体が重複している場合、
-// 最初の出現を更新して2件目以降を排除することを検証する。CreatedAt は最初の出現を保持する。
 func TestUpsertBookRecord_UpdatesFirstAndDropsDuplicateOnTargetUpsert(t *testing.T) {
 	store := NewMemStore()
 	original := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -782,18 +733,15 @@ func TestUpsertBookRecord_UpdatesFirstAndDropsDuplicateOnTargetUpsert(t *testing
 	if records[idx].Book.Title != "更新" {
 		t.Errorf("title = %q, want 更新", records[idx].Book.Title)
 	}
-	// CreatedAt は最初の出現を保持し、upsert 側の値で上書きしない（SPECIFICATION.md 9.2/9.4）。
 	if !records[idx].Book.CreatedAt.Equal(original) {
 		t.Errorf("CreatedAt = %v, want %v (最初の出現を保持)", records[idx].Book.CreatedAt, original)
 	}
-	// Extra も最初の出現を保持する。
 	if !bytes.Equal(records[idx].Extra["Memo"], []byte(`"first"`)) {
 		t.Errorf("first Extra not kept: %s", obj.Body)
 	}
 }
 
-// dupConflictStore は初回 Put 直前に同一 ASIN を2件含む最新本文を seed して 412 を起こす。
-// retry で再読込した本文に重複がある場合でも保存前に重複排除されることを検証するための store。
+// dupConflictStore は初回 Put 直前に同一 ASIN を2件含む本文を seed して 412 を起こし、retry で読み直した重複本文も保存前に排除されることを検証する。
 type dupConflictStore struct {
 	*MemStore
 	conflicted bool
@@ -811,8 +759,6 @@ func (s *dupConflictStore) Put(ctx context.Context, key string, body []byte, opt
 	return s.MemStore.Put(ctx, key, body, opts)
 }
 
-// TestMutateBooks_ConflictRetryDedupesLatestBody は ETag 競合で読み直した最新本文に同一 ASIN 重複が
-// ある場合でも、保存前に BookRecord 単位で重複排除されることを検証する（SPECIFICATION.md 9.2/9.5）。
 func TestMutateBooks_ConflictRetryDedupesLatestBody(t *testing.T) {
 	store := &dupConflictStore{MemStore: NewMemStore()}
 	store.Seed("k", `[{"ASIN":"B0DUP0000001","Title":"first","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"first"}]`)
@@ -836,8 +782,6 @@ func TestMutateBooks_ConflictRetryDedupesLatestBody(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_DedupsWithinUnprocessed は unprocessed 側に同一 ASIN 重複がある場合でも
-// 統合保存後に重複排除されることを検証する（SPECIFICATION.md 9.2/10）。
 func TestMergeUpcoming_DedupsWithinUnprocessed(t *testing.T) {
 	store := NewMemStore()
 	store.Seed("unprocessed", `[
@@ -863,8 +807,6 @@ func TestMergeUpcoming_DedupsWithinUnprocessed(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_MissingUnprocessedErrors は unprocessed が存在しない場合に空配列へ fallback せず
-// error を返し新規作成もしないことを検証する（SPECIFICATION.md 9.1）。
 func TestMergeUpcoming_MissingUnprocessedErrors(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0NEW", Title: "new", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)})
@@ -882,8 +824,6 @@ func TestMergeUpcoming_MissingUnprocessedErrors(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_MissingUpcomingErrors は upcoming が存在しない場合に空配列へ fallback せず
-// error を返すことを検証する（SPECIFICATION.md 9.1）。upcoming は空配列状態だけを正常とする。
 func TestMergeUpcoming_MissingUpcomingErrors(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "unprocessed", book.KindleBook{ASIN: "B0A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
@@ -894,10 +834,8 @@ func TestMergeUpcoming_MissingUpcomingErrors(t *testing.T) {
 	}
 }
 
-// deleteUpcomingOnUnprocessedPutStore は unprocessed への Put 成功後に upcoming を削除する検証用 store。
-// MergeUpcoming で Unprocessed への merge が commit された後、clear 直前に upcoming_asins.json が
-// 手動削除・rename 相当で消失した状況を再現し、非 transaction 契約と再実行時 reconcile を検証する。
-// upcomingDeleted で最初の1回だけ削除し、再実行で upcoming を復元した後は消失させない。
+// deleteUpcomingOnUnprocessedPutStore は unprocessed Put 成功後に upcoming を削除し、merge commit 後の
+// clear 直前で upcoming が消失した状況（非 transaction 契約・再実行 reconcile）を再現する。最初の1回だけ削除し、再実行で upcoming を復元した後は消失させない。
 type deleteUpcomingOnUnprocessedPutStore struct {
 	*MemStore
 	upcomingDeleted bool
@@ -915,12 +853,8 @@ func (s *deleteUpcomingOnUnprocessedPutStore) Put(_ context.Context, key string,
 	return nil
 }
 
-// TestClearUpcomingIfUnchanged_MissingObjectErrors は upcoming が clear 直前に存在しない場合、
-// 成功扱い（added 返却）せず Get error を返すことを検証する（SPECIFICATION.md 9.1 の存在必須 object 契約）。
-// ErrObjectNotFound を ETag 変更・412 と同一視せず、object 欠落を失敗とする回帰保護。
 func TestClearUpcomingIfUnchanged_MissingObjectErrors(t *testing.T) {
 	store := NewMemStore()
-	// upcoming は存在しない（必須 object の欠落）。
 
 	added, err := clearUpcomingIfUnchanged(context.Background(), store, "upcoming", "start-etag", 2)
 	if err == nil {
@@ -931,9 +865,6 @@ func TestClearUpcomingIfUnchanged_MissingObjectErrors(t *testing.T) {
 	}
 }
 
-// TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed は Unprocessed への merge 成功後、
-// clear 直前に Upcoming が削除された場合、error を返しつつ Unprocessed の merge 結果は保持されること
-// （SPECIFICATION.md 7.5 の非 transaction 契約）を検証する。silent fallback せず clear 段階の失敗を表面化する。
 func TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed(t *testing.T) {
 	store := &deleteUpcomingOnUnprocessedPutStore{MemStore: NewMemStore()}
 	seedBook(store.MemStore, "unprocessed", book.KindleBook{
@@ -950,7 +881,6 @@ func TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed(t *tes
 	if !errors.Is(err, ErrObjectNotFound) {
 		t.Errorf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
-	// Unprocessed への merge は commit 済みで巻き戻らない（非 transaction）。
 	obj, _ := store.Get(context.Background(), "unprocessed")
 	records, _ := DecodeBooks(obj.Body)
 	if findBookIndex(records, "B") == -1 {
@@ -958,9 +888,6 @@ func TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed(t *tes
 	}
 }
 
-// TestMergeUpcoming_RerunAfterClearErrorReconciles は clear 段階の Upcoming 欠落 error 後、
-// Upcoming を復元して再実行すると merge が冪等に補完され（重複せず）clear が完了することを検証する
-// （SPECIFICATION.md 7.5/10 の非 transaction reconcile 方針）。
 func TestMergeUpcoming_RerunAfterClearErrorReconciles(t *testing.T) {
 	store := &deleteUpcomingOnUnprocessedPutStore{MemStore: NewMemStore()}
 	seedBook(store.MemStore, "unprocessed", book.KindleBook{
@@ -970,15 +897,12 @@ func TestMergeUpcoming_RerunAfterClearErrorReconciles(t *testing.T) {
 		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 	})
 
-	// 1回目: merge 成功後、clear 段階で Upcoming 欠落により error。
 	if _, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3); err == nil {
 		t.Fatal("first run should error when upcoming deleted at clear stage")
 	}
 
-	// 運用での object 復元に相当: Upcoming を空配列で再作成。
 	seedBook(store.MemStore, "upcoming")
 
-	// 2回目: merge は冪等（B は既に Unprocessed にあるため added=0）、clear は成功。
 	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
 	if err != nil {
 		t.Fatalf("second MergeUpcoming: %v", err)
@@ -987,13 +911,11 @@ func TestMergeUpcoming_RerunAfterClearErrorReconciles(t *testing.T) {
 		t.Errorf("second added = %d, want 0 (idempotent merge, no duplication)", added)
 	}
 
-	// Unprocessed は A, B の2件で安定（重複しない）。
 	obj, _ := store.Get(context.Background(), "unprocessed")
 	records, _ := DecodeBooks(obj.Body)
 	if len(records) != 2 || countASIN(records, "B") != 1 {
 		t.Errorf("unprocessed not stable on rerun: %+v", asinOrder(records))
 	}
-	// Upcoming は空配列化されている（clear 完了）。
 	upcomingObj, _ := store.Get(context.Background(), "upcoming")
 	if strings.TrimSpace(string(upcomingObj.Body)) != "[]" {
 		t.Errorf("upcoming not cleared on rerun: %s", upcomingObj.Body)

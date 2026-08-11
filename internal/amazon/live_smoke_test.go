@@ -31,10 +31,6 @@ func liveSmokeClient() *Client {
 	return NewClient()
 }
 
-// TestLiveSmoke_Product_B0FX3X569X は固定例のKindle商品ページを取得し、安定構造を検証する。
-// 新刊detail で必須の Kindleスウォッチ・発売日・contributor を通信/非block/ASIN/タイトル/正価格に加えて assert する。
-// 価格は正値を要求するが、ポイント・クーポンの値は固定 assert しない。
-// 実ページが要件を満たさない場合は事実を報告し、assert を黙って弱めない。
 func TestLiveSmoke_Product_B0FX3X569X(t *testing.T) {
 	const asin = "B0FX3X569X"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
@@ -69,7 +65,6 @@ func TestLiveSmoke_Product_B0FX3X569X(t *testing.T) {
 	if len(info.Contributors) == 0 {
 		t.Errorf("Contributors が空 (新刊detail で #bylineInfo a のcontributorが必須)")
 	}
-	// ポイント・クーポンは変動するため値・存在を固定 assert しない。観測値をログへ残すだけ。
 	t.Logf("B0FX3X569X 構造OK: title=%q kindlePrice=%.0f points=%d coupon=%v couponText=%q "+
 		"hasKindleSwatch=%v hasReleaseDate=%v releaseDate=%v contributors=%d httpStatus=%d bytes=%d",
 		info.Title, info.CurrentPrice.Yen(), info.Points, info.Coupon, info.CouponText,
@@ -77,10 +72,8 @@ func TestLiveSmoke_Product_B0FX3X569X(t *testing.T) {
 		result.HTTPStatus, result.ResponseBytes)
 }
 
-// TestLiveSmoke_Product_4434361325_PaperToKindle は実紙商品ページからKindle版候補を確認する。
-// fixture(testdata/amazon/paper_4434361325.html)由来の ASIN を実HTTPで確認し、要求紙ASIN・タイトル・
-// 紙/Kindle両スウォッチ・KindleSwatchASIN が非空かつ紙ASINと不同であることを assert する。
-// 現時点で商品が使えない（block/状態変化等）場合は事実を報告し、根拠なく別ASINへ差し替えない。
+// fixture(testdata/amazon/paper_4434361325.html)由来の ASIN を実HTTPで確認する。
+// 商品が使えない（block/状態変化等）場合は事実を報告し、根拠なく別ASINへ差し替えない。
 func TestLiveSmoke_Product_4434361325_PaperToKindle(t *testing.T) {
 	const paperASIN = "4434361325"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
@@ -119,8 +112,7 @@ func TestLiveSmoke_Product_4434361325_PaperToKindle(t *testing.T) {
 		result.HTTPStatus, result.ResponseBytes)
 }
 
-// TestLiveSmoke_Product_B0CX8CD1XL_CouponObserve はクーポン解析の観測例を取得する。
-// クーポン不在でも失敗にしない。通信成功と要求ASINだけを検証する。
+// クーポン不在でも失敗にしない（観測目的）。通信成功と要求ASINだけを検証する。
 func TestLiveSmoke_Product_B0CX8CD1XL_CouponObserve(t *testing.T) {
 	const asin = "B0CX8CD1XL"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
@@ -142,7 +134,6 @@ func TestLiveSmoke_Product_B0CX8CD1XL_CouponObserve(t *testing.T) {
 		result.Info.Coupon, result.Info.CouponText, result.Info.Title, result.HTTPStatus, result.ResponseBytes)
 }
 
-// TestLiveSmoke_Search_KindleMarker は検索ページを取得し、検索containerとKindle形式markerを確認する。
 func TestLiveSmoke_Search_KindleMarker(t *testing.T) {
 	const author = "海李"
 	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)

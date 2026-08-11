@@ -95,7 +95,6 @@ type objectReport struct {
 	CurrentZero int
 }
 
-// migrateObject は apply=false なら検証と差分計算だけ行い S3 へ書き込まない。
 func migrateObject(ctx context.Context, store storage.ObjectStore, key string, apply bool) (objectReport, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
@@ -140,7 +139,6 @@ func applyMigration(records []storage.BookRecord) ([]storage.BookRecord, int, in
 	return migrated, changed, currentZero
 }
 
-// validateInvariants は MaxPrice 以外が変わっていないことと、適用後に MaxPrice==CurrentPrice であることを検証する。
 func validateInvariants(before, after []storage.BookRecord, key string) error {
 	if len(before) != len(after) {
 		return fmt.Errorf("%s: record count changed %d -> %d", key, len(before), len(after))
@@ -210,7 +208,6 @@ func extraEqual(a, b map[string]json.RawMessage) bool {
 	return true
 }
 
-// splitKeys は trim 済みの非空 key のみを返す。
 func splitKeys(csv string) []string {
 	parts := strings.Split(csv, ",")
 	keys := make([]string, 0, len(parts))

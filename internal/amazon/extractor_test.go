@@ -225,7 +225,6 @@ func TestExtractSearch_Empty(t *testing.T) {
 	}
 }
 
-// 実HTML fixture: 未知/非Kindleを誤ってKindle扱いしないこと、contributor が販売者・日付と分離されることを検証する（SPECIFICATION.md 11.2, 13.4）。
 func TestExtractSearch_RealFixture_KindleFormatAndContributors(t *testing.T) {
 	hits := ExtractSearch(loadFixtureDoc(t, "search_digital_text.html"))
 	if len(hits) < 1 {
@@ -415,7 +414,6 @@ func TestExtractASINFromURLSupportsMultiplePathFormats(t *testing.T) {
 	}
 }
 
-// loadFixtureDoc は testdata/amazon の実HTML fixture を goquery.Document へ読み込む。
 func loadFixtureDoc(t *testing.T, name string) *goquery.Document {
 	t.Helper()
 	data, err := os.ReadFile("../../testdata/amazon/" + name)
@@ -429,8 +427,6 @@ func loadFixtureDoc(t *testing.T, name string) *goquery.Document {
 	return doc
 }
 
-// 実HTML fixture: Kindle商品ページの contributor 表記は #bylineInfo a の各テキスト。
-// 現EditionがKindleなので KINDLEスウォッチのリンクは javascript:void(0) になり候補ASINは空。
 func TestExtractProduct_RealFixture_KindlePageContributors(t *testing.T) {
 	got := ExtractProduct(loadFixtureDoc(t, "product_B0FX3X569X.html"), "B0FX3X569X")
 	if !containsString(got.Contributors, "上原誠") || !containsString(got.Contributors, "やきいもほくほく") {
@@ -453,7 +449,6 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
-// 実HTML fixture: 紙書籍(ISBN)ページの KINDLEスウォッチリンクからKindle版ASINを取り出す。
 func TestExtractProduct_RealFixture_PaperPageKindleSwatchASIN(t *testing.T) {
 	got := ExtractProduct(loadFixtureDoc(t, "paper_4434361325.html"), "4434361325")
 	if got.KindleSwatchASIN != "B0FX3X569X" {
@@ -464,8 +459,6 @@ func TestExtractProduct_RealFixture_PaperPageKindleSwatchASIN(t *testing.T) {
 	}
 }
 
-// SPECIFICATION.md 22.2「ポイントあり」。第1層(slot-buyingPoints)がなくても第2層(slot-extraMessage)から
-// ポイントを再抽出できる（UserScript getKindlePoints と同じ2層構造、SPECIFICATION.md 11.2）。
 func TestExtractProduct_PointsFromExtraMessage(t *testing.T) {
 	const htmlSource = `<html><body>
 <div id="tmm-grid-swatch-KINDLE"><span class="a-button"><span class="a-button-inner"><a class="a-button-text"><span class="slot-extraMessage"><span class="kindleExtraMessage">または ￥759 で購入 388pt</span></span></a></span></span></div>
@@ -476,7 +469,6 @@ func TestExtractProduct_PointsFromExtraMessage(t *testing.T) {
 	}
 }
 
-// クーポンバッジがあっても "クーポン:" を含まなければクーポンなしとする（SPECIFICATION.md 11.2）。
 func TestExtractProduct_CouponBadgeWithoutKeyword(t *testing.T) {
 	const htmlSource = `<html><body>
 <i class="a-icon a-icon-addon newCouponBadge">セール中</i>
@@ -491,8 +483,6 @@ func TestExtractProduct_CouponBadgeWithoutKeyword(t *testing.T) {
 	}
 }
 
-// バッジに "クーポン:" があるが .couponLabelText を取得できない場合もクーポンありと成立させる
-// （SPECIFICATION.md 11.2）。このとき文言は空になる。
 func TestExtractProduct_CouponBadgeKeywordButNoLabelText(t *testing.T) {
 	const htmlSource = `<html><body>
 <i class="a-icon a-icon-addon newCouponBadge">クーポン: 適用済</i>
@@ -506,8 +496,7 @@ func TestExtractProduct_CouponBadgeKeywordButNoLabelText(t *testing.T) {
 	}
 }
 
-// クーポン文言の率(%)表記も最初の直接text nodeとしてそのまま取得する（SPECIFICATION.md 11.2）。
-// 固定額/率の表現差で抽出を変えない。
+// 固定額/率の表現差で抽出を変えない（SPECIFICATION.md 11.2）。
 func TestExtractProduct_CouponPercentageText(t *testing.T) {
 	const htmlSource = `<html><body>
 <i class="a-icon a-icon-addon newCouponBadge">クーポン: 適用済</i>
@@ -522,8 +511,7 @@ func TestExtractProduct_CouponPercentageText(t *testing.T) {
 	}
 }
 
-// 価格要素は存在するが数字を含まない場合は未取得とする（SPECIFICATION.md 11.3 価格解析失敗）。
-// 0円として保存しない（SPECIFICATION.md 11.2）。
+// 数字を含まない価格は0円として保存せず未取得とする（SPECIFICATION.md 11.2, 11.3）。
 func TestExtractProduct_MalformedPriceIsUnknown(t *testing.T) {
 	const htmlSource = `<html><body>
 <span id="productTitle">タイトル</span>
@@ -549,8 +537,6 @@ func TestExtractProduct_ReleaseDateSlashForm(t *testing.T) {
 	}
 }
 
-// 実HTML fixture: Kindle商品ページの発売日は primary selector
-// (#rpi-attribute-book_details-publication_date 配下の rpi-attribute-value span) で取得できる。
 // 期待値 2026/1/30 は fixture HTML 本文から直接読んだ値（selector 実装由来ではない）。
 // 未検証 fallback(#detailBullets_feature_div)へ依存しないことを維持する。
 func TestExtractProduct_RealFixture_ReleaseDate(t *testing.T) {
@@ -561,7 +547,6 @@ func TestExtractProduct_RealFixture_ReleaseDate(t *testing.T) {
 	}
 }
 
-// 発売日要素が存在しても解析不能なら HasReleaseDate=false とする（SPECIFICATION.md 11.3 解析失敗）。
 func TestExtractProduct_MalformedReleaseDate(t *testing.T) {
 	const htmlSource = `<html><body>
 <div id="rpi-attribute-book_details-publication_date">
@@ -574,7 +559,6 @@ func TestExtractProduct_MalformedReleaseDate(t *testing.T) {
 	}
 }
 
-// parsePoints は 0 以下やポイント表記のないtextを0にする（SPECIFICATION.md 11.2 ポイントなし=0）。
 func TestParsePoints_ZeroAndAbsent(t *testing.T) {
 	cases := []struct {
 		name string
@@ -594,9 +578,6 @@ func TestParsePoints_ZeroAndAbsent(t *testing.T) {
 	}
 }
 
-// 検索カードのタイトルセレクタが .s-title-instructions-style を持たない場合、
-// タイトルは fallback(h2 span)で取り、商品URLは h2 a / .a-link-normal[href*='/dp/'] から取り出す
-// （SPECIFICATION.md 11.2）。
 func TestExtractSearch_URLFallback(t *testing.T) {
 	const htmlSource = `<html><body>
 <div data-component-type="s-search-result">
@@ -616,7 +597,6 @@ func TestExtractSearch_URLFallback(t *testing.T) {
 	}
 }
 
-// KINDLEスウォッチ内のASIN付きリンクが複数ある場合は最初のものを採用し、以降は読み飛ばす。
 func TestExtractKindleSwatchASIN_PicksFirstAndSkipsRest(t *testing.T) {
 	const htmlSource = `<html><body>
 <div id="tmm-grid-swatch-KINDLE">

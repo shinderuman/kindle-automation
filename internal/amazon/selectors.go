@@ -45,7 +45,6 @@ var kindlePriceFallbackSelectors = []string{
 	"#tmm-grid-swatch-KINDLE > span.a-button > span.a-button-inner > a.a-button-text > span.slot-extraMessage .kindleExtraMessage .a-color-price",
 }
 
-// selectorPaperPrice は紙書籍価格。
 const selectorPaperPrice = "[id^='tmm-grid-swatch']:not([id$='KINDLE']) > span.a-button > span.a-button-inner > a.a-button-text > span.slot-price > span"
 
 // kindlePointsSelectors は Kindleポイント 第1層のポイント専用要素。

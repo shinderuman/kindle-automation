@@ -10,18 +10,18 @@ type Category int
 const (
 	// CategoryOK は 200。必須構造の検証は呼び出し側で別途行う。
 	CategoryOK Category = iota
-	// CategoryNotFound は 404 または明示的な商品不存在。terminal。
+	// CategoryNotFound は 404 または明示的な商品不存在。
 	CategoryNotFound
-	// CategoryPermanentClientError は 400 等、恒久的 4xx。terminal。
+	// CategoryPermanentClientError は 400 等、恒久的 4xx。
 	CategoryPermanentClientError
-	// CategoryRetryable は 403/429/5xx。再試行する。
+	// CategoryRetryable は 403/429/5xx。
 	CategoryRetryable
-	// CategorySearchEmpty は検索ページは200だが結果0件。search_empty として再試行する。
+	// CategorySearchEmpty は検索ページは200だが結果0件（search_empty）。
 	CategorySearchEmpty
 )
 
 // ClassifyHTTPStatus は HTTP status code を大分類する（SPECIFICATION.md 11.3）。
-// 200/404/403,429/4xx/5xx を分ける。構造検証はこの関数の責務外。
+// 構造検証はこの関数の責務外。
 func ClassifyHTTPStatus(status int) Category {
 	switch {
 	case status == 200:

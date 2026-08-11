@@ -127,8 +127,7 @@ func TestFetchProduct_MissingASINIsRetryable(t *testing.T) {
 	}
 }
 
-// finalURLNoASINRT は最終URL path を ASIN を含まない /selected へ替えて、Amazon が
-// /dp/{ASIN} を含まない path へ誘導した状況を再現する Transport。
+// finalURLNoASINRT は最終URL path を ASIN を含まない /selected へ替え、Amazon が /dp/{ASIN} を含まない path へ誘導した状況を再現する Transport。
 type finalURLNoASINRT struct{ body []byte }
 
 func (rt finalURLNoASINRT) RoundTrip(req *http.Request) (*http.Response, error) {

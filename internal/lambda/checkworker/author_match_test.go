@@ -19,9 +19,6 @@ func mustDoc(t *testing.T, htmlSrc string) *goquery.Document {
 	return doc
 }
 
-// TestAuthorMatch_SearchExtractionToApplication は検索ページ抽出の AuthorLabel
-// （"海李 (著)" のように役割表記を含む）が application の AuthorMatches で正しく照合されることを
-// 抽出から検証する。役割表記の除去と部分名の誤検出防止を含む。
 func TestAuthorMatch_SearchExtractionToApplication(t *testing.T) {
 	const searchHTML = `<html><body>
 <div data-component-type="s-search-result">
@@ -44,15 +41,11 @@ func TestAuthorMatch_SearchExtractionToApplication(t *testing.T) {
 	if newrelease.AuthorMatches("上原誠", contributors) {
 		t.Errorf("AuthorMatches(上原誠, %v) = true, want false", contributors)
 	}
-	// 部分名（"海"）は contributor と完全一致しないため Hit しない。
 	if newrelease.AuthorMatches("海", contributors) {
 		t.Errorf("partial name 海 must not match %v", contributors)
 	}
 }
 
-// TestAuthorMatch_ProductExtractionMultipleContributors は商品ページ #bylineInfo a から抽出した
-// 複数 contributor 表記（"上原誠 やきいもほくほく"）が application の AuthorMatches で
-// 各 contributor に照合することを検証する。部分名の誤検出防止を含む。
 func TestAuthorMatch_ProductExtractionMultipleContributors(t *testing.T) {
 	const productHTML = `<html><body>
 <span id="productTitle">タイトル</span>

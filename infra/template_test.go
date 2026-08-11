@@ -11,7 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// top は template.yaml の top-level mapping を返す。
 func top(t *testing.T) map[string]*yaml.Node {
 	t.Helper()
 	data, err := os.ReadFile("template.yaml")

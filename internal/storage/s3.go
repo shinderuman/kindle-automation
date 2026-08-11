@@ -13,19 +13,19 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// AWS SDK for Go v2 による ObjectStore 実装。ETag 付き読込と If-Match / If-None-Match 条件付き PutObject を行う（SPECIFICATION.md 9.5）。
+// S3Store は AWS SDK for Go v2 による ObjectStore 実装。ETag 付き読込と If-Match / If-None-Match 条件付き PutObject を行う（SPECIFICATION.md 9.5）。
 // 実AWS接続を除く単体テストは MemStore で検証し、この実装はデプロイ時に確認する。
 type S3Store struct {
 	client *s3.Client
 	bucket string
 }
 
-// NewS3Store は S3Store を返す。client は外部で構築した S3 client を注入する。
+// NewS3Store は S3 client と bucket 名から ObjectStore を組み立てる。
 func NewS3Store(client *s3.Client, bucket string) *S3Store {
 	return &S3Store{client: client, bucket: bucket}
 }
 
-// Get はオブジェクト本文と ETag を返す。存在しない場合は ErrObjectNotFound。
+// Get は object が存在しないと ErrObjectNotFound を返す。
 func (s *S3Store) Get(ctx context.Context, key string) (Object, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -51,8 +51,7 @@ func (s *S3Store) Get(ctx context.Context, key string) (Object, error) {
 	return Object{Body: body, ETag: etag}, nil
 }
 
-// Put は本文を書き込む。IfMatch は ETag 一致更新、IfNoneMatch="*" は新規作成のみ。
-// 前提不一致（HTTP 412）は ErrPreconditionFailed へ変換する。
+// Put は IfMatch で ETag 一致更新、IfNoneMatch="*" で新規作成のみとし、前提不一致（HTTP 412）は ErrPreconditionFailed へ変換する。
 func (s *S3Store) Put(ctx context.Context, key string, body []byte, opts PutOptions) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),

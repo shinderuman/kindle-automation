@@ -18,10 +18,10 @@ type scheduleInput struct {
 	ScheduledAt time.Time     `json:"scheduled_at"`
 }
 
-// ErrInvalidScheduleInput は Scheduler 入力の validation 失敗。
+// ErrInvalidScheduleInput は EventBridge Scheduler 入力の decode・検証失敗（再試行無意味な terminal 入力）を示す。
 var ErrInvalidScheduleInput = errors.New("invalid schedule input")
 
-// ErrInvalidAlarmInput は CloudWatch Alarm 入力の validation 失敗。
+// ErrInvalidAlarmInput は CloudWatch Alarm 直接 invoke payload の decode・検証失敗（再試行無意味な terminal 入力）を示す。
 var ErrInvalidAlarmInput = errors.New("invalid alarm input")
 
 // CloudWatch Alarm が AlarmActions で schedule-checks を直接 invoke した時の payload（SPECIFICATION.md 17.2）。
@@ -41,11 +41,10 @@ type alarmState struct {
 	Value string `json:"value"`
 }
 
-// AlarmStateAlarm は CloudWatch Alarm の ALARM 状態値。
+// AlarmStateAlarm は CloudWatch Alarm の state.value が ALARM へ遷移したことを表す（SPECIFICATION.md 17.2）。
 const AlarmStateAlarm = "ALARM"
 
-// parseAlarmInput は CloudWatch Alarm の直接 invoke payload から alarmName と state.value を検証付きで取り出す。
-// alarmName・state.value 欠落は再試行無意味な terminal 入力のため ErrInvalidAlarmInput を返す。
+// parseAlarmInput は alarmName・state.value 欠落を再試行無意味な terminal 入力として ErrInvalidAlarmInput を返す。
 func parseAlarmInput(data []byte) (alarmName, stateValue string, err error) {
 	var in alarmInput
 	if err := json.Unmarshal(data, &in); err != nil {
@@ -60,7 +59,6 @@ func parseAlarmInput(data []byte) (alarmName, stateValue string, err error) {
 	return in.AlarmData.AlarmName, in.AlarmData.State.Value, nil
 }
 
-// parseScheduleInput は Scheduler 入力を検証して dispatch.Event へ変換する。
 func parseScheduleInput(data []byte) (dispatch.Event, error) {
 	var in scheduleInput
 	if err := json.Unmarshal(data, &in); err != nil {

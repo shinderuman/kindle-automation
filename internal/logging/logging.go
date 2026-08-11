@@ -21,13 +21,21 @@ import (
 // 周回・job・通知・Gist・Alarmの各結果を表す。metric filter は level=ERROR で集計するため、
 // これらのイベント名自体は metric 分割に使わない（18.2）。
 const (
-	EventCycleDispatched   = "cycle_dispatched"
-	EventCycleDisabled     = "cycle_disabled"
-	EventJobCompleted      = "job_completed"
-	EventJobTerminal       = "job_terminal"
-	EventJobError          = "job_error"
+	// EventCycleDispatched は周回が対象 job の投入を完了したことを記録する（target_count・enqueued_count・upcoming_merged を含む）。
+	EventCycleDispatched = "cycle_dispatched"
+	// EventCycleDisabled は Checker 設定で check_type が無効なため投入を省略したことを記録する。
+	EventCycleDisabled = "cycle_disabled"
+	// EventJobCompleted は job が再試行を要しない正常結果で終わったことを記録する。
+	EventJobCompleted = "job_completed"
+	// EventJobTerminal は 404・対象種別不一致など再試行無意味なターミナル結果であることを記録する。
+	EventJobTerminal = "job_terminal"
+	// EventJobError は SQS 再試行させる job 処理エラーであることを記録する。
+	EventJobError = "job_error"
+	// EventNotificationError は Slack・Mastodon 等の通知送信エラーであることを記録する。
 	EventNotificationError = "notification_error"
-	EventGistError         = "gist_error"
+	// EventGistError は GitHub Gist 更新ジョブのエラーであることを記録する（gist_update 専用）。
+	EventGistError = "gist_error"
+	// EventAlarmNotification は CloudWatch Alarm の Slack error channel 通知処理の結果を記録する（SPECIFICATION.md 17.2）。
 	EventAlarmNotification = "alarm_notification"
 )
 

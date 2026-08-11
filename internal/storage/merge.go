@@ -13,7 +13,7 @@ import (
 // SPECIFICATION.md 9.5 は前提不一致時の再読込 merge を最大3回。
 const defaultMergeRetries = 3
 
-// SPECIFICATION.md 7.2 target_removed: 対象 ASIN が S3 に存在しない（手動削除）場合は再追加せず正常終点とする。
+// ErrTargetRemoved は対象 ASIN が S3 に存在しない（手動削除）ことを示し、再追加せず正常終点とする（SPECIFICATION.md 7.2 target_removed）。
 var ErrTargetRemoved = errors.New("target removed")
 
 // 412 で最新本文を読み直して再試行する（SPECIFICATION.md 9.5）。対象 object は SPECIFICATION.md 9.1 の存在必須 object のため、
@@ -51,7 +51,7 @@ func mutateBooks(ctx context.Context, store ObjectStore, key string, maxRetry in
 	return fmt.Errorf("merge %s failed after %d retries: %w", key, maxRetry, lastErr)
 }
 
-// 対象 ASIN が無ければ手動削除扱いで applied=false を返す（再追加しない）。対象の Extra（未知 field）と他レコードは保持する。
+// UpdateOneBook は対象 ASIN のレコードを更新する。対象 ASIN が無ければ手動削除扱いで applied=false を返す（再追加しない、SPECIFICATION.md 7.2 target_removed）。
 func UpdateOneBook(ctx context.Context, store ObjectStore, key, asin string, update func(book.KindleBook) book.KindleBook) (bool, error) {
 	err := mutateBooks(ctx, store, key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
 		idx := findBookIndex(records, asin)
@@ -70,8 +70,8 @@ func UpdateOneBook(ctx context.Context, store ObjectStore, key, asin string, upd
 	return true, nil
 }
 
-// SPECIFICATION.md 9.2/9.4: 同一 ASIN があれば Amazon 由来 field を更新し CreatedAt と Extra は保持、なければ追加。
-// 重複実行でレコードが増えず CreatedAt も変わらない（SPECIFICATION.md 7.4 の ASIN 単位 upsert 冪等性）。
+// UpsertBookRecord は ASIN 単位の冪等 upsert。同一 ASIN があれば Amazon 由来 field を更新し CreatedAt と Extra は保持、なければ追加する（SPECIFICATION.md 9.2/9.4, 7.4）。
+// 重複実行でレコードが増えず CreatedAt も変わらない。
 func UpsertBookRecord(ctx context.Context, store ObjectStore, key string, target BookRecord) error {
 	return mutateBooks(ctx, store, key, defaultMergeRetries, func(records []BookRecord) ([]BookRecord, error) {
 		idx := findBookIndex(records, target.Book.ASIN)
@@ -85,8 +85,8 @@ func UpsertBookRecord(ctx context.Context, store ObjectStore, key string, target
 	})
 }
 
-// SPECIFICATION.md 10: Upcoming を Unprocessed へ条件付き merge する。重複 ASIN は Unprocessed 側を優先し、
-// Unprocessed 保存成功後、Upcoming の ETag が開始時と同じ場合だけ Upcoming を空配列へ戻す（処理中に増えた場合は消去しない）。
+// MergeUpcoming は Upcoming を Unprocessed へ条件付き merge する（SPECIFICATION.md 10）。
+// 重複 ASIN は Unprocessed 側を優先し、Unprocessed 保存成功後、Upcoming の ETag が開始時と同じ場合だけ Upcoming を空配列へ戻す（処理中に増えた場合は消去しない）。
 // 返り値の int は Unprocessed へ新規追加した Upcoming 由来の ASIN 件数。
 func MergeUpcoming(ctx context.Context, store ObjectStore, unprocessedKey, upcomingKey string, maxRetry int) (int, error) {
 	upcomingObj, err := store.Get(ctx, upcomingKey)
@@ -156,7 +156,6 @@ func clearUpcomingIfUnchanged(ctx context.Context, store ObjectStore, key, start
 	return added, nil
 }
 
-// first を優先し、second のうち first に無い ASIN を追加する。各レコードの Extra（未知 field）も保持する。
 func mergePreferFirst(first, second []BookRecord) []BookRecord {
 	out := make([]BookRecord, 0, len(first)+len(second))
 	out = append(out, first...)
@@ -218,8 +217,7 @@ func dedupAndSortBookRecords(records []BookRecord) []BookRecord {
 	return sorted
 }
 
-// ASIN 重複排除。同じ ASIN は最初の出現を優先し、そのレコードの Extra（未知 field）を含む全情報を保持する（SPECIFICATION.md 9.2）。
-// ASIN が空のレコードは重複排除の判定対象にできずそのまま残す。domain book.DedupBooks と同じ規則だが BookRecord 単位で処理する。
+// 同じ ASIN は最初の出現を優先（SPECIFICATION.md 9.2）。ASIN 空のレコードは重複排除対象外でそのまま残す。
 func dedupBookRecords(records []BookRecord) []BookRecord {
 	seen := make(map[string]struct{})
 	out := make([]BookRecord, 0, len(records))

@@ -18,8 +18,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// --- HandleEvent 振り分けテスト用 stub ---
-
 type recordingEnqueuer struct {
 	jobs []job.Job
 }
@@ -65,7 +63,6 @@ func newScheduler(store storage.ObjectStore, enq *recordingEnqueuer, sender *fak
 	}
 }
 
-// Scheduler イベントは decode → dispatch.Run へ。空対象の Sale でも sale_finalize を1件投入する。
 func TestHandleEvent_SchedulerRouteDispatches(t *testing.T) {
 	store := storage.NewMemStore()
 	// unprocessed_asins.json は存在必須（SPECIFICATION.md 9.1）。空配列で seed し sale 周回を通す。
@@ -88,7 +85,6 @@ func TestHandleEvent_SchedulerRouteDispatches(t *testing.T) {
 	}
 }
 
-// Scheduler 入力の validation 失敗は error として伝播する。
 func TestHandleEvent_SchedulerInvalidInputErrors(t *testing.T) {
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, nil)
 	body := `{"version":1,"source":"scheduler","check_type":"bogus","scheduled_at":"2026-08-09T00:00:00Z"}`
@@ -100,7 +96,6 @@ func TestHandleEvent_SchedulerInvalidInputErrors(t *testing.T) {
 // CloudWatch Alarm 直接 invoke の実イベント（AWS 公式形式）。
 const alarmEventBody = `{"source":"aws.cloudwatch","alarmArn":"arn:aws:cloudwatch:us-east-1:111122223333:alarm:kindle-automation-work-dlq","accountId":"111122223333","time":"2026-08-04T12:36:15.490+0000","region":"us-east-1","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"ALARM","reason":"DLQ depth","timestamp":"2026-08-04T12:36:15.490+0000"},"previousState":{"value":"OK","reason":"","timestamp":"2026-08-04T12:31:29.595+0000"}}}`
 
-// Alarm イベント（ALARM 遷移）は alarmData.alarmName を取り出して Slack error channel へ通知する。
 func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 	sender := &fakeSender{}
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, sender)
@@ -111,7 +106,6 @@ func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 	if !sender.called {
 		t.Errorf("error sender must be called for alarm event")
 	}
-	// 同一 Alarm 状態で通知を増やさない（SPECIFICATION.md 17.2）。1 event = 1 通知。
 	if sender.calls != 1 {
 		t.Errorf("sender calls = %d, want exactly 1 per alarm event", sender.calls)
 	}
@@ -120,7 +114,6 @@ func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 	}
 }
 
-// ALARM 未満の状態（OK/INSUFFICIENT_DATA）では通知せず正常終了する（SPECIFICATION.md 17.2）。
 func TestHandleEvent_AlarmNonAlarmStateSkipsNotify(t *testing.T) {
 	sender := &fakeSender{}
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, sender)
@@ -134,7 +127,6 @@ func TestHandleEvent_AlarmNonAlarmStateSkipsNotify(t *testing.T) {
 	}
 }
 
-// Alarm payload の decode/validation 失敗は error として伝播する。
 func TestHandleEvent_AlarmInvalidInputErrors(t *testing.T) {
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
 	body := `{"source":"aws.cloudwatch","alarmData":{"state":{"value":"ALARM"}}}`
@@ -143,7 +135,6 @@ func TestHandleEvent_AlarmInvalidInputErrors(t *testing.T) {
 	}
 }
 
-// 未知の source は error として伝播する（scheduler/cloudwatch 以外の誤 invoke を表面化）。
 func TestHandleEvent_UnknownSourceErrors(t *testing.T) {
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
 	body := `{"source":"aws.somethingelse"}`
@@ -152,7 +143,6 @@ func TestHandleEvent_UnknownSourceErrors(t *testing.T) {
 	}
 }
 
-// 生イベントが JSON でない場合は error として伝播する。
 func TestHandleEvent_BrokenJSONErrors(t *testing.T) {
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, &fakeSender{})
 	if err := sched.HandleEvent(context.Background(), []byte("not-json")); err == nil {
@@ -160,7 +150,6 @@ func TestHandleEvent_BrokenJSONErrors(t *testing.T) {
 	}
 }
 
-// Alarm 通知失敗は error を返す（Lambda 経由の再試行のため）。
 func TestHandleAlarm_SendFailureReturnsError(t *testing.T) {
 	sender := &fakeSender{err: errors.New("slack down")}
 	sched := &Scheduler{ErrorSender: sender}
@@ -169,7 +158,6 @@ func TestHandleAlarm_SendFailureReturnsError(t *testing.T) {
 	}
 }
 
-// ErrorSender 未設定でも alarm はログのみで成功する。
 func TestHandleAlarm_NoSenderSucceeds(t *testing.T) {
 	sched := &Scheduler{}
 	if err := sched.HandleAlarm(context.Background(), "WorkDLQDepth"); err != nil {
@@ -177,8 +165,6 @@ func TestHandleAlarm_NoSenderSucceeds(t *testing.T) {
 	}
 }
 
-// 同一 Scheduler（composition root 相当）を再構築せず HandleEvent を2回呼び、間に stub S3 の
-// checker 設定を変更すると2回目が新値を読むことを検証する（warm execution environment でも反映）。
 func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	store := storage.NewMemStore()
 	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":true,"GistID":"g","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`)
@@ -197,7 +183,6 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	}
 	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
 
-	// call1: SaleChecker 有効 → sale_finalize 1件を投入する。
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
 		t.Fatalf("first HandleEvent: %v", err)
 	}
@@ -205,9 +190,7 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	if after1 == 0 {
 		t.Fatal("first call should enqueue when SaleChecker is enabled")
 	}
-	// Scheduler 再構築なしで S3 の checker 設定を無効化する。
 	store.Seed("checker_configs.json", `{"SaleChecker":{"Enabled":false}}`)
-	// call2: SaleChecker 無効 → 投入しない（新値を読んでいる証拠）。
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
 		t.Fatalf("second HandleEvent: %v", err)
 	}
@@ -216,10 +199,7 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 	}
 }
 
-// --- config 読込失敗・dispatch error 伝播 ---
-
-// failingConfigStore は checker_configs.json 読込失敗を模倣する ObjectStore stub。
-// checkerConfigReader.IsEnabled が S3 一時障害を dispatch へ伝播することを検証するため Get で必ず失敗する。
+// failingConfigStore は Get で常に S3 一時障害を模倣した error を返す。
 type failingConfigStore struct{}
 
 func (failingConfigStore) Get(_ context.Context, _ string) (storage.Object, error) {
@@ -230,8 +210,6 @@ func (failingConfigStore) Put(_ context.Context, _ string, _ []byte, _ storage.P
 	return nil
 }
 
-// Checker 設定の読込失敗（S3 Get error）は dispatch.Run へ伝播し HandleEvent の error になる。
-// 設定読込成功前に SQS 投入は行わない（SPECIFICATION.md 16/18.3）。
 func TestHandleEvent_CheckerConfigLoadFailurePropagates(t *testing.T) {
 	enq := &recordingEnqueuer{}
 	sched := &Scheduler{
@@ -252,7 +230,6 @@ func TestHandleEvent_CheckerConfigLoadFailurePropagates(t *testing.T) {
 	}
 }
 
-// enqueuer 失敗は dispatch.Run から HandleEvent へ error として伝播する（SPECIFICATION.md 7.3）。
 type failingEnqueuer struct{ err error }
 
 func (e *failingEnqueuer) EnqueueBatch(_ context.Context, _ []job.Job) error { return e.err }
@@ -280,7 +257,6 @@ func TestHandleEvent_DispatchEnqueueFailurePropagates(t *testing.T) {
 	}
 }
 
-// Logger 未設定でも decode 失敗時の error 伝播・結果は変わらない（SPECIFICATION.md 18 境界）。
 func TestHandleEvent_NilLoggerDoesNotChangeResult(t *testing.T) {
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, nil)
 	sched.Logger = nil
@@ -290,9 +266,6 @@ func TestHandleEvent_NilLoggerDoesNotChangeResult(t *testing.T) {
 	}
 }
 
-// --- secret key 集合の回帰テスト ---
-
-// stubSecretGetter は SSM GetParameter の stub。値があれば返し、なければ ParameterNotFound。
 type stubSecretGetter struct {
 	values map[string]string
 }
@@ -304,13 +277,11 @@ func (g *stubSecretGetter) GetParameter(_ context.Context, in *ssm.GetParameterI
 	return nil, &smithy.GenericAPIError{Code: "ParameterNotFound"}
 }
 
-// schedule-checks は Slack 通知用の2 key だけを必須とし、他の不要 key が欠けても起動を妨げない。
 func TestScheduleChecksSecretKeySet(t *testing.T) {
 	want := []string{config.KeySlackBotToken, config.KeySlackErrorChannel}
 	if !reflect.DeepEqual(scheduleChecksSecretKeys, want) {
 		t.Fatalf("scheduleChecksSecretKeys = %v, want %v", scheduleChecksSecretKeys, want)
 	}
-	// その2 key だけ存在し、他が全て欠けても LoadSecrets は成功する。
 	g := &stubSecretGetter{values: map[string]string{
 		"/myapp/secure/" + config.KeySlackBotToken:    "token",
 		"/myapp/plain/" + config.KeySlackErrorChannel: "C-err",

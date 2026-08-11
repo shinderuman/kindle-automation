@@ -39,8 +39,7 @@ var checkWorkerRequiredSecretKeys = []string{
 	config.KeyMastodonAccessToken,
 }
 
-// Start は check-worker Lambda のエントリポイント。依存を組み立て Lambda runtime へ登録する。
-// 起動時の依存組み立て・validation 失敗は継続不能のため標準エラーへ出力し非0で終了する。
+// Start は依存組み立て・validation 失敗時は標準エラーへ出力し非0で終了する。
 func Start() {
 	worker, err := buildWorker(context.Background())
 	if err != nil {
@@ -50,8 +49,6 @@ func Start() {
 	lambda.Start(worker.HandleSQSEvent)
 }
 
-// buildWorker は環境変数・S3・SSM から依存を組み立てて Worker を返す。
-// 起動時 validation に失敗した場合は error を返し、呼び出し側で Lambda 起動失敗とする。
 func buildWorker(ctx context.Context) (*Worker, error) {
 	env, err := config.LoadEnv(os.Getenv)
 	if err != nil {
@@ -135,7 +132,6 @@ func buildWorker(ctx context.Context) (*Worker, error) {
 	}, nil
 }
 
-// loadCheckerConfigs は checker_configs.json を読み取り validation する。
 func loadCheckerConfigs(ctx context.Context, store storage.ObjectStore, key string) (config.CheckerConfigs, error) {
 	obj, err := store.Get(ctx, key)
 	if err != nil {
@@ -173,10 +169,9 @@ func loadExcludedKeywords(ctx context.Context, store storage.ObjectStore, key st
 	return keywords, nil
 }
 
-// refreshVariableConfig は checker_configs.json と excluded_title_keywords.json を読み直し、
-// 各ユースケース依存の可変設定（SaleThreshold・除外キーワード・Gist 設定）へ反映する。
-// warm execution environment の連続 invocation でも次回から S3 の変更を反映するため HandleSQSEvent の先頭で呼ぶ。
-// 不変な依存（Fetcher・Store・Notifier・Enqueuer・Clock）はそのまま再利用する。
+// refreshVariableConfig は warm execution environment でも S3 変更を次回 invocation へ反映するため
+// HandleSQSEvent の先頭で呼ぶ。不変な依存（Fetcher・Store・Notifier・Enqueuer・Clock）は再利用し、
+// 可変設定（SaleThreshold・除外キーワード・Gist 設定）だけ差し替える。
 func (w *Worker) refreshVariableConfig(ctx context.Context) error {
 	checker, err := loadCheckerConfigs(ctx, w.store, w.checkerConfigKey)
 	if err != nil {
@@ -192,17 +187,14 @@ func (w *Worker) refreshVariableConfig(ctx context.Context) error {
 	return nil
 }
 
-// buildNotifier は SSM 秘密情報から Slack・Mastodon 両送信者を構築する。
-// 4値は上流の LoadSecrets で required（secure/plain 両方欠落・空値を起動エラー）として検査済みのため、
-// ここへ来る時点で全て非空。一部欠落を理由に送信先を黙って無効化せず、両送信先を必ず構築する
-// （必要値欠落での黙る adapter 無効化・正常起動を禁止）。
+// buildNotifier は4値とも LoadSecrets で required 検査済みのため全て非空。一部欠落を理由に
+// 送信先を黙って無効化せず Slack・Mastodon 両方を必ず構築する（必要値欠落での黙る adapter 無効化・正常起動を禁止）。
 func buildNotifier(secrets config.Secrets, logger *slog.Logger) *notification.Notifier {
 	slack := notification.NewSlackSender(secrets.SlackBotToken, secrets.SlackNoticeChannel)
 	mastodon := notification.NewMastodonSender(secrets.MastodonServer, secrets.MastodonAccessToken)
 	return notification.NewNotifier(slack, mastodon, logger)
 }
 
-// gistSettings は checker 設定から gist_type ごとの更新先を組み立てる。
 func gistSettings(checker config.CheckerConfigs) gist.Settings {
 	return gist.Settings{
 		Sale:          gistTarget(checker, gist.TypeSale),

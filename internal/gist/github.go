@@ -38,7 +38,7 @@ type GitHubClient struct {
 	baseURL string
 }
 
-// NewGitHubClient は token を指定して GitHubClient を返す。
+// NewGitHubClient は token 認証の GitHub Gist API クライアントを構築する。
 func NewGitHubClient(token string) *GitHubClient {
 	return &GitHubClient{
 		token:   token,
@@ -55,8 +55,8 @@ type gistPayload struct {
 	Files map[string]gistFileContent `json:"files"`
 }
 
-// Update は gistID の filename を markdown へ更新する。2xx 以外は error とする。
-// token は Authorization header のみへ載せ、error 文へは出さない（秘密情報の非漏洩、SPECIFICATION.md 19）。
+// Update は指定 Gist の filename を markdown で上書きする。
+// 2xx 以外は error とする。token は Authorization header のみへ載せ、error 文へは出さない（秘密情報の非漏洩、SPECIFICATION.md 19）。
 func (c *GitHubClient) Update(ctx context.Context, gistID, filename, markdown string) error {
 	body, err := json.Marshal(gistPayload{
 		Files: map[string]gistFileContent{filename: {Content: markdown}},
@@ -80,7 +80,7 @@ func (c *GitHubClient) Update(ctx context.Context, gistID, filename, markdown st
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		return nil
 	}
-	// error 応答本文は巨大な応答で OOM しないよう上限付きで読む。token は応答へ含まれない。
+	// token は応答へ含まれない。
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
 	return fmt.Errorf("gist api http %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 }

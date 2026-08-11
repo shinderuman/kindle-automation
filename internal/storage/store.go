@@ -5,7 +5,7 @@ import (
 	"errors"
 )
 
-// Object は S3 オブジェクトの本文と ETag。
+// Object は Get が返す object 本文と ETag。
 type Object struct {
 	Body []byte
 	ETag string
@@ -24,7 +24,7 @@ type PutOptions struct {
 	IfNoneMatch string
 }
 
-// ObjectStore は S3 オブジェクトの読み書き。実装は S3 client またはテスト用 stub。
+// ObjectStore は S3 client（本番）とテスト用 stub の2実装を持つ。
 type ObjectStore interface {
 	Get(ctx context.Context, key string) (Object, error)
 	Put(ctx context.Context, key string, body []byte, opts PutOptions) error

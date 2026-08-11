@@ -10,9 +10,12 @@ package execution
 
 // SPECIFICATION.md 18.1 result。正常・terminal・retryable で共通に使う。
 const (
-	ResultCompleted = "completed"   // job_completed
-	ResultTerminal  = "terminal"    // job_terminal。404・対象種別不一致等の再試行しない結果。
-	ResultError     = "error"       // job_error / gist_error
+	// ResultCompleted はジョブ正常完了（job_completed）を表す。
+	ResultCompleted = "completed" // job_completed
+	// ResultTerminal は再試行しない terminal 結果（job_terminal）を表す。
+	ResultTerminal = "terminal" // job_terminal。404・対象種別不一致等の再試行しない結果。
+	// ResultError はジョブ異常（job_error / gist_error）を表す。
+	ResultError = "error" // job_error / gist_error
 )
 
 // Outcome は1ジョブの処理結果。
@@ -25,15 +28,18 @@ type Outcome struct {
 	ResponseBytes int
 }
 
+// Completed は正常完了の Outcome を組み立てる。
 func Completed(httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultCompleted, HTTPStatus: httpStatus, ResponseBytes: responseBytes}
 }
 
+// Terminal は再試行しない terminal 結果の Outcome を組み立てる。
 // errorType に具体原因を設定する。
 func Terminal(errorType string, httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultTerminal, ErrorType: errorType, HTTPStatus: httpStatus, ResponseBytes: responseBytes}
 }
 
+// Errored は異常（job_error / gist_error）の Outcome を組み立てる。
 // 原因 error は呼び出し側が戻り値として保持する（Outcome 自体には持たない）。
 func Errored(errorType string, httpStatus, responseBytes int) Outcome {
 	return Outcome{Result: ResultError, ErrorType: errorType, HTTPStatus: httpStatus, ResponseBytes: responseBytes}

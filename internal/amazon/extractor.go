@@ -28,6 +28,7 @@ var (
 	searchAsinRe = regexp.MustCompile(`/(?:dp|gp/product|kindle-dbs/product)/([A-Z0-9]{10})`)
 )
 
+// ProductInfo は商品ページから抽出した値。
 type ProductInfo struct {
 	Title            string
 	ASIN             string
@@ -44,6 +45,7 @@ type ProductInfo struct {
 	KindleSwatchASIN string
 }
 
+// SearchHit は検索結果1件から抽出した値。
 type SearchHit struct {
 	ASIN           string
 	Title          string
@@ -52,10 +54,11 @@ type SearchHit struct {
 	Contributors   []string
 	ReleaseDate    time.Time
 	HasReleaseDate bool
-	// 検索結果カードのKindle形式表示でKindle版と確認できたか（SPECIFICATION.md 13.4）。
+	// IsKindle は検索結果カードのKindle形式表示でKindle版と確認できたか（SPECIFICATION.md 13.4）。
 	IsKindle bool
 }
 
+// ExtractProduct は商品ページから値を抽出する（SPECIFICATION.md 11.2）。
 // finalURL は redirect 後の最終URL。ASIN は extractASIN が HTML input → canonical URL →
 // finalURL の順で fallback して決定し、元の要求ASIN で無条件に代用しない（SPECIFICATION.md 11.2）。
 func ExtractProduct(doc *goquery.Document, finalURL string) ProductInfo {
@@ -105,6 +108,7 @@ func extractKindleSwatchASIN(doc *goquery.Document) string {
 	return asin
 }
 
+// ExtractSearch は検索ページから結果一覧を抽出する（SPECIFICATION.md 11.2）。
 func ExtractSearch(doc *goquery.Document) []SearchHit {
 	var hits []SearchHit
 	doc.Find(selectorSearchResult).Each(func(_ int, s *goquery.Selection) {

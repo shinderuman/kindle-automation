@@ -60,7 +60,6 @@ Globals:
         LOG_LEVEL: !Ref LogLevel
 
 Resources:
-  # ───────────────────────── SQS ─────────────────────────
   # Work Queue（FIFO）。Amazon系は amazon-requests、gist_update は external-updates を application 側で固定。
   WorkQueue:
     Type: AWS::SQS::Queue
@@ -91,7 +90,6 @@ Resources:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
 
-  # ───────────────────────── Lambda ─────────────────────────
   ScheduleChecksFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -132,7 +130,6 @@ Resources:
             Enabled: !If [WorkerMappingEnabled, true, false]
             # handler は失敗時に error を返し SQS へ再配信させる（SPECIFICATION.md 7.4）。
 
-  # ───────────────────────── CloudWatch Logs ─────────────────────────
   ScheduleChecksLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -166,7 +163,6 @@ Resources:
           MetricNamespace: KindleAutomation
           MetricValue: "1"
 
-  # ───────────────────────── CloudWatch Alarm ─────────────────────────
   # SPECIFICATION.md 17.2。ALARM 遷移でのみ schedule-checks を起動し Slack error channel へ通知する。OK 遷移では起動しない（復旧は Alarm の OK 遷移で確認）。
   WorkDLQAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -241,7 +237,6 @@ Resources:
       SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:kindle-automation-*"
       SourceAccount: !Ref AWS::AccountId
 
-  # ───────────────────────── EventBridge Scheduler ─────────────────────────
   SchedulerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -341,7 +336,6 @@ Resources:
         DeadLetterConfig:
           Arn: !GetAtt SchedulerDLQ.Arn
 
-  # ───────────────────────── IAM（Lambda 実行 Role） ─────────────────────────
   ScheduleChecksRole:
     Type: AWS::IAM::Role
     Properties:

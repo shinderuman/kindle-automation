@@ -45,13 +45,17 @@ const (
 type SearchCategory int
 
 const (
+	// SearchOK は検索ページ1回の正常取得を表す。
 	SearchOK SearchCategory = iota
+	// SearchEmpty は検索結果0件を表す。
 	// 検索ページは検証できたが結果0件。既存Go実装と同じく再試行可能。
 	SearchEmpty
+	// SearchRetryable は再試行可能な取得失敗を表す。
 	// 403/429/5xx/CAPTCHA/構造欠落。再試行する。
 	SearchRetryable
 )
 
+// SearchHit は検索ページ1回から得た1候補の情報を表す。
 type SearchHit struct {
 	ASIN           string
 	Title          string
@@ -72,18 +76,25 @@ type SearchResult struct {
 	ResponseBytes int
 }
 
+// ProductCategory は商品ページ1回の取得結果の分類（SPECIFICATION.md 11.3 相当）。
+// HTTP/goquery の都合を含まず、業務分類のみを表す。
 type ProductCategory int
 
 const (
+	// ProductOK は商品ページの正常取得を表す。
 	ProductOK ProductCategory = iota
+	// ProductNotFound は商品不存在を表す。
 	// 404 または商品不存在。terminal。
 	ProductNotFound
+	// ProductPermanentClientError は恒久的 4xx エラーを表す。
 	// 恒久的 4xx。terminal。
 	ProductPermanentClientError
+	// ProductRetryable は再試行可能な取得失敗を表す。
 	// 403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
 	ProductRetryable
 )
 
+// ProductInfo は商品ページ1回から取得したKindle商品の情報を表す。
 type ProductInfo struct {
 	ASIN            string
 	Title           string
@@ -104,6 +115,7 @@ type ProductResult struct {
 	ResponseBytes int
 }
 
+// Candidate は notified/upcoming へ保存・通知する候補1件を表す。
 type Candidate struct {
 	ASIN        string
 	Title       string
@@ -113,11 +125,13 @@ type Candidate struct {
 	KindlePrice book.Price
 }
 
+// SearchFetcher は検索ページ取得の最小依存インターフェース。
 // 1起動で最大1回。
 type SearchFetcher interface {
 	FetchSearch(ctx context.Context, author string) (SearchResult, error)
 }
 
+// ProductFetcher は商品ページ取得の最小依存インターフェース。
 // 1起動で最大1回。
 type ProductFetcher interface {
 	FetchProduct(ctx context.Context, asin string) (ProductResult, error)
@@ -134,15 +148,18 @@ type NotifiedStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
 
+// UpcomingStore は upcoming_asins への冪等upsertを担う最小依存インターフェース。
 type UpcomingStore interface {
 	Upsert(ctx context.Context, b book.KindleBook) error
 }
 
+// AuthorStore は Author の最新作情報更新を担う最小依存インターフェース。
 type AuthorStore interface {
 	// 候補の発売日が既存より後なら更新。変更があれば true。
 	UpdateLatestRelease(ctx context.Context, authorName string, releaseDate time.Time, title, url string) (changed bool, err error)
 }
 
+// Enqueuer は後続jobの投入を担う最小依存インターフェース。
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job job.Job) error
 }
@@ -153,10 +170,12 @@ type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
 
+// Config は新刊ジョブの実行設定を表す。
 type Config struct {
 	ExcludedKeywords []string
 }
 
+// Dependencies は新刊3ジョブが依存する adapter・設定・時刻源をまとめる。
 type Dependencies struct {
 	SearchFetcher  SearchFetcher
 	ProductFetcher ProductFetcher
@@ -172,6 +191,7 @@ type Dependencies struct {
 // ErrRetryableFetch は Amazon 取得の再試行可能エラー。Lambda error として SQS へ再配信させる。
 type ErrRetryableFetch struct{ ASIN string }
 
+// Error は Amazon 取得の再試行可能エラーである旨のメッセージを返す。
 func (e *ErrRetryableFetch) Error() string { return "retryable fetch for " + e.ASIN }
 
 var (
@@ -185,7 +205,7 @@ var (
 // maxSearchCandidates は検索ページ1回から候補として処理する最大件数（SPECIFICATION.md 13.2）。
 const maxSearchCandidates = 10
 
-// 検索ページへ1回アクセスし、候補ごとに new_release_result または new_release_detail を投入する。
+// HandleNewReleaseSearch は新刊検索jobのユースケース entry point。
 // 検索job自身は S3 保存も商品通知も行わない（SPECIFICATION.md 13.4, AGENTS.md 4）。
 func HandleNewReleaseSearch(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	author := j.Target.AuthorName
@@ -217,6 +237,7 @@ func HandleNewReleaseSearch(ctx context.Context, deps Dependencies, j job.Job) (
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
+// HandleNewReleaseResult は新刊結果jobのユースケース entry point。
 // 検索結果の product を使って判定・保存・通知を行う（商品ページへの追加アクセスはしない）。
 func HandleNewReleaseResult(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	p := j.Target.Product
@@ -234,6 +255,7 @@ func HandleNewReleaseResult(ctx context.Context, deps Dependencies, j job.Job) (
 	})
 }
 
+// HandleNewReleaseDetail は新刊詳細jobのユースケース entry point。
 // 商品ページへ最大1回アクセスし、候補を判定して保存・通知する。
 func HandleNewReleaseDetail(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	asin := j.Target.ASIN
@@ -445,11 +467,13 @@ func formatNewReleaseMessage(author string, c Candidate) string {
 		c.Title, author, c.ReleaseDate.Format("2006-01-02"), c.ASIN, c.URL)
 }
 
+// IsISBNASIN は ASIN 文字列が紙書籍 ISBN かを返す。
 // 10〜13桁の数字だけで構成される紙書籍ISBNか（SPECIFICATION.md 13.3）。
 func IsISBNASIN(asin string) bool {
 	return isbnRe.MatchString(asin)
 }
 
+// ExcludedByKeyword は title が除外 keywords のいずれかを含むかを返す。
 func ExcludedByKeyword(title string, keywords []string) bool {
 	for _, keyword := range keywords {
 		if keyword != "" && strings.Contains(title, keyword) {
@@ -459,10 +483,12 @@ func ExcludedByKeyword(title string, keywords []string) bool {
 	return false
 }
 
+// ExcludedByYearMonth は title に「YYYY年M月」形式の年月表記が含まれるかを返す。
 func ExcludedByYearMonth(title string) bool {
 	return yearMonthRe.MatchString(title)
 }
 
+// IsFutureRelease は発売日が now より未来かを返す。
 // SPECIFICATION.md 13.6。
 func IsFutureRelease(releaseDate, now time.Time) bool {
 	return releaseDate.After(now)

@@ -10,7 +10,6 @@ import (
 // mergeMaxRetries は Upcoming→Unprocessed 条件付き merge の前提不一致再試行回数（SPECIFICATION.md 9.5 は最大3回）。
 const mergeMaxRetries = 3
 
-// asinListReader は書籍JSON object から ASIN 一覧を読み取る dispatch.AsinListReader。
 type asinListReader struct{ store storage.ObjectStore }
 
 // LoadAsins は対象 object の全 ASIN を返す。対象 object（unprocessed_asins・paper_books_asins）は
@@ -32,7 +31,6 @@ func (r asinListReader) LoadAsins(ctx context.Context, key string) ([]string, er
 	return asins, nil
 }
 
-// authorReader は authors.json から作者名一覧を読み取る dispatch.AuthorReader。
 type authorReader struct{ store storage.ObjectStore }
 
 // LoadAuthorNames は authors.json の全 Name を返す。authors.json は SPECIFICATION.md 9.1 の存在必須 objectのため、
@@ -53,7 +51,6 @@ func (r authorReader) LoadAuthorNames(ctx context.Context, key string) ([]string
 	return names, nil
 }
 
-// upcomingMerger はセール周期開始時の Upcoming→Unprocessed merge を行う dispatch.UpcomingMerger。
 type upcomingMerger struct {
 	store          storage.ObjectStore
 	unprocessedKey string

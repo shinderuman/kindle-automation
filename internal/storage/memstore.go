@@ -14,12 +14,12 @@ type MemStore struct {
 	objects map[string]string
 }
 
-// NewMemStore は空の MemStore を返す。
+// NewMemStore は空のテスト用 ObjectStore を組み立てる。
 func NewMemStore() *MemStore {
 	return &MemStore{objects: make(map[string]string)}
 }
 
-// Get は key の本文と ETag を返す。存在しない場合は ErrObjectNotFound。
+// Get は object が存在しないと ErrObjectNotFound を返す。
 func (s *MemStore) Get(_ context.Context, key string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -30,7 +30,7 @@ func (s *MemStore) Get(_ context.Context, key string) (Object, error) {
 	return Object{Body: []byte(body), ETag: memETag(body)}, nil
 }
 
-// Put は本文を書き込む。If-Match / If-None-Match の前提不一致で ErrPreconditionFailed。
+// Put は If-Match / If-None-Match の前提不一致で ErrPreconditionFailed を返す。
 func (s *MemStore) Put(_ context.Context, key string, body []byte, opts PutOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -47,7 +47,7 @@ func (s *MemStore) Put(_ context.Context, key string, body []byte, opts PutOptio
 	return nil
 }
 
-// Seed はテスト用に初期データを設定する。本番コードからは使わない。
+// Seed はテスト専用の初期データ設定（本番コードからは使わない）。
 func (s *MemStore) Seed(key string, body string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

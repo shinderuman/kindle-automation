@@ -90,7 +90,7 @@ func (n *Notifier) logSuccess(channel string) {
 	)
 }
 
-// SlackSender は Slack chat.postMessage API へ投稿する。
+// SlackSender は Slack chat.postMessage API への net/http adapter（SPECIFICATION.md 17.1）。
 type SlackSender struct {
 	token   string
 	channel string
@@ -98,6 +98,7 @@ type SlackSender struct {
 	baseURL string
 }
 
+// NewSlackSender は token 認証・channel 指定の Slack 送信者を構築する。
 func NewSlackSender(token, channel string) *SlackSender {
 	return &SlackSender{
 		token:   token,
@@ -107,7 +108,7 @@ func NewSlackSender(token, channel string) *SlackSender {
 	}
 }
 
-// Send は Slack API へ POST し、レスポンスの ok フィールドで成功を判定する。
+// Send は Slack が 200 でも ok フィールドで失敗を返すため、ok で成功を判定する。
 func (s *SlackSender) Send(ctx context.Context, message string) error {
 	body, err := json.Marshal(map[string]string{"channel": s.channel, "text": message})
 	if err != nil {
@@ -140,7 +141,7 @@ func (s *SlackSender) Send(ctx context.Context, message string) error {
 	return nil
 }
 
-// MastodonSender は Mastodon の statuses API へ投稿する。
+// MastodonSender は Mastodon statuses API への net/http adapter（SPECIFICATION.md 17.1）。
 type MastodonSender struct {
 	server      string
 	accessToken string
@@ -156,7 +157,7 @@ func NewMastodonSender(server, accessToken string) *MastodonSender {
 	}
 }
 
-// Send は {server}/api/v1/statuses へ public toot として POST する。
+// Send は Mastodon へ message を public 投稿する。
 func (s *MastodonSender) Send(ctx context.Context, message string) error {
 	form := url.Values{}
 	form.Set("status", message)

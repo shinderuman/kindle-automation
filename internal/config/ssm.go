@@ -18,15 +18,24 @@ const (
 
 // 取得する SSM parameter key（SPECIFICATION.md 19）。PA API 資格情報は含めない。
 const (
-	KeyAmazonPartnerTag     = "AMAZON_PARTNER_TAG"
-	KeySlackBotToken        = "SLACK_BOT_TOKEN"
-	KeySlackNoticeChannel   = "SLACK_NOTICE_CHANNEL"
-	KeySlackErrorChannel    = "SLACK_ERROR_CHANNEL"
-	KeyMastodonServer       = "MASTODON_SERVER"
-	KeyMastodonClientID     = "MASTODON_CLIENT_ID"
+	// KeyAmazonPartnerTag は Amazon affiliate partner tag を受け取る key。
+	KeyAmazonPartnerTag = "AMAZON_PARTNER_TAG"
+	// KeySlackBotToken は Slack 投稿用 bot token を受け取る key。
+	KeySlackBotToken = "SLACK_BOT_TOKEN"
+	// KeySlackNoticeChannel は商品通知の投稿先 Slack channel を受け取る key。
+	KeySlackNoticeChannel = "SLACK_NOTICE_CHANNEL"
+	// KeySlackErrorChannel は運用エラー通知の投稿先 Slack channel を受け取る key。
+	KeySlackErrorChannel = "SLACK_ERROR_CHANNEL"
+	// KeyMastodonServer は Mastodon server URL を受け取る key。
+	KeyMastodonServer = "MASTODON_SERVER"
+	// KeyMastodonClientID は Mastodon client id を受け取る key。
+	KeyMastodonClientID = "MASTODON_CLIENT_ID"
+	// KeyMastodonClientSecret は Mastodon client secret を受け取る key。
 	KeyMastodonClientSecret = "MASTODON_CLIENT_SECRET"
-	KeyMastodonAccessToken  = "MASTODON_ACCESS_TOKEN"
-	KeyGitHubToken          = "GITHUB_TOKEN"
+	// KeyMastodonAccessToken は Mastodon 投稿用 access token を受け取る key。
+	KeyMastodonAccessToken = "MASTODON_ACCESS_TOKEN"
+	// KeyGitHubToken は Gist 更新用 GitHub token を受け取る key。
+	KeyGitHubToken = "GITHUB_TOKEN"
 )
 
 // AllSecretKeys は新システムが使用する SSM parameter key の全集。
@@ -49,6 +58,7 @@ var ErrSecretNotFound = errors.New("secret not found in secure or plain")
 // secure/plain いずれかに存在しても値が空文字なら required として成立しない。
 var ErrSecretEmpty = errors.New("secret value is empty")
 
+// Secrets は SSM から読み取った秘密情報（SPECIFICATION.md 19）。各通知先・API 資格の文字列を保持する。
 type Secrets struct {
 	AmazonPartnerTag     string
 	SlackBotToken        string
@@ -130,7 +140,6 @@ func getParameter(ctx context.Context, getter ParameterGetter, name string, decr
 	return *out.Parameter.Value, nil
 }
 
-// isParameterNotFound は SSM の ParameterNotFound エラーかを判定する。
 // 生成された具象型へ依存せず smithy.APIError の code で判定する。
 func isParameterNotFound(err error) bool {
 	var apiErr smithy.APIError

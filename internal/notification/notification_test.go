@@ -189,8 +189,7 @@ func parseLogMap(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-// newRawSlackServer は Authorization/body 解釈をせず、固定 status と本文を返す Slack 伪応答サーバー。
-// HTTP status 分類・decode 経路の検証に使う（newSlackServer は ok/false 固定で用途が違う）。
+// newRawSlackServer は HTTP status 分類・decode 経路の検証用（newSlackServer は ok/false 固定で用途が違う）。
 func newRawSlackServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

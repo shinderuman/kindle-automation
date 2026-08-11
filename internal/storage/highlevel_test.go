@@ -17,7 +17,6 @@ var pastRelease = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 func TestBookFileStore_UpdateOneBook_UpdatesAndKeepsExtra(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "k", book.KindleBook{ASIN: "B0TARGET001", Title: "旧", CurrentPrice: book.NewPrice(700), MaxPrice: book.NewPrice(700)})
-	// 未知 field を含むレコードを seed
 	store.Seed("k", `[{"ASIN":"B0TARGET001","Title":"旧","ReleaseDate":"2026-12-31T00:00:00Z","CurrentPrice":700,"MaxPrice":700,"URL":"","CreatedAt":"2026-01-01T00:00:00Z","Memo":"手動"}]`)
 
 	s := NewBookFileStore(store, "k")
@@ -66,7 +65,6 @@ func TestBookFileStore_Upsert_IdempotentAndMerges(t *testing.T) {
 	if err := s.Upsert(context.Background(), first); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	// 同一 ASIN を異なる値で再 upsert しても件数は増えず、値は merge 更新される。
 	second := book.KindleBook{ASIN: "B0FX3X569X", Title: "改訂", ReleaseDate: futureRelease, CreatedAt: testNow}
 	if err := s.Upsert(context.Background(), second); err != nil {
 		t.Fatalf("second upsert: %v", err)
@@ -113,8 +111,6 @@ func TestBookFileStore_Upsert_PreservesCreatedAt(t *testing.T) {
 	if err := s.Upsert(context.Background(), first); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	// SQS 再配信等で異なる CreatedAt（別起動時刻）で再 upsert しても、
-	// 既存レコードの CreatedAt は保持され、Amazon 由来 field だけ merge される（SPECIFICATION.md 9.2/9.4/7.4）。
 	later := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	second := book.KindleBook{ASIN: "B0FX3X569X", Title: "改訂", ReleaseDate: futureRelease, CreatedAt: later}
 	if err := s.Upsert(context.Background(), second); err != nil {
@@ -159,7 +155,6 @@ func TestBookFileStore_ApplyRetentionAndExists(t *testing.T) {
     ]`)
 	s := NewBookFileStore(store, "notified")
 
-	// 過去分 B0PAST000001 は保存期間適用前は存在する
 	exists, err := s.ApplyRetentionAndExists(context.Background(), "B0PAST000001", testNow)
 	if err != nil {
 		t.Fatalf("ApplyRetentionAndExists: %v", err)
@@ -168,7 +163,6 @@ func TestBookFileStore_ApplyRetentionAndExists(t *testing.T) {
 		t.Errorf("過去分は処理開始時に存在する（alreadyNotified=true）")
 	}
 
-	// 保存期間適用後、過去分は削除されている
 	obj, _ := store.Get(context.Background(), "notified")
 	if strings.Contains(string(obj.Body), "B0PAST000001") {
 		t.Errorf("過去分は保存期間適用で削除される: %s", obj.Body)
@@ -177,7 +171,6 @@ func TestBookFileStore_ApplyRetentionAndExists(t *testing.T) {
 		t.Errorf("将来分は残る: %s", obj.Body)
 	}
 
-	// 将来分は alreadyNotified=true
 	exists, _ = s.ApplyRetentionAndExists(context.Background(), "B0FUTURE001", testNow)
 	if !exists {
 		t.Errorf("将来分は存在する")
@@ -197,7 +190,6 @@ func TestBookFileStore_Delete(t *testing.T) {
 	if len(records) != 1 || records[0].Book.ASIN != "B0KEEP000001" {
 		t.Errorf("delete failed: %+v", records)
 	}
-	// 冪等：再度削除してもエラーなし
 	if err := s.Delete(context.Background(), "B0TARGET001"); err != nil {
 		t.Errorf("idempotent delete: %v", err)
 	}
@@ -221,8 +213,6 @@ func TestBookFileStore_Book(t *testing.T) {
 	}
 }
 
-// TestBookFileStore_Book_MissingObjectErrors は object 欠落時に ok=false ではなく error を返し、
-// ASIN 不存在と object 欠落を区別することを検証する（SPECIFICATION.md 9.1）。
 func TestBookFileStore_Book_MissingObjectErrors(t *testing.T) {
 	s := NewBookFileStore(NewMemStore(), "k")
 	_, ok, err := s.Book(context.Background(), "B0FX3X569X")
@@ -234,8 +224,6 @@ func TestBookFileStore_Book_MissingObjectErrors(t *testing.T) {
 	}
 }
 
-// TestBookFileStore_Exists_MissingObjectErrors は object 欠落時に exists=false ではなく error を返すことを検証する。
-// papertokindle/newrelease が KnownState や事前除外で exists=false を誤って信じないようにする（SPECIFICATION.md 9.1）。
 func TestBookFileStore_Exists_MissingObjectErrors(t *testing.T) {
 	s := NewBookFileStore(NewMemStore(), "k")
 	exists, err := s.Exists(context.Background(), "B0FX3X569X")
@@ -257,7 +245,6 @@ func TestBookFileStore_RetriesOnConflict(t *testing.T) {
 	}
 	obj, _ := store.Get(context.Background(), "k")
 	records, _ := DecodeBooks(obj.Body)
-	// flakyStore の競合 body が残っていても、対象 ASIN が最終的に保存されていれば OK。
 	if findBookIndex(records, "B0FX3X569X") == -1 {
 		t.Errorf("B0FX3X569X not present after retry: %+v", records)
 	}
@@ -300,21 +287,18 @@ func TestAuthorFileStore_NoChangeWhenOlder(t *testing.T) {
 
 func TestAuthorFileStore_SortsAuthors(t *testing.T) {
 	store := NewMemStore()
-	// 新しい発売日の作者を後ろに seed（並び順が逆）
 	store.Seed("authors", `[
         {"Name":"作者B","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"B作","LatestReleaseURL":"b"},
         {"Name":"作者A","URL":"u","LatestReleaseDate":"2026-12-31T00:00:00Z","LatestReleaseTitle":"A作","LatestReleaseURL":"a"}
     ]`)
 	s := NewAuthorFileStore(store, "authors")
 
-	// 作者Aの最新作を更新（変わらないが sort は走る）
 	_, err := s.UpdateLatestRelease(context.Background(), "作者A", futureRelease, "A作", "a")
 	if err != nil {
 		t.Fatalf("UpdateLatestRelease: %v", err)
 	}
 	obj, _ := store.Get(context.Background(), "authors")
 	body := string(obj.Body)
-	// 発売日降順: 作者A（2026-12-31）が先
 	if strings.Index(body, "作者A") > strings.Index(body, "作者B") {
 		t.Errorf("authors not sorted by release date desc:\n%s", body)
 	}
@@ -325,7 +309,6 @@ func TestKnownStateQuerier(t *testing.T) {
 	seedBook(store, "notified", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "paper", book.KindleBook{ASIN: "B0PAPER001"})
-	// unprocessed は空配列として存在（存在必須 object、SPECIFICATION.md 9.1）
 	store.Seed("unprocessed", `[]`)
 
 	q := NewKnownStateQuerier(store, "notified", "upcoming", "unprocessed", "paper")
@@ -347,27 +330,19 @@ func TestKnownStateQuerier(t *testing.T) {
 	}
 }
 
-// TestKnownStateQuerier_MissingObjectErrors は必須 object いずれかが欠落した場合、
-// exists=false でなく error を返し、object 欠落と ASIN 不存在を区別することを検証する（SPECIFICATION.md 9.1）。
-// papertokindle は KnownState 全 false を手動削除扱いするため、欠落時の誤判定を防ぐ。
 func TestKnownStateQuerier_MissingObjectErrors(t *testing.T) {
 	store := NewMemStore()
 	seedBook(store, "notified", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "upcoming", book.KindleBook{ASIN: "B0KINDLE01"})
 	seedBook(store, "paper", book.KindleBook{ASIN: "B0PAPER001"})
-	// unprocessed を欠落させる（存在必須 object の不在）
-
 	q := NewKnownStateQuerier(store, "notified", "upcoming", "unprocessed", "paper")
 	if _, err := q.KnownState(context.Background(), "B0KINDLE01", "B0PAPER001"); !errors.Is(err, ErrObjectNotFound) {
 		t.Fatalf("err = %v, want wrap of ErrObjectNotFound (object 欠落は error)", err)
 	}
 }
 
-// TestBookFileStore_Delete_AbsentASINIsIdempotent は存在する object 内に無い ASIN の削除は
-// 何もしない（手動削除済み）ことを検証する（SPECIFICATION.md 7.5）。
 func TestBookFileStore_Delete_AbsentASINIsIdempotent(t *testing.T) {
 	store := NewMemStore()
-	// paper object は存在するが B0PAPER001 はない（手動削除済み）。
 	seedBook(store, "paper", book.KindleBook{ASIN: "B0OTHER0001", Title: "keep"})
 	s := NewBookFileStore(store, "paper")
 
@@ -381,8 +356,6 @@ func TestBookFileStore_Delete_AbsentASINIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestBookFileStore_Delete_MissingObjectErrors は object 自体が欠落している場合は
-// 空配列へ fallback せず error とし、新規保存も行わないことを検証する（SPECIFICATION.md 9.1）。
 func TestBookFileStore_Delete_MissingObjectErrors(t *testing.T) {
 	store := NewMemStore()
 	s := NewBookFileStore(store, "paper")
@@ -397,7 +370,6 @@ func TestBookFileStore_Delete_MissingObjectErrors(t *testing.T) {
 
 func TestBookFileStore_UpdateOneBook_SavesSortOrder(t *testing.T) {
 	store := NewMemStore()
-	// 発売日昇順で seed。更新後に降順へ並び替えられるか（SPECIFICATION.md 9.2）。
 	seedBook(store, "k",
 		book.KindleBook{ASIN: "B0OLD", Title: "old", ReleaseDate: pastRelease},
 		book.KindleBook{ASIN: "B0NEW", Title: "new", ReleaseDate: futureRelease},
@@ -420,8 +392,6 @@ func TestBookFileStore_UpdateOneBook_SavesSortOrder(t *testing.T) {
 
 func TestBookFileStore_ApplyRetention_SavesSortOrder(t *testing.T) {
 	store := NewMemStore()
-	// 将来分2件（順不同）+ 過去分1件。retention で過去分が消え、将来分は降順で残る。
-	// 将来分は testNow(2026-08-09) より後とする。
 	store.Seed("notified", `[
         {"ASIN":"B0FUTA","Title":"A","ReleaseDate":"2026-12-31T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"},
         {"ASIN":"B0FUTB","Title":"B","ReleaseDate":"2027-06-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"},
@@ -449,7 +419,6 @@ func TestBookFileStore_Delete_SavesSortOrder(t *testing.T) {
 	)
 	s := NewBookFileStore(store, "k")
 
-	// 中間発売日を削除し、残りが降順で保存されるか。
 	if err := s.Delete(context.Background(), "B0MID"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -463,7 +432,6 @@ func TestBookFileStore_Delete_SavesSortOrder(t *testing.T) {
 
 func TestBookFileStore_Books_ReturnsAllInStoredOrder(t *testing.T) {
 	store := NewMemStore()
-	// 発売日降順になるよう保存させる（futureRelease の方が pastRelease より前へ並ぶ）
 	seedBook(store, "k",
 		book.KindleBook{ASIN: "B0FUTURE001", Title: "未来", ReleaseDate: futureRelease, CurrentPrice: book.NewPrice(700)},
 		book.KindleBook{ASIN: "B0PAST00001", Title: "過去", ReleaseDate: pastRelease, CurrentPrice: book.NewPrice(500)},
@@ -483,8 +451,6 @@ func TestBookFileStore_Books_ReturnsAllInStoredOrder(t *testing.T) {
 	}
 }
 
-// TestBookFileStore_Books_MissingObjectErrors は必須 object 欠落時に空配列へ fallback せず
-// error を返すことを検証する（SPECIFICATION.md 9.1）。Gist の空上書きを防ぐため空へ fall しない。
 func TestBookFileStore_Books_MissingObjectErrors(t *testing.T) {
 	s := NewBookFileStore(NewMemStore(), "k")
 	books, err := s.Books(context.Background())
@@ -498,7 +464,6 @@ func TestBookFileStore_Books_MissingObjectErrors(t *testing.T) {
 
 func TestAuthorFileStore_Authors_ReturnsAllInStoredOrder(t *testing.T) {
 	store := NewMemStore()
-	// authors.json は書込時に常に発売日降順へ sort される前提。読込は保存順をそのまま返す。
 	store.Seed("authors", `[{"Name":"作者A","URL":"u","LatestReleaseDate":"2026-12-31T00:00:00Z","LatestReleaseTitle":"A作","LatestReleaseURL":"a"},{"Name":"作者B","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"B作","LatestReleaseURL":"b"}]`)
 	s := NewAuthorFileStore(store, "authors")
 
@@ -514,8 +479,6 @@ func TestAuthorFileStore_Authors_ReturnsAllInStoredOrder(t *testing.T) {
 	}
 }
 
-// TestAuthorFileStore_Authors_MissingObjectErrors は authors.json 欠落時に空配列へ fallback せず
-// error を返すことを検証する（SPECIFICATION.md 9.1）。作者0件として正本を再生成しない。
 func TestAuthorFileStore_Authors_MissingObjectErrors(t *testing.T) {
 	s := NewAuthorFileStore(NewMemStore(), "authors")
 	authors, err := s.Authors(context.Background())
@@ -527,7 +490,6 @@ func TestAuthorFileStore_Authors_MissingObjectErrors(t *testing.T) {
 	}
 }
 
-// findAuthorLatestRelease は authors.json から名前で作者を引き LatestReleaseDate を返す。
 func findAuthorLatestRelease(t *testing.T, s *AuthorFileStore, name string) time.Time {
 	t.Helper()
 	authors, err := s.Authors(context.Background())
@@ -543,9 +505,6 @@ func findAuthorLatestRelease(t *testing.T, s *AuthorFileStore, name string) time
 	return time.Time{}
 }
 
-// TestAuthorFileStore_UpdateLatestRelease_KeepsMaxDateRegardlessOfOrder は同一作者へ候補が複数回
-// 更新を掛ける際、呼び出し順に依存せず常に最も後の発売日を残すことを検証する（SPECIFICATION.md 13.5）。
-// 1検索の複数候補が別々の result/detail job から順不同で UpdateLatestRelease を呼んでも最大日付になる。
 func TestAuthorFileStore_UpdateLatestRelease_KeepsMaxDateRegardlessOfOrder(t *testing.T) {
 	const seedJSON = `[{"Name":"海李","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"旧作","LatestReleaseURL":"old"}]`
 	older := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -577,8 +536,6 @@ func TestAuthorFileStore_UpdateLatestRelease_KeepsMaxDateRegardlessOfOrder(t *te
 	}
 }
 
-// TestAuthorFileStore_UpdateLatestRelease_AbsentAuthorNoReadd は authors.json にない作者
-// （手動消失）へ更新を掛けても changed=false かつ再追加しないことを検証する（SPECIFICATION.md 7.5）。
 func TestAuthorFileStore_UpdateLatestRelease_AbsentAuthorNoReadd(t *testing.T) {
 	store := NewMemStore()
 	store.Seed("authors", `[{"Name":"別人","URL":"u","LatestReleaseDate":"2025-01-01T00:00:00Z","LatestReleaseTitle":"x","LatestReleaseURL":"y"}]`)
@@ -602,9 +559,6 @@ func TestAuthorFileStore_UpdateLatestRelease_AbsentAuthorNoReadd(t *testing.T) {
 	}
 }
 
-// TestBookFileStore_ApplyRetentionAndExists_Boundary は notified 保存期間の境界を
-// 既存Go仕様（ReleaseDate.After(now) = 厳密な将来）に合わせて検証する（SPECIFICATION.md 13.6/675）。
-// 発売日==now は将来ではないため除外され、now より1日後は保持される。
 func TestBookFileStore_ApplyRetentionAndExists_Boundary(t *testing.T) {
 	store := NewMemStore()
 	store.Seed("notified", `[
@@ -613,7 +567,6 @@ func TestBookFileStore_ApplyRetentionAndExists_Boundary(t *testing.T) {
     ]`)
 	s := NewBookFileStore(store, "notified")
 
-	// testNow = 2026-08-09T00:00:00Z。発売日==now は After(now) false で除外。
 	if _, err := s.ApplyRetentionAndExists(context.Background(), "B0EQULA0001", testNow); err != nil {
 		t.Fatalf("ApplyRetentionAndExists: %v", err)
 	}

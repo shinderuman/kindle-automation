@@ -22,16 +22,14 @@ const (
 	sourceCloudWatch = "aws.cloudwatch"
 )
 
-// Scheduler は schedule-checks Lambda の振る舞いを保持する。
-// Scheduler イベントは dispatch.Run へ、CloudWatch Alarm イベントは Slack error channel 通知へ振り分ける。
+// Scheduler は Scheduler イベントを dispatch.Run へ、CloudWatch Alarm を Slack error channel 通知へ振り分ける。
 type Scheduler struct {
 	Deps        dispatch.Dependencies
 	ErrorSender notification.Sender // Slack error channel。nil ならログのみ。
 	Logger      *slog.Logger
 }
 
-// HandleSchedule は1周分の対象ジョブ化と SQS 投入を行う。
-// 投入結果は cycle_dispatched（または Checker 無効時は cycle_disabled）へ記録する（SPECIFICATION.md 18.3）。
+// HandleSchedule は投入結果を cycle_dispatched（Checker 無効時は cycle_disabled）へ記録する（SPECIFICATION.md 18.3）。
 func (s *Scheduler) HandleSchedule(ctx context.Context, event dispatch.Event) error {
 	result, err := dispatch.Run(ctx, s.Deps, event)
 	if err != nil {
@@ -41,9 +39,8 @@ func (s *Scheduler) HandleSchedule(ctx context.Context, event dispatch.Event) er
 	return nil
 }
 
-// logCycle は1周の dispatch 結果を構造化ログへ出す（SPECIFICATION.md 18.3）。
-// Disabled のときは cycle_disabled、それ以外は cycle_dispatched へ
-// target_count/enqueued_count/upcoming_merged を含める。
+// logCycle は Disabled のとき cycle_disabled、それ以外は cycle_dispatched へ
+// target_count/enqueued_count/upcoming_merged を含める（SPECIFICATION.md 18.3）。
 func (s *Scheduler) logCycle(ctx context.Context, event dispatch.Event, result dispatch.DispatchResult) {
 	if s.Logger == nil {
 		return
@@ -88,8 +85,8 @@ func (s *Scheduler) HandleAlarm(ctx context.Context, alarmName string) error {
 	return nil
 }
 
-// HandleEvent は Lambda へ渡された生イベントを source で判別し Scheduler/Alarm へ振り分ける。
-// EventBridge Scheduler の定数入力は source=scheduler。CloudWatch Alarm の直接 invoke は source=aws.cloudwatch。
+// HandleEvent は source でイベントを判別する。EventBridge Scheduler は source=scheduler、
+// CloudWatch Alarm 直接 invoke は source=aws.cloudwatch。
 func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error {
 	var peek struct {
 		Source string `json:"source"`

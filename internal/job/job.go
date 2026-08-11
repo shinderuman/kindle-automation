@@ -17,24 +17,37 @@ const Version = 1
 // 検索結果でKindle版と確定した候補だけがこの値を持つ。
 const ItemTypeKindle = "kindle"
 
+// Kind はジョブメッセージの種別（SPECIFICATION.md 7.3）。
 type Kind string
 
 const (
-	KindSaleCheck           Kind = "sale_check"
-	KindSaleFinalize        Kind = "sale_finalize"
-	KindNewReleaseSearch    Kind = "new_release_search"
-	KindNewReleaseResult    Kind = "new_release_result"
-	KindNewReleaseDetail    Kind = "new_release_detail"
-	KindPaperToKindleCheck  Kind = "paper_to_kindle_check"
+	// KindSaleCheck は商品ページでセール条件を判定するジョブ（SPECIFICATION.md 7.3）。
+	KindSaleCheck Kind = "sale_check"
+	// KindSaleFinalize はセール周回の終了で Sale 用 gist_update を投入するジョブ（SPECIFICATION.md 7.3）。
+	KindSaleFinalize Kind = "sale_finalize"
+	// KindNewReleaseSearch は検索ページから作者の候補 ASIN を抽出するジョブ（SPECIFICATION.md 7.3）。
+	KindNewReleaseSearch Kind = "new_release_search"
+	// KindNewReleaseResult は必須項目が揃った検索候補の判定・保存を行うジョブ（SPECIFICATION.md 7.3）。
+	KindNewReleaseResult Kind = "new_release_result"
+	// KindNewReleaseDetail は候補の商品ページで発売日・価格・Kindle版確認を行うジョブ（SPECIFICATION.md 7.3）。
+	KindNewReleaseDetail Kind = "new_release_detail"
+	// KindPaperToKindleCheck は紙書籍ページで Kindle 版スウォッチを確認するジョブ（SPECIFICATION.md 7.3）。
+	KindPaperToKindleCheck Kind = "paper_to_kindle_check"
+	// KindPaperToKindleDetail は Kindle 版候補の商品ページで検証・保存を行うジョブ（SPECIFICATION.md 7.3）。
 	KindPaperToKindleDetail Kind = "paper_to_kindle_detail"
-	KindGistUpdate          Kind = "gist_update"
+	// KindGistUpdate は Sale・Author・Paper-to-Kindle Gist を再生成するジョブ（SPECIFICATION.md 7.3/15）。
+	KindGistUpdate Kind = "gist_update"
 )
 
+// CheckType は schedule-checks 起動ごとのチェック種別（SPECIFICATION.md 5.1/6）。
 type CheckType string
 
 const (
-	CheckSale          CheckType = "sale"
-	CheckNewRelease    CheckType = "new_release"
+	// CheckSale はセール周期の check_type 値。
+	CheckSale CheckType = "sale"
+	// CheckNewRelease は新刊周期の check_type 値。
+	CheckNewRelease CheckType = "new_release"
+	// CheckPaperToKindle は紙書籍・Kindle版周期の check_type 値。
 	CheckPaperToKindle CheckType = "paper_to_kindle"
 )
 
@@ -72,20 +85,25 @@ type Job struct {
 
 // schema 検証エラー。いずれもAmazonへアクセスせずDLQへ残せる terminal 扱い（SPECIFICATION.md 7.2）。
 var (
+	// ErrUnsupportedVersion は job メッセージの version が現行 schema と一致しない。
 	ErrUnsupportedVersion = errors.New("unsupported job version")
-	ErrUnknownKind        = errors.New("unknown job kind")
-	ErrMissingField       = errors.New("missing required target field")
-	ErrInvalidASIN        = errors.New("invalid ASIN format")
-	ErrInvalidItemType    = errors.New("invalid product item_type")
+	// ErrUnknownKind は Job.Kind が未知の値。
+	ErrUnknownKind = errors.New("unknown job kind")
+	// ErrMissingField は kind ごとの必須 target field が空。
+	ErrMissingField = errors.New("missing required target field")
+	// ErrInvalidASIN は ASIN/ISBN の形式が不正。
+	ErrInvalidASIN = errors.New("invalid ASIN format")
+	// ErrInvalidItemType は product.item_type が正規値 "kindle" でない（SPECIFICATION.md 7.2/13.4）。
+	ErrInvalidItemType = errors.New("invalid product item_type")
 )
 
 var (
-	// kindleAsinRe は10文字の英数字（Kindle ASIN）。
 	kindleAsinRe = regexp.MustCompile(`^[A-Z0-9]{10}$`)
-	// isbnRe は10〜13桁の数字のみ（紙書籍 ISBN）。paper_books_asins 由来の対象を弾かないため許容する。
+	// paper_books_asins 由来の対象を弾かないため ISBN（10〜13桁の数字）を許容する。
 	isbnRe = regexp.MustCompile(`^\d{10,13}$`)
 )
 
+// Validate は Job の schema と kind ごとの必須 target field を検証する（SPECIFICATION.md 7.2）。
 func (j Job) Validate() error {
 	if j.Version != Version {
 		return ErrUnsupportedVersion
@@ -170,6 +188,7 @@ func AmazonRequests(k Kind) int {
 	}
 }
 
+// Decode は JSON を Job へ復元し schema 検証を経て返す（SPECIFICATION.md 7.2）。
 func Decode(data []byte) (Job, error) {
 	var j Job
 	if err := json.Unmarshal(data, &j); err != nil {

@@ -101,23 +101,19 @@ func TestRun_Sale_EnqueuesOneJobPerAsinAndFinalizeLast(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// 全 job = sale_check x2 + sale_finalize x1
 	all := enq.allJobs()
 	if len(all) != 3 {
 		t.Fatalf("len(jobs) = %d, want 3", len(all))
 	}
-	// sale_finalize は最後の batch の1件のみ。
 	lastBatch := enq.batches[len(enq.batches)-1]
 	if len(lastBatch) != 1 || lastBatch[0].Kind != job.KindSaleFinalize {
 		t.Fatalf("last batch should be sale_finalize only: %+v", lastBatch)
 	}
-	// sale_check は finalize より前。
 	for i, j := range all {
 		if j.Kind == job.KindSaleFinalize && i != len(all)-1 {
 			t.Errorf("sale_finalize at index %d, want last", i)
 		}
 	}
-	// DispatchResult（SPECIFICATION.md 18.3 cycle_dispatched）。
 	if result.TargetCount != 2 || result.EnqueuedCount != 3 {
 		t.Errorf("result = (target=%d enqueued=%d), want (2,3)", result.TargetCount, result.EnqueuedCount)
 	}
@@ -154,7 +150,6 @@ func TestRun_Sale_FinalizeEnqueuedEvenWhenEmpty(t *testing.T) {
 	if len(all) != 1 || all[0].Kind != job.KindSaleFinalize {
 		t.Fatalf("empty sale should still enqueue sale_finalize: %+v", all)
 	}
-	// 対象0件でも finalize 1件を投入する（SPECIFICATION.md 6）。
 	if result.TargetCount != 0 || result.EnqueuedCount != 1 {
 		t.Errorf("result = (target=%d enqueued=%d), want (0,1)", result.TargetCount, result.EnqueuedCount)
 	}
@@ -319,7 +314,6 @@ func TestRun_BatchSizeLimit(t *testing.T) {
 	}
 }
 
-// TestRun_ConfigError_StopsBeforeEnqueue は Checker 読込失敗時に投入せず error を返すことを検証する。
 func TestRun_ConfigError_StopsBeforeEnqueue(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -335,7 +329,6 @@ func TestRun_ConfigError_StopsBeforeEnqueue(t *testing.T) {
 	}
 }
 
-// TestRun_UnknownCheckType_ReturnsError は未知の check_type で error を返すことを検証する。
 func TestRun_UnknownCheckType_ReturnsError(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -349,7 +342,6 @@ func TestRun_UnknownCheckType_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRun_Sale_MergeUpcomingError_Stops は Upcoming 取り込み失敗時に対象読込・投入へ進まないことを検証する。
 func TestRun_Sale_MergeUpcomingError_Stops(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -365,8 +357,6 @@ func TestRun_Sale_MergeUpcomingError_Stops(t *testing.T) {
 	}
 }
 
-// TestRun_Sale_LoadAsinsError_StopsAfterMerge は Upcoming 取り込み後に unprocessed 読込が失敗した場合に
-// 投入せず error を返すことを検証する（SPECIFICATION.md 10）。
 func TestRun_Sale_LoadAsinsError_StopsAfterMerge(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	upc := &fakeUpcoming{}
@@ -386,7 +376,6 @@ func TestRun_Sale_LoadAsinsError_StopsAfterMerge(t *testing.T) {
 	}
 }
 
-// TestRun_Sale_FinalizeEnqueueFailure_ReturnsError は sale_finalize 投入失敗時に error を返すことを検証する。
 func TestRun_Sale_FinalizeEnqueueFailure_ReturnsError(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: 1} // call0=sale_check 成功、call1=sale_finalize 失敗
 	deps := baseDeps(enq)
@@ -398,8 +387,6 @@ func TestRun_Sale_FinalizeEnqueueFailure_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRun_Sale_MidBatchFailure_NoFinalize は sale_check の途中 batch が失敗したとき
-// sale_finalize を投入せず error を返すことを検証する（SPECIFICATION.md 7.3）。
 func TestRun_Sale_MidBatchFailure_NoFinalize(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: 1} // 12件は 10+2。2件目(呼び出し1)で失敗
 	deps := baseDeps(enq)
@@ -420,7 +407,6 @@ func TestRun_Sale_MidBatchFailure_NoFinalize(t *testing.T) {
 	}
 }
 
-// TestRun_NewRelease_LoadAuthorsError_Stops は作者読込失敗時に投入しないことを検証する。
 func TestRun_NewRelease_LoadAuthorsError_Stops(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -435,7 +421,6 @@ func TestRun_NewRelease_LoadAuthorsError_Stops(t *testing.T) {
 	}
 }
 
-// TestRun_NewRelease_EnqueueFailure_ReturnsError は new_release_search 投入失敗時に error を返すことを検証する。
 func TestRun_NewRelease_EnqueueFailure_ReturnsError(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: 0}
 	deps := baseDeps(enq)
@@ -447,7 +432,6 @@ func TestRun_NewRelease_EnqueueFailure_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRun_PaperToKindle_LoadAsinsError_Stops は紙書籍読込失敗時に投入しないことを検証する。
 func TestRun_PaperToKindle_LoadAsinsError_Stops(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -462,7 +446,6 @@ func TestRun_PaperToKindle_LoadAsinsError_Stops(t *testing.T) {
 	}
 }
 
-// TestRun_PaperToKindle_EnqueueFailure_ReturnsError は paper_to_kindle_check 投入失敗時に error を返すことを検証する。
 func TestRun_PaperToKindle_EnqueueFailure_ReturnsError(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: 0}
 	deps := baseDeps(enq)
@@ -474,7 +457,6 @@ func TestRun_PaperToKindle_EnqueueFailure_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestRun_NewRelease_DedupAuthors は重複作者を1作者1jobへ排除することを検証する（SPECIFICATION.md 5.1）。
 func TestRun_NewRelease_DedupAuthors(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -494,7 +476,6 @@ func TestRun_NewRelease_DedupAuthors(t *testing.T) {
 	}
 }
 
-// TestRun_PaperToKindle_DedupAsins は重複ASINを1ASIN1jobへ排除することを検証する。
 func TestRun_PaperToKindle_DedupAsins(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -514,7 +495,6 @@ func TestRun_PaperToKindle_DedupAsins(t *testing.T) {
 	}
 }
 
-// TestRun_Sale_DedupFiltersEmptyStrings は空文字対象を除外して job 化することを検証する。
 func TestRun_Sale_DedupFiltersEmptyStrings(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -534,8 +514,6 @@ func TestRun_Sale_DedupFiltersEmptyStrings(t *testing.T) {
 	}
 }
 
-// TestRun_PaperToKindle_AmazonJobsUseAmazonRequestsMessageGroup は紙書籍ジョブも
-// MessageGroupId=amazon-requests になることを検証する（SPECIFICATION.md 7.1/7.3）。
 func TestRun_PaperToKindle_AmazonJobsUseAmazonRequestsMessageGroup(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
@@ -551,8 +529,6 @@ func TestRun_PaperToKindle_AmazonJobsUseAmazonRequestsMessageGroup(t *testing.T)
 	}
 }
 
-// TestRun_Sale_CycleIDIsUTCNormalized は非UTCの ScheduledAt でも job の cycle_id が
-// UTC RFC3339 へ正規化されることを検証する（SPECIFICATION.md 6）。
 func TestRun_Sale_CycleIDIsUTCNormalized(t *testing.T) {
 	jst := time.FixedZone("JST", 9*60*60)
 	enq := &fakeEnqueuer{failOn: -1}
@@ -576,7 +552,6 @@ func TestRun_Sale_CycleIDIsUTCNormalized(t *testing.T) {
 	}
 }
 
-// TestRun_JobID_DiscriminatesByKindAndTarget は同一対象でも kind が違えば job_id が異なることを検証する。
 func TestRun_JobID_DiscriminatesByKindAndTarget(t *testing.T) {
 	at := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
 

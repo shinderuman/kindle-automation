@@ -24,12 +24,14 @@ type SQSAPI interface {
 	SendMessageBatch(ctx context.Context, in *sqs.SendMessageBatchInput, opts ...func(*sqs.Options)) (*sqs.SendMessageBatchOutput, error)
 }
 
+// Enqueuer は SQS FIFO Queue へ job を投入する adapter。dispatch.EnqueueBatch と各 worker の Enqueue の両方を満たす（SPECIFICATION.md 7）。
 type Enqueuer struct {
 	api      SQSAPI
 	queueURL string
 	logger   *slog.Logger
 }
 
+// NewEnqueuer は SQS Client・Queue URL・logger から SQS FIFO adapter を構築する。
 func NewEnqueuer(api SQSAPI, queueURL string, logger *slog.Logger) *Enqueuer {
 	return &Enqueuer{api: api, queueURL: queueURL, logger: logger}
 }
@@ -39,7 +41,7 @@ func (e *Enqueuer) Enqueue(ctx context.Context, j job.Job) error {
 	return e.sendBatch(ctx, []job.Job{j})
 }
 
-// EnqueueBatch は10件単位で順番に送信する。dispatch ユースケースの Enqueuer interface を満たす。
+// EnqueueBatch は dispatch ユースケースの Enqueuer interface を満たす。
 // batch 内の失敗 entry を見落とさず error とする（SPECIFICATION.md 7.3、AGENTS.md 4）。
 func (e *Enqueuer) EnqueueBatch(ctx context.Context, jobs []job.Job) error {
 	for i := 0; i < len(jobs); i += 10 {

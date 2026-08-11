@@ -40,12 +40,13 @@ const (
 type Category int
 
 const (
-	CategoryOK Category = iota // ページ内 ASIN/Kindle 種別/価格の検証は呼び出し側で行う。
-	// 404 または明示的な商品不存在。terminal。
+	// CategoryOK はHTTP取得成功（200系）。ページ内 ASIN/Kindle 種別/価格の検証は呼び出し側で行う。
+	CategoryOK Category = iota
+	// CategoryNotFound は404または明示的な商品不存在。terminal。
 	CategoryNotFound
-	// 400 等の恒久的 4xx。terminal。
+	// CategoryPermanentClientError は400等の恒久的 4xx。terminal。
 	CategoryPermanentClientError
-	// 403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
+	// CategoryRetryable は403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
 	CategoryRetryable
 )
 
@@ -70,11 +71,13 @@ type FetchResult struct {
 	ResponseBytes int
 }
 
+// ProductFetcher は Amazon 商品ページ1回分の取得抽象。
 // 1起動で最大1回しか呼ばない。
 type ProductFetcher interface {
 	FetchProduct(ctx context.Context, asin string) (FetchResult, error)
 }
 
+// BookStore は1件の書籍条件付き更新抽象。
 // 手動削除時は applied=false。
 type BookStore interface {
 	UpdateOneBook(ctx context.Context, key, asin string, update func(book.KindleBook) book.KindleBook) (bool, error)
@@ -87,15 +90,18 @@ type Notifier interface {
 	Notify(ctx context.Context, message string) error
 }
 
+// Enqueuer は1件のジョブ SQS 投入抽象。
 type Enqueuer interface {
 	Enqueue(ctx context.Context, job job.Job) error
 }
 
+// Config は sale ユースケースの実行設定。
 type Config struct {
 	UnprocessedKey string
 	Thresholds     domainsale.Thresholds
 }
 
+// Dependencies は sale ユースケースへ注入する依存セット。
 type Dependencies struct {
 	Fetcher  ProductFetcher
 	Store    BookStore
@@ -108,8 +114,10 @@ type Dependencies struct {
 // ErrRetryableFetch は Amazon 取得の再試行可能エラー。Lambda error として SQS へ再配信させる。
 type ErrRetryableFetch struct{ ASIN string }
 
+// Error は retryable fetch エラーのメッセージを返す。
 func (e *ErrRetryableFetch) Error() string { return "retryable fetch for " + e.ASIN }
 
+// HandleSaleCheck は sale_check ジョブのユースケース。
 // SPECIFICATION.md 12.6。composition root が Outcome へ共通ログfieldを合成して job_completed/job_terminal/job_error を出す。
 func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	asin := j.Target.ASIN
@@ -178,6 +186,7 @@ func HandleSaleCheck(ctx context.Context, deps Dependencies, j job.Job) (executi
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }
 
+// HandleSaleFinalize は sale_finalize ジョブのユースケース。
 // 1周につき1回呼ばれる。
 func HandleSaleFinalize(ctx context.Context, deps Dependencies, j job.Job) (execution.Outcome, error) {
 	if err := deps.Enqueuer.Enqueue(ctx, buildGistJob(j, "sale")); err != nil {
@@ -186,7 +195,6 @@ func HandleSaleFinalize(ctx context.Context, deps Dependencies, j job.Job) (exec
 	return execution.Completed(0, 0), nil
 }
 
-// job_id は決定的。
 func buildGistJob(j job.Job, gistType string) job.Job {
 	return job.Job{
 		Version:     job.Version,

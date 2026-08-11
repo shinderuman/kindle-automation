@@ -20,10 +20,10 @@ import (
 
 type stubSQS struct {
 	batches     [][]sqstypes.SendMessageBatchRequestEntry
-	failIDs     map[string]string // entry Id -> error message
-	failErr     error             // 毎回返す SendMessageBatch 自体のエラー
-	failOnCall  int               // failCallErr を返す呼び出し(0始まり)。負で無効。
-	failCallErr error             // 指定呼び出しだけ返すエラー
+	failIDs     map[string]string
+	failErr     error
+	failOnCall  int // failCallErr を返す呼び出し(0始まり)。負で無効。
+	failCallErr error
 	calls       int
 	queueURL    string
 }
