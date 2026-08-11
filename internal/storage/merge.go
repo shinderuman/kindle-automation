@@ -133,16 +133,17 @@ func MergeUpcoming(ctx context.Context, store ObjectStore, unprocessedKey, upcom
 }
 
 // clearUpcomingIfUnchanged は Upcoming の ETag が開始時と同じ場合だけ空配列へ戻す。
-// ETag が変わっていれば処理中に追加された Upcoming があるため消去せず残す。
+// ETag が変わっていれば処理中に追加された Upcoming があるため消去せず残す（412/ETag 変更とは区別）。
+// upcoming_asins.json は SPECIFICATION.md 9.1 の存在必須 object のため、clear 直前の Get が
+// ErrObjectNotFound でも空配列化成功とみなさず、他の Get error と同じく文脈付きで error を返す。
+// この時点で Unprocessed への merge は commit 済み（SPECIFICATION.md 7.5 の非 transaction）であり、
+// 再実行で merge が ASIN 単位で冪等に補完され Upcoming が復元されれば clear が完了する。
 func clearUpcomingIfUnchanged(ctx context.Context, store ObjectStore, key, startETag string, added int) (int, error) {
 	if startETag == "" {
 		return added, nil
 	}
 	obj, err := store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, ErrObjectNotFound) {
-			return added, nil
-		}
 		return 0, fmt.Errorf("get upcoming for clear %s: %w", key, err)
 	}
 	if obj.ETag != startETag {

@@ -15,12 +15,14 @@ go test ./...
 go vet ./...
 staticcheck ./...
 govulncheck ./...
+sam validate --template-file infra/template.yaml --lint
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/schedule-checks
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 ```
 
 - `gofmt -l` の差分がないこと。
 - test / vet / staticcheck / govulncheck の error と warning が 0 件であること。
+- `sam validate --lint` (cfn-lint) が `infra/template.yaml` の schema・property 型・`!GetAtt` 参照整合性を offline で検証する（AWS profile/region 不要）。`infra/template_test.go` は一般 schema を再実装せずプロジェクト固有契約のみを検証するため、この公式検証で補う。`make check` (`make sam-validate`) でも同じ検証が走る。
 - 提出前確認では `go test -race ./...` を使う。
 - 各 tool が未導入の場合は確認済み扱いせず、未実行理由を明示する（`AGENTS.md` §12）。
 
@@ -76,7 +78,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 コード単体では完結しない項目。`SPECIFICATION.md` §20.3 切り替え手順・§24 step12 に沿って実施する。
 
 ### 5.1 SAM デプロイ・CFn 検証
-- [ ] SAM CLI で `sam validate --template-file infra/template.yaml --profile <P> --region <R>` を実行し template 妥当性を確認する。template は `infra/template.yaml` にあるため `--template-file` 必須（省略時の default `template.yaml` は repo root に不存在）。
+- [ ] template schema・property 型・`!GetAtt` 参照整合性は offline ゲートの `sam validate --template-file infra/template.yaml --lint` (cfn-lint) で検証済み（§1 / `make sam-validate`）。AWS 環境では sam build / sam deploy が通ることで live 妥当性を確認する。template は `infra/template.yaml` にあるため手動 validate 時は `--template-file` 必須（省略時の default `template.yaml` は repo root に不存在）。
 - [ ] `./scripts/deploy.sh --stage build`（`--profile`/`--region` 必須）で sam build が成功すること。
 - [ ] `--stage deploy` が sam deploy の change set 確認プロンプトを表示し、確認後に同じ sam deploy で適用すること（`scripts/deploy_test.sh` で stub 検証済み）。
 - [ ] `--stage all` が sam build 後に sam deploy を実行すること（`scripts/deploy_test.sh` で stub 検証済み）。

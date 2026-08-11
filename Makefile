@@ -1,4 +1,4 @@
-.PHONY: test vet staticcheck fmt check build-ScheduleChecksFunction build-CheckWorkerFunction
+.PHONY: test vet staticcheck fmt sam-validate check build-ScheduleChecksFunction build-CheckWorkerFunction
 
 # 単体テスト。自動テストから実AWS・Amazon・Slack・Mastodon・GitHubへはアクセスしない。
 test:
@@ -28,7 +28,13 @@ fmt:
 		exit 1; \
 	fi
 
-check: fmt test vet staticcheck
+# sam validate --lint は cfn-lint を走らせ infra/template.yaml の schema・property 型・
+# !GetAtt 参照整合性を offline で検証する (AWS profile/region 不要)。
+# infra/template_test.go は一般 schema を再実装せずこの公式検証へ委ねているため、check の必須工程とする。
+sam-validate:
+	sam validate --template-file infra/template.yaml --lint
+
+check: fmt test vet staticcheck sam-validate
 
 # ARTIFACTS_DIR は SAM の BuildMethod: makefile が渡す出力ディレクトリ。
 # 未設定時は .build を既定値とし、SAM 契約を壊さず手動実行の事故を防ぐ。

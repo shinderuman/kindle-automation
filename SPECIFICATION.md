@@ -406,6 +406,8 @@ UserScriptのMulti Site Keybind ManagerでAmazonページ上のOption+↑を押�
 
 既存実装ではセール処理末尾に行っていた取り込みを、分散実行では周回開始時に行う。条件付き更新と「変更時は消去しない」という競合回避の目的は維持する。取り込み後にジョブ投入が失敗しても、対象は`unprocessed_asins.json`へ残り、次の周回で処理される。
 
+`upcoming_asins.json`は§9.1の存在必須objectであり、手順4の空配列化は同objectの再取得を前提とする。手順3で`unprocessed_asins.json`へのmergeがcommitされた後、手順4の再取得時に同objectが削除（手動削除・rename相当の`ErrObjectNotFound`）されていた場合は、空配列化成功とみなさずerrorとする。ETag変更（手順5）は手動・並行更新の保護であり、object欠落とは区別する。この時点で`unprocessed_asins.json`へのmergeは既にcommit済みであり、複数object更新をtransactionとみなさない方針（§7.5）に従い巻き戻さない。再実行時はmergeがASIN単位で冪等に補完され、Upcomingが復元されていればclearが完了する。
+
 ## 11. Amazon HTTP取得
 
 ### 11.1 共通リクエスト

@@ -131,7 +131,6 @@ Resources:
             # Scheduler有効化parameter（step9）と混同せず、step8 でこのparameter経由で個別に有効化する。
             Enabled: !If [WorkerMappingEnabled, true, false]
             # handler は失敗時に error を返し SQS へ再配信させる（SPECIFICATION.md 7.4）。
-            # SQSEventResponse / batchItemFailures を返さないため partial batch response（FunctionResponseTypes）は設定しない。
 
   # ───────────────────────── CloudWatch Logs ─────────────────────────
   ScheduleChecksLogGroup:

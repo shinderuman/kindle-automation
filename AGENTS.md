@@ -328,6 +328,7 @@ go test -race ./...
 go vet ./...
 staticcheck ./...
 govulncheck ./...
+sam validate --template-file infra/template.yaml --lint
 ```
 
 続けて`cmd/schedule-checks`と`cmd/check-worker`の各ディレクトリで、次を実行する。
@@ -338,6 +339,7 @@ go build -o /dev/null .
 
 - `gofmt -l`の出力を空にする
 - test、vet、staticcheck、govulncheckのerrorとwarningを残さない
+- `sam validate --lint`がtemplate.yamlのschema・property型・`!GetAtt`参照整合性をcfn-lintへ委ねて検証する。`infra/template_test.go`は一般schemaを再実装せず、kindle-automation固有の不変条件だけを検証する
 - lint無効化は理由を直前に記載し、最小範囲に限定する
 - toolが未導入の場合は勝手に確認済み扱いせず、未実行理由を報告する
 - Lambda buildは`GOOS=linux GOARCH=amd64 CGO_ENABLED=0`を指定し、各cmdを個別にbuildする

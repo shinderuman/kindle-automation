@@ -893,3 +893,109 @@ func TestMergeUpcoming_MissingUpcomingErrors(t *testing.T) {
 		t.Fatalf("err = %v, want wrap of ErrObjectNotFound", err)
 	}
 }
+
+// deleteUpcomingOnUnprocessedPutStore は unprocessed への Put 成功後に upcoming を削除する検証用 store。
+// MergeUpcoming で Unprocessed への merge が commit された後、clear 直前に upcoming_asins.json が
+// 手動削除・rename 相当で消失した状況を再現し、非 transaction 契約と再実行時 reconcile を検証する。
+// upcomingDeleted で最初の1回だけ削除し、再実行で upcoming を復元した後は消失させない。
+type deleteUpcomingOnUnprocessedPutStore struct {
+	*MemStore
+	upcomingDeleted bool
+}
+
+func (s *deleteUpcomingOnUnprocessedPutStore) Put(_ context.Context, key string, body []byte, opts PutOptions) error {
+	if err := s.MemStore.Put(context.Background(), key, body, opts); err != nil {
+		return err
+	}
+	if key == "unprocessed" && !s.upcomingDeleted {
+		// テスト単スレッドのため lock なしで map を直接操作する（本番コードではない）。
+		delete(s.objects, "upcoming")
+		s.upcomingDeleted = true
+	}
+	return nil
+}
+
+// TestClearUpcomingIfUnchanged_MissingObjectErrors は upcoming が clear 直前に存在しない場合、
+// 成功扱い（added 返却）せず Get error を返すことを検証する（SPECIFICATION.md 9.1 の存在必須 object 契約）。
+// ErrObjectNotFound を ETag 変更・412 と同一視せず、object 欠落を失敗とする回帰保護。
+func TestClearUpcomingIfUnchanged_MissingObjectErrors(t *testing.T) {
+	store := NewMemStore()
+	// upcoming は存在しない（必須 object の欠落）。
+
+	added, err := clearUpcomingIfUnchanged(context.Background(), store, "upcoming", "start-etag", 2)
+	if err == nil {
+		t.Fatalf("err = nil, want error for missing required object (got added=%d)", added)
+	}
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Errorf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
+}
+
+// TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed は Unprocessed への merge 成功後、
+// clear 直前に Upcoming が削除された場合、error を返しつつ Unprocessed の merge 結果は保持されること
+// （SPECIFICATION.md 7.5 の非 transaction 契約）を検証する。silent fallback せず clear 段階の失敗を表面化する。
+func TestMergeUpcoming_UpcomingDeletedAfterMergeErrorsAndKeepsUnprocessed(t *testing.T) {
+	store := &deleteUpcomingOnUnprocessedPutStore{MemStore: NewMemStore()}
+	seedBook(store.MemStore, "unprocessed", book.KindleBook{
+		ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	seedBook(store.MemStore, "upcoming", book.KindleBook{
+		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+
+	_, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err == nil {
+		t.Fatal("err = nil, want error when upcoming missing at clear stage")
+	}
+	if !errors.Is(err, ErrObjectNotFound) {
+		t.Errorf("err = %v, want wrap of ErrObjectNotFound", err)
+	}
+	// Unprocessed への merge は commit 済みで巻き戻らない（非 transaction）。
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if findBookIndex(records, "B") == -1 {
+		t.Errorf("Unprocessed への merge 結果が巻き戻った（非 transaction 契約違反）: %+v", asinOrder(records))
+	}
+}
+
+// TestMergeUpcoming_RerunAfterClearErrorReconciles は clear 段階の Upcoming 欠落 error 後、
+// Upcoming を復元して再実行すると merge が冪等に補完され（重複せず）clear が完了することを検証する
+// （SPECIFICATION.md 7.5/10 の非 transaction reconcile 方針）。
+func TestMergeUpcoming_RerunAfterClearErrorReconciles(t *testing.T) {
+	store := &deleteUpcomingOnUnprocessedPutStore{MemStore: NewMemStore()}
+	seedBook(store.MemStore, "unprocessed", book.KindleBook{
+		ASIN: "A", Title: "a", ReleaseDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	seedBook(store.MemStore, "upcoming", book.KindleBook{
+		ASIN: "B", Title: "b", ReleaseDate: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+
+	// 1回目: merge 成功後、clear 段階で Upcoming 欠落により error。
+	if _, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3); err == nil {
+		t.Fatal("first run should error when upcoming deleted at clear stage")
+	}
+
+	// 運用での object 復元に相当: Upcoming を空配列で再作成。
+	seedBook(store.MemStore, "upcoming")
+
+	// 2回目: merge は冪等（B は既に Unprocessed にあるため added=0）、clear は成功。
+	added, err := MergeUpcoming(context.Background(), store, "unprocessed", "upcoming", 3)
+	if err != nil {
+		t.Fatalf("second MergeUpcoming: %v", err)
+	}
+	if added != 0 {
+		t.Errorf("second added = %d, want 0 (idempotent merge, no duplication)", added)
+	}
+
+	// Unprocessed は A, B の2件で安定（重複しない）。
+	obj, _ := store.Get(context.Background(), "unprocessed")
+	records, _ := DecodeBooks(obj.Body)
+	if len(records) != 2 || countASIN(records, "B") != 1 {
+		t.Errorf("unprocessed not stable on rerun: %+v", asinOrder(records))
+	}
+	// Upcoming は空配列化されている（clear 完了）。
+	upcomingObj, _ := store.Get(context.Background(), "upcoming")
+	if strings.TrimSpace(string(upcomingObj.Body)) != "[]" {
+		t.Errorf("upcoming not cleared on rerun: %s", upcomingObj.Body)
+	}
+}
