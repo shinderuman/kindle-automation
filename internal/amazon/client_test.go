@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -256,14 +258,30 @@ func TestSearchURL_EncodesAuthor(t *testing.T) {
 	}
 }
 
-func TestCheckRedirect_TooManyRedirects(t *testing.T) {
-	via := make([]*http.Request, maxRedirects)
-	for i := range via {
-		via[i] = &http.Request{}
+func TestCheckRedirect_RedirectCountBoundary(t *testing.T) {
+	tests := []struct {
+		name    string
+		viaLen  int
+		wantErr error
+	}{
+		{name: "4 redirects allowed", viaLen: maxRedirects - 1, wantErr: nil},
+		{name: "5 redirects allowed", viaLen: maxRedirects, wantErr: nil},
+		{name: "6th redirect rejected", viaLen: maxRedirects + 1, wantErr: ErrTooManyRedirects},
 	}
-	req := &http.Request{URL: &url.URL{Host: "www.amazon.co.jp"}}
-	if err := checkRedirect(req, via); !errors.Is(err, ErrTooManyRedirects) {
-		t.Errorf("err = %v, want ErrTooManyRedirects", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			via := make([]*http.Request, tc.viaLen)
+			for i := range via {
+				via[i] = &http.Request{}
+			}
+			req := &http.Request{URL: &url.URL{Host: "www.amazon.co.jp"}}
+			if err := checkRedirect(req, via); !errors.Is(err, tc.wantErr) {
+				t.Errorf("checkRedirect viaLen=%d: err = %v, want %v", tc.viaLen, err, tc.wantErr)
+			}
+			if err := checkRedirectCount(via); !errors.Is(err, tc.wantErr) {
+				t.Errorf("checkRedirectCount viaLen=%d: err = %v, want %v", tc.viaLen, err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -271,6 +289,58 @@ func TestCheckRedirect_NonAmazonHost(t *testing.T) {
 	req := &http.Request{URL: &url.URL{Host: "example.com"}}
 	if err := checkRedirect(req, nil); !errors.Is(err, ErrNonAmazonRedirect) {
 		t.Errorf("err = %v, want ErrNonAmazonRedirect", err)
+	}
+}
+
+func redirectChainServer(targetHops int32) (*httptest.Server, *int32) {
+	var hops int32
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hops, 1)
+		if n <= targetHops {
+			http.Redirect(w, r, fmt.Sprintf("/?h=%d", n), http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte(validProductHTML))
+	})), &hops
+}
+
+// newRedirectCountClient は redirect 回数上限（checkRedirectCount）だけを適用する client を返す。
+// httptest server が 127.0.0.1 で IsAmazonHost を通らないため、実 redirect chain で回数境界を
+// 検証するには回数判定だけを注入する。host 制限は TestFetchProduct_RedirectToNonAmazonHost で担保する。
+func newRedirectCountClient(t *testing.T, ts *httptest.Server) *Client {
+	t.Helper()
+	return newClientWithHTTPClient(ts.URL, &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error { return checkRedirectCount(via) },
+	})
+}
+
+func TestCheckRedirect_FiveRedirectChainSucceeds(t *testing.T) {
+	ts, hops := redirectChainServer(maxRedirects)
+	defer ts.Close()
+
+	result, err := newRedirectCountClient(t, ts).FetchProduct(context.Background(), "B0FX3X569X")
+	if err != nil {
+		t.Fatalf("FetchProduct after 5 redirects: %v", err)
+	}
+	if result.Category != CategoryOK {
+		t.Errorf("Category = %v, want OK after 5 redirects", result.Category)
+	}
+	if got := atomic.LoadInt32(hops); got != maxRedirects+1 {
+		t.Errorf("server hops = %d, want %d (5 redirects + final 200)", got, maxRedirects+1)
+	}
+}
+
+func TestCheckRedirect_SixthRedirectChainRejected(t *testing.T) {
+	ts, hops := redirectChainServer(maxRedirects + 1)
+	defer ts.Close()
+
+	_, err := newRedirectCountClient(t, ts).FetchProduct(context.Background(), "B0FX3X569X")
+	if !errors.Is(err, ErrTooManyRedirects) {
+		t.Fatalf("err = %v, want ErrTooManyRedirects on 6th redirect", err)
+	}
+	if got := atomic.LoadInt32(hops); got != maxRedirects+1 {
+		t.Errorf("server hops = %d, want %d (6 redirect responses, final 200 never fetched)", got, maxRedirects+1)
 	}
 }
 

@@ -186,11 +186,20 @@ func setHeaders(req *http.Request) {
 
 // checkRedirect は redirect 回数と redirect 先 host を検証する。
 func checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return ErrTooManyRedirects
+	if err := checkRedirectCount(via); err != nil {
+		return err
 	}
 	if req.URL.Host != "" && !IsAmazonHost(req.URL.Host) {
 		return fmt.Errorf("%w: %s", ErrNonAmazonRedirect, req.URL.Host)
+	}
+	return nil
+}
+
+// Go の http.Client は N 件目の redirect を追跡する直前に len(via)==N で呼ぶため、
+// maxRedirects 回までは許容し maxRedirects+1 回目を拒否するには len(via) > maxRedirects で弾く。
+func checkRedirectCount(via []*http.Request) error {
+	if len(via) > maxRedirects {
+		return ErrTooManyRedirects
 	}
 	return nil
 }
