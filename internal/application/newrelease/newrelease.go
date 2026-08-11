@@ -358,19 +358,17 @@ func applyCandidate(ctx context.Context, deps Dependencies, j job.Job, c Candida
 	// 13.5: 候補の発売日が LatestReleaseDate より後なら Author の最新作を更新する（過去/将来を問わない）。
 	// SPECIFICATION.md 9.3: LatestReleaseURL から query/fragment を除去する。
 	// notified/upcoming 用（toBook）は affiliate tag 付きのまま保持する（SPECIFICATION.md 9.2）。
-	authorChanged, err := deps.AuthorStore.UpdateLatestRelease(ctx, j.Target.AuthorName, c.ReleaseDate, c.Title, book.CleanURL(c.URL))
-	if err != nil {
+	if _, err := deps.AuthorStore.UpdateLatestRelease(ctx, j.Target.AuthorName, c.ReleaseDate, c.Title, book.CleanURL(c.URL)); err != nil {
 		return execution.Errored(errorTypeAuthorStore, 0, 0), fmt.Errorf("update author latest for %s: %w", c.ASIN, err)
 	}
 
-	// 13.6 step4: Author 変更時は Author 用 gist_update を決定的 job_id で投入する。
-	// Gist は authors.json 全体から再生成するため upsert 前に投入しても生存し、
-	// upsert 失敗の再実行で authorChanged=false になっても決定的 job_id で欠損・重複しない（7.5）。
-	// 投入失敗時は error とし notified/upcoming へ進まない。過去発売分で Author 変更があっても投入する。
-	if authorChanged {
-		if err := deps.Enqueuer.Enqueue(ctx, buildAuthorGistJob(j, c.ASIN)); err != nil {
-			return execution.Errored(errorTypeEnqueueFailed, 0, 0), fmt.Errorf("enqueue author gist: %w", err)
-		}
+	// 13.6 step4: authors.json を確定した後、Author 用 gist_update を authorChanged に関わらず常に投入する。
+	// 初回の enqueue が失敗した再配信では UpdateLatestRelease が false を返すが、この経路が同じ決定的 job_id を再投入し、
+	// Gist は authors.json 全体から再生成されるため欠落した job を reconcile する（SPECIFICATION.md 7.5, AGENTS.md 非transaction契約）。
+	// FIFO 5分 dedup だけを正しさの根拠にせず、enqueue 自体の再試行で再投入されることを優先する。
+	// 投入失敗時は error とし notified/upcoming へ進まない。過去発売分でも投入する。
+	if err := deps.Enqueuer.Enqueue(ctx, buildAuthorGistJob(j, c.ASIN)); err != nil {
+		return execution.Errored(errorTypeEnqueueFailed, 0, 0), fmt.Errorf("enqueue author gist: %w", err)
 	}
 
 	// 13.6 step5-6: 新刊予定（将来発売分）のみ notified と upcoming へ冪等upsertする。

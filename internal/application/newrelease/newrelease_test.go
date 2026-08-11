@@ -544,15 +544,20 @@ func TestApplyCandidate_NotifyFailureDoesNotRollback(t *testing.T) {
 	}
 }
 
-func TestApplyCandidate_AuthorStoreUnchangedSkipsGist(t *testing.T) {
+// TestApplyCandidate_AuthorStoreUnchangedStillEnqueuesGist は UpdateLatestRelease が changed=false を
+// 返しても Author gist job を投入することを検証する（SPECIFICATION.md 13.6, 7.5）。
+// 別候補がより新しい日付で更新済みの場合や、同一候補の再配信で既に適用済みの場合も changed=false になるが、
+// いずれも authors.json 確定後の投入経路が Gist を reconcile する。
+func TestApplyCandidate_AuthorStoreUnchangedStillEnqueuesGist(t *testing.T) {
 	deps := baseDeps()
 	deps.AuthorStore.(*fakeAuthorStore).changed = false
 
 	if _, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X"))); err != nil {
 		t.Fatalf("HandleNewReleaseResult: %v", err)
 	}
-	if len(deps.Enqueuer.(*fakeEnqueuer).jobs) != 0 {
-		t.Errorf("Author 変更なしは gist job を投入しない")
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindGistUpdate || enq.jobs[0].Target.GistType != "new_release" {
+		t.Errorf("Author 変更なしでも gist job を投入する: %+v", enq.jobs)
 	}
 }
 
@@ -570,6 +575,83 @@ func TestApplyCandidate_GistEnqueueFailureReturnsError(t *testing.T) {
 	}
 	if len(deps.UpcomingStore.(*fakeUpcomingStore).upserts) != 0 {
 		t.Errorf("gist enqueue 失敗時は upcoming へ upsert しない")
+	}
+}
+
+type reconcileAuthorStore struct {
+	calls int
+	err   error
+}
+
+func (s *reconcileAuthorStore) UpdateLatestRelease(_ context.Context, _ string, _ time.Time, _, _ string) (bool, error) {
+	s.calls++
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.calls == 1, nil
+}
+
+type reconcileEnqueuer struct {
+	jobs      []job.Job
+	failFirst bool
+	called    int
+}
+
+func (e *reconcileEnqueuer) Enqueue(_ context.Context, j job.Job) error {
+	e.called++
+	if e.failFirst && e.called == 1 {
+		return errors.New("sqs down")
+	}
+	e.jobs = append(e.jobs, j)
+	return nil
+}
+
+// TestApplyCandidate_GistReconcilesAcrossEnqueueFailureAndRedelivery は
+// authors.json 更新成功(changed=true) → Author gist enqueue 失敗 → 同一 job 再配信 →
+// UpdateLatestRelease=false → それでも同一決定的 gist job を再投入する、という2回連続シナリオを検証する
+// （SPECIFICATION.md 13.6, 7.5）。enqueue 失敗後の再実行で必ず再投入し、Gist job が永久欠落しない契約。
+// authors.json は巻き戻さず、Gist enqueue 失敗は job error として SQS 再試行させる。
+func TestApplyCandidate_GistReconcilesAcrossEnqueueFailureAndRedelivery(t *testing.T) {
+	author := &reconcileAuthorStore{}
+	enq := &reconcileEnqueuer{failFirst: true}
+	deps := baseDeps()
+	deps.AuthorStore = author
+	deps.Enqueuer = enq
+	j := resultJob("B0FX3X569X", "海李", futureProduct("B0FX3X569X"))
+
+	oc1, err1 := HandleNewReleaseResult(context.Background(), deps, j)
+	if err1 == nil {
+		t.Fatalf("first run: gist enqueue failure must return error, got %+v", oc1)
+	}
+	if oc1.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("first run error_type = %q, want %q", oc1.ErrorType, errorTypeEnqueueFailed)
+	}
+	if author.calls != 1 {
+		t.Errorf("first run: author store calls = %d, want 1", author.calls)
+	}
+	if len(enq.jobs) != 0 {
+		t.Errorf("first run: gist must not be recorded as enqueued on failure")
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 || len(deps.UpcomingStore.(*fakeUpcomingStore).upserts) != 0 {
+		t.Errorf("first run: must not upsert before successful gist enqueue")
+	}
+
+	oc2, err2 := HandleNewReleaseResult(context.Background(), deps, j)
+	if err2 != nil {
+		t.Fatalf("second run (redelivery): must succeed with gist reconciled: %v", err2)
+	}
+	if oc2.Result != execution.ResultCompleted {
+		t.Errorf("second run result = %v, want completed", oc2.Result)
+	}
+	if author.calls != 2 {
+		t.Errorf("second run: author store calls = %d, want 2", author.calls)
+	}
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindGistUpdate || enq.jobs[0].Target.GistType != "new_release" {
+		t.Fatalf("second run: gist job must be enqueued even with authorChanged=false: %+v", enq.jobs)
+	}
+	wantID := buildAuthorGistJob(j, "B0FX3X569X").JobID
+	if enq.jobs[0].JobID != wantID {
+		t.Errorf("second run gist JobID = %q, want deterministic %q", enq.jobs[0].JobID, wantID)
 	}
 }
 

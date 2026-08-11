@@ -674,7 +674,7 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 - `LatestReleaseTitle`
 - `LatestReleaseURL`
 
-複数候補がある場合も、常に最も後の発売日を残す。作者一覧を既存の順序へ並べ直し、変更があった場合にAuthor用`gist_update`を投入する。
+複数候補がある場合も、常に最も後の発売日を残す。作者一覧を既存の順序へ並べ直す。Author用`gist_update`の投入条件と順序は 13.6 手順4 に従う。
 
 ### 13.6 新刊通知と保存
 
@@ -683,12 +683,12 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 1. 条件付き更新直前に`notified_asins.json`を読み直す
 2. `ReleaseDate.After(now)`を満たさないレコードを通知履歴から除外する
 3. 処理開始時に同じASINが通知済みだったかを記録する
-4. 13.5 の作者最新作更新で変更があった場合、Author用`gist_update`を決定的なIDで投入する
+4. 13.5 の作者最新作更新（authors.json確定）後、Author用`gist_update`を決定的なIDで投入する
 5. `notified_asins.json`にASINがなければupsertする（将来発売分のみ）
 6. `upcoming_asins.json`にASINがなければupsertする（将来発売分のみ）
 7. 両S3 objectが期待状態になった後、処理開始時に未通知だった場合だけSlack・Mastodonへ通知する
 
-Author gist の投入（手順4）を notified/upcoming の upsert（手順5-6）より前に置く。Gist は authors.json 全体から毎回再生成する（15）ため、投入済みの Author gist job は後続 upsert の失敗に依存せず生存する。再実行時は同じ決定的 job_id で冪等となり、authorChanged が false に変わっても job は欠損・重複しない。これにより 7.5「再実行で不足分を補う」を Gist 後続 job についても満たす。手順4は過去発売の候補で Author 最新作が更新された場合も適用する。商品通知（手順7）は将来発売分の S3 保存成功後という順序を維持する。
+Author gist の投入（手順4）を notified/upcoming の upsert（手順5-6）より前に置く。手順4は Author 最新作の更新結果（authorChanged）にかかわらず、accepted candidate の処理で常に投入する。初回の enqueue が失敗した場合は同一 job の再配信で手順1-3を経て UpdateLatestRelease が authorChanged=false を返す経路になっても、この手順が同じ決定的 job_id の Gist job を再投入し、欠落を reconcile する（7.5）。FIFO の5分重複排除だけを正しさの根拠にせず、enqueue 自体の再試行で再投入されることを契約とする。Gist は authors.json 全体から毎回再生成する（15）ため、同一候補の再配信や後続候補での冗長な再投入は安全である。投入失敗時は authors.json を巻き戻さず job error として SQS へ再試行させ、notified/upcoming へは進まない。手順4は過去発売の候補で Author 最新作が更新された場合も適用する。商品通知（手順7）は将来発売分の S3 保存成功後という順序を維持する。
 
 通知済み保存期間は既存Go実装と同じく、発売日が将来である間とする。UserScriptのlocalStorageは使用しない。
 
@@ -749,7 +749,7 @@ Amazon内検索によるKindle候補探索は行わない。UserScriptと同様�
 | Gist | 更新契機 | 内容 |
 |---|---|---|
 | Sale | `sale_finalize`が`gist_update`を投入 | 発売日降順の`unprocessed_asins.json` |
-| New Release | 作者最新作が変化した時に`gist_update`を投入 | 作者、作者URL、最新発売日、最新作、最新作URLの表 |
+| New Release | accepted candidate処理後に`gist_update`を投入 | 作者、作者URL、最新発売日、最新作、最新作URLの表 |
 | Paper-to-Kindle | 紙書籍レコードの初期化・削除時に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
 
 Gist IDとfilenameは既存`checker_configs.json`の値を使用する。`gist_update`は実行時点のS3全体からMarkdownを再生成する。GitHub API失敗は当該Gistジョブのエラーとして再試行し、先に完了したS3更新は巻き戻さない。
