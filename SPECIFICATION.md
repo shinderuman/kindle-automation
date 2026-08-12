@@ -687,7 +687,7 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 
 #### ISBN紙書籍候補のrecent除外（JST直近7日）
 
-ISBN形式の紙書籍候補はUserScript `new_release_checker`の`isbnMode=1/2`・`NEW_RELEASE_DAYS=7`を継承し、JST基準の直近7日recent判定を適用する。Kindle候補にはこの窓を適用しない（§13.3）。発売日と処理時刻をそれぞれJST暦日へ正規化し、処理時刻のJST暦日から7日前より厳密に古い候補は`paper_recent_excluded`としてterminal除外し、`paper_books_asins.json`へ保存せずPaper Gistも投入しない。今日・未来・7日前境界は従来条件（MinPrice・upsert・Gist）へ進む。
+ISBN形式の紙書籍候補はUserScript `new_release_checker`の`isbnMode=1/2`・`NEW_RELEASE_DAYS=7`を継承し、JST基準の直近7日recent判定を適用する。Kindle候補にはこの窓を適用しない（§13.3）。発売日と処理時刻をそれぞれJST暦日へ正規化し、処理時刻のJST暦日から7日前より新しい候補（今日・未来・6日前まで）だけ通過し、7日前境界・8日以上前は`paper_recent_excluded`としてterminal除外し、`paper_books_asins.json`へ保存せずPaper Gistも投入しない。
 
 商品詳細確認（`new_release_paper_detail`）で発売日が確定した後、`paper_books_asins.json`へのupsert前にこの判定を必ず通す。検索結果で発売日が得られる場合の早期除外は任意で、商品詳細確認側を最終保証とする。除外された候補は`notified_asins.json`・`upcoming_asins.json`・`unprocessed_asins.json`・`authors.json`のいずれも触れない。
 
@@ -1107,7 +1107,7 @@ S3 backupを配列全体で無条件に上書きしてロールバックしな�
 - ISBN候補が`new_release_paper_detail`へ回り、Kindle候補経路へ入らない
 - 紙書籍候補の詳細確認（ASIN・タイトル・作者・発売日検証、価格0/未取得の保存）
 - MinPrice除外（Kindle候補と紙書籍候補の220/221除外・222通過、価格0は除外対象外）
-- ISBN紙書籍候補のJST直近7日recent除外（今日・1日前・7日前境界は通過、8日以上前はterminal除外。境界結果はUserScript `new_release_checker`実コードと一致。Kindle候補はrecent判定を適用せず既存LatestRelease/future判定を維持。PaperはMinPriceとrecent双方成立時だけ保存。除外経路はnotified/upcoming/unprocessed/authorsへ触れない）
+- ISBN紙書籍候補のJST直近7日recent除外（今日・1日前・6日前まで通過、7日前境界以降はterminal除外。境界結果はUserScript `new_release_checker`実コードと一致。Kindle候補はrecent判定を適用せず既存LatestRelease/future判定を維持。PaperはMinPriceとrecent双方成立時だけ保存。除外経路はnotified/upcoming/unprocessed/authorsへ触れない）
 - `paper_books_asins.json`のupsert成功後にPaper Gistを常に投入し、enqueue失敗の再配信で`changed=false`でもreconcileすること
 - 検索側で既存paper ISBNの`new_release_paper_detail`投入をスキップし、新規paper ISBNだけ投入すること
 - `checker_configs.json`設定対象形状、旧フィールド削除、MinPrice必須validation
@@ -1151,7 +1151,7 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - 検索項目が揃う候補は`new_release_result`、不足候補は`new_release_detail`になる
 - ISBN候補が`new_release_paper_detail`へ投入され、商品ページを最大1回取得する。ただし`paper_books_asins.json`に既存のISBNは投入しない（§13.3）
 - ISBN紙書籍候補が`notified`/`upcoming`/`unprocessed`へ入らず`authors.LatestRelease`を更新しない
-- ISBN紙書籍候補のJST直近7日recent除外が、古い候補を`paper_books_asins.json`へ保存せずPaper Gistも投入せず、今日・未来・境界は保存すること
+- ISBN紙書籍候補のJST直近7日recent除外が、古い候補を`paper_books_asins.json`へ保存せずPaper Gistも投入せず、今日・未来・6日前までを保存し、7日前境界以降は保存しないこと
 - Kindle候補にrecent判定が適用されず、過去発売分でも`authors.LatestRelease`更新対象となること
 - S3変更後のGist更新を0リクエストの別ジョブとして再試行できる
 - `checker_configs.json`移行のdry-run/apply/`If-Match`回帰テスト

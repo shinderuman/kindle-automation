@@ -1515,7 +1515,6 @@ func TestHandleNewReleaseSearch_ISBNExistsCheckDoesNotAffectKindleCandidates(t *
 }
 
 func TestIsRecentPaperRelease_BoundaryMatchesUserScript(t *testing.T) {
-	// fixedClock = 2026-08-09 00:00:00 UTC = 2026-08-09 09:00 JST。JST暦日の今日は 2026-08-09。
 	now := fixedClock()
 	tests := []struct {
 		name    string
@@ -1539,9 +1538,6 @@ func TestIsRecentPaperRelease_BoundaryMatchesUserScript(t *testing.T) {
 }
 
 func TestIsRecentPaperRelease_JSTCalendarDayCrossing(t *testing.T) {
-	// 処理時刻がJST深夜0時をまたぐ境界でも暦日で安定する。
-	// 2026-08-09 00:00 JST 直前（= 2026-08-08 23:00 JST = 2026-08-08 14:00 UTC）でも
-	// JST暦日の今日は 2026-08-08 となり、7日前境界は 2026-08-01。
 	eve := time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC)
 	if !IsRecentPaperRelease(time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC), eve) {
 		t.Errorf("2026-08-08 JST 23:00 基準で 2026-08-02 はrecent（6日前）")
@@ -1676,7 +1672,6 @@ func TestHandleNewReleasePaperDetail_SevenDayBoundaryIsExcluded(t *testing.T) {
 }
 
 func TestHandleNewReleaseResult_KindleCandidateOutsideRecentWindowStillProcesses(t *testing.T) {
-	// Kindle候補はrecent判定を適用せず、7日窓より古い過去発売でもAuthors更新・Gist投入が起きる。
 	thirtyDaysAgo := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
 	product := futureProduct("B0FX3X569X")
 	product.ReleaseDate = thirtyDaysAgo
