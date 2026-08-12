@@ -1056,7 +1056,7 @@ S3 backupを配列全体で無条件に上書きしてロールバックしな�
 
 ### 20.5 Checker設定移行
 
-`scripts/migrate-checker-config`は`checker_configs.json`から§16の旧フィールドを削除し、`NewReleaseChecker.MinPrice`が未設定なら`221`を追加する一回限りの移行CLIである。未知のフィールド・未知のChecker sectionは保持する。
+`cmd/migrate-checker-config`は`checker_configs.json`から§16の旧フィールドを削除し、`NewReleaseChecker.MinPrice`が未設定なら`221`を追加する一回限りの移行CLIである。`go run ./cmd/migrate-checker-config`で起動する。未知のフィールド・未知のChecker sectionは保持する。
 
 - デフォルトはdry-run。`-apply`を明示指定した場合だけS3へ書き込む（AGENTS.md 13）
 - 書込は取得時ETagの`If-Match`条件付きで行い、競合時は失敗させる
