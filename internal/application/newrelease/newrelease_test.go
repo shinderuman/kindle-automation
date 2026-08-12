@@ -1513,3 +1513,187 @@ func TestHandleNewReleaseSearch_ISBNExistsCheckDoesNotAffectKindleCandidates(t *
 		t.Errorf("paper exists check must not run for Kindle candidates")
 	}
 }
+
+func TestIsRecentPaperRelease_BoundaryMatchesUserScript(t *testing.T) {
+	// fixedClock = 2026-08-09 00:00:00 UTC = 2026-08-09 09:00 JST。JST暦日の今日は 2026-08-09。
+	now := fixedClock()
+	tests := []struct {
+		name    string
+		release time.Time
+		recent  bool
+	}{
+		{name: "今日はrecent", release: time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC), recent: true},
+		{name: "1日前はrecent", release: time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC), recent: true},
+		{name: "6日前はrecent", release: time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC), recent: true},
+		{name: "7日前境界はrecent外", release: time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC), recent: false},
+		{name: "8日前はrecent外", release: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), recent: false},
+		{name: "未来はrecent", release: futureDate, recent: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRecentPaperRelease(tc.release, now); got != tc.recent {
+				t.Errorf("IsRecentPaperRelease(%s, now) = %v, want %v", tc.release.Format("2006-01-02"), got, tc.recent)
+			}
+		})
+	}
+}
+
+func TestIsRecentPaperRelease_JSTCalendarDayCrossing(t *testing.T) {
+	// 処理時刻がJST深夜0時をまたぐ境界でも暦日で安定する。
+	// 2026-08-09 00:00 JST 直前（= 2026-08-08 23:00 JST = 2026-08-08 14:00 UTC）でも
+	// JST暦日の今日は 2026-08-08 となり、7日前境界は 2026-08-01。
+	eve := time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC)
+	if !IsRecentPaperRelease(time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC), eve) {
+		t.Errorf("2026-08-08 JST 23:00 基準で 2026-08-02 はrecent（6日前）")
+	}
+	if IsRecentPaperRelease(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), eve) {
+		t.Errorf("2026-08-08 JST 23:00 基準で 2026-08-01 はrecent外（7日前境界）")
+	}
+}
+
+func paperInfoWithDate(asin string, release time.Time) PaperPageInfo {
+	return PaperPageInfo{
+		ASIN: asin, Title: "紙タイトル", URL: "https://u/" + asin,
+		PaperPrice: book.NewPrice(900), ReleaseDate: release, HasReleaseDate: true,
+		Contributors: []string{"海李"},
+	}
+}
+
+func TestHandleNewReleasePaperDetail_PaperRecentExcludesOldRelease(t *testing.T) {
+	eightDaysAgo := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperInfoWithDate("1234567890", eightDaysAgo)}
+	deps.PaperCandidateStore = store
+
+	oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+	if err != nil {
+		t.Fatalf("recent excluded must return nil error: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypePaperRecent {
+		t.Errorf("old paper must be terminal paper_recent_excluded: %+v", oc)
+	}
+	if len(store.upserts) != 0 {
+		t.Errorf("recent外の紙書籍はpaper_booksへ保存しない")
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 0 {
+		t.Errorf("recent外の紙書籍はPaper Gistを投入しない: %+v", enq.jobs)
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 || len(deps.UpcomingStore.(*fakeUpcomingStore).upserts) != 0 {
+		t.Errorf("recent除外経路はnotified/upcomingへ触れない")
+	}
+	if deps.AuthorStore.(*fakeAuthorStore).gotAuthor != "" {
+		t.Errorf("recent除外経路はauthors.LatestReleaseを更新しない")
+	}
+}
+
+func TestHandleNewReleasePaperDetail_RecentPaperIsSaved(t *testing.T) {
+	today := time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperInfoWithDate("1234567890", today)}
+	deps.PaperCandidateStore = store
+
+	oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+	if err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	if oc.Result != execution.ResultCompleted {
+		t.Errorf("recent紙書籍は保存完了: %+v", oc)
+	}
+	if len(store.upserts) != 1 {
+		t.Errorf("recent紙書籍はpaper_booksへ保存する: got %d", len(store.upserts))
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Target.GistType != "paper_to_kindle" {
+		t.Errorf("recent紙書籍はPaper Gistを投入する: %+v", enq.jobs)
+	}
+}
+
+func TestHandleNewReleasePaperDetail_MinPriceAndRecentBothRequired(t *testing.T) {
+	today := time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)
+	eightDaysAgo := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		release    time.Time
+		price      float64
+		wantResult string
+		wantErr    string
+		wantSaved  bool
+	}{
+		{name: "recent+低価格はmin_price除外", release: today, price: 220, wantResult: execution.ResultTerminal, wantErr: errorTypeMinPriceExcluded, wantSaved: false},
+		{name: "recent外+有効価格はrecent除外", release: eightDaysAgo, price: 900, wantResult: execution.ResultTerminal, wantErr: errorTypePaperRecent, wantSaved: false},
+		{name: "recent+有効価格は保存", release: today, price: 900, wantResult: execution.ResultCompleted, wantErr: "", wantSaved: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := paperInfoWithDate("1234567890", tc.release)
+			info.PaperPrice = book.NewPrice(tc.price)
+			store := &fakePaperCandidateStore{changed: true}
+			deps := baseDeps()
+			deps.Config.MinPrice = 221
+			deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: info}
+			deps.PaperCandidateStore = store
+
+			oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+			if err != nil {
+				t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+			}
+			if oc.Result != tc.wantResult {
+				t.Errorf("result = %v, want %v", oc.Result, tc.wantResult)
+			}
+			if oc.ErrorType != tc.wantErr {
+				t.Errorf("error_type = %q, want %q", oc.ErrorType, tc.wantErr)
+			}
+			if tc.wantSaved && len(store.upserts) != 1 {
+				t.Errorf("want saved, got %d upserts", len(store.upserts))
+			}
+			if !tc.wantSaved && len(store.upserts) != 0 {
+				t.Errorf("want not saved, got %d upserts", len(store.upserts))
+			}
+		})
+	}
+}
+
+func TestHandleNewReleasePaperDetail_SevenDayBoundaryIsExcluded(t *testing.T) {
+	sevenDaysAgo := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	store := &fakePaperCandidateStore{changed: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperInfoWithDate("1234567890", sevenDaysAgo)}
+	deps.PaperCandidateStore = store
+
+	oc, err := HandleNewReleasePaperDetail(context.Background(), deps, paperDetailJob("1234567890", "海李"))
+	if err != nil {
+		t.Fatalf("HandleNewReleasePaperDetail: %v", err)
+	}
+	if oc.Result != execution.ResultTerminal || oc.ErrorType != errorTypePaperRecent {
+		t.Errorf("7日前境界の紙書籍はUserScriptと同じくrecent外: %+v", oc)
+	}
+	if len(store.upserts) != 0 {
+		t.Errorf("7日前境界の紙書籍はpaper_booksへ保存しない")
+	}
+}
+
+func TestHandleNewReleaseResult_KindleCandidateOutsideRecentWindowStillProcesses(t *testing.T) {
+	// Kindle候補はrecent判定を適用せず、7日窓より古い過去発売でもAuthors更新・Gist投入が起きる。
+	thirtyDaysAgo := time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	product := futureProduct("B0FX3X569X")
+	product.ReleaseDate = thirtyDaysAgo
+	deps := baseDeps()
+	deps.AuthorStore.(*fakeAuthorStore).changed = true
+
+	if _, err := HandleNewReleaseResult(context.Background(), deps, resultJob("B0FX3X569X", "海李", product)); err != nil {
+		t.Fatalf("HandleNewReleaseResult: %v", err)
+	}
+	if deps.AuthorStore.(*fakeAuthorStore).gotAuthor != "海李" {
+		t.Errorf("Kindle候補はrecent窓適用外でAuthors更新対象のまま: gotAuthor=%q", deps.AuthorStore.(*fakeAuthorStore).gotAuthor)
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Target.GistType != "new_release" {
+		t.Errorf("Kindle候補は過去発売でもAuthor gistを投入する: %+v", enq.jobs)
+	}
+	if len(deps.NotifiedStore.(*fakeNotifiedStore).upserts) != 0 {
+		t.Errorf("Kindle過去発売はnotifiedへ入らない点は維持")
+	}
+}

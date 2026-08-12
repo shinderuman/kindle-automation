@@ -33,6 +33,7 @@ const (
 	errorTypeAuthorMismatch   = "author_mismatch"
 	errorTypeExcluded         = "excluded"
 	errorTypeMinPriceExcluded = "min_price_excluded"
+	errorTypePaperRecent      = "paper_recent_excluded"
 	errorTypeMissingProduct   = "missing_product"
 	errorTypeRetention        = "retention"
 	errorTypeAuthorStore      = "author_store"
@@ -237,6 +238,8 @@ var (
 	gistPaperID = "paper_to_kindle"
 	// roleParenRe は contributor 表記の役割括弧（著）や（イラスト）など半角/全角を取り除く。
 	roleParenRe = regexp.MustCompile(`[（(][^)）]*[)）]`)
+	// jst は recent判定の基準タイムゾーン。UserScript new_release_checker はブラウザ本地時（JST）で窓を計算するため、これに合わせる。
+	jst = time.FixedZone("JST", 9*60*60)
 )
 
 // gistStageNewReleasePaper は新刊ISBN候補による paper_books 追加・変更を示す Paper Gist job の決定的 stage。
@@ -245,6 +248,10 @@ const gistStageNewReleasePaper = "nr_paper"
 
 // maxSearchCandidates は検索ページ1回から候補として処理する最大件数（SPECIFICATION.md 13.2）。
 const maxSearchCandidates = 10
+
+// paperRecentDays はISBN紙書籍候補のrecent窓（日）。UserScript new_release_checker の
+// isbnMode=1/2・NEW_RELEASE_DAYS=7 に一致させる（SPECIFICATION.md 13.4）。
+const paperRecentDays = 7
 
 // HandleNewReleaseSearch は新刊検索jobのユースケース entry point。
 // 検索job自身は S3 保存も商品通知も行わない（SPECIFICATION.md 13.4, AGENTS.md 4）。
@@ -576,6 +583,11 @@ func HandleNewReleasePaperDetail(ctx context.Context, deps Dependencies, j job.J
 	if info.PaperPrice.Valid() && info.PaperPrice.Yen() <= float64(deps.Config.MinPrice) {
 		return execution.Terminal(errorTypeMinPriceExcluded, result.HTTPStatus, result.ResponseBytes), nil
 	}
+	// SPECIFICATION.md 13.4: ISBN紙書籍候補のJST直近7日recent除外。Kindle候補には適用しない。
+	// 直近7日より古い紙書籍はterminal除外し、paper_books保存もPaper Gist投入も行わない。
+	if !IsRecentPaperRelease(info.ReleaseDate, deps.Clock()) {
+		return execution.Terminal(errorTypePaperRecent, result.HTTPStatus, result.ResponseBytes), nil
+	}
 	price := info.PaperPrice
 	b := book.KindleBook{
 		ASIN:         asin,
@@ -638,6 +650,22 @@ func ExcludedByYearMonth(title string) bool {
 // IsFutureRelease は発売日が now より未来か（SPECIFICATION.md 13.6）。
 func IsFutureRelease(releaseDate, now time.Time) bool {
 	return releaseDate.After(now)
+}
+
+// IsRecentPaperRelease はISBN紙書籍候補の発売日がJST直近7日窓の内側かを返す（SPECIFICATION.md 13.4）。
+// UserScript new_release_checker の isbnMode=1/2・NEW_RELEASE_DAYS=7 に一致させるため、
+// 発売日と now をJST暦日へ正規化して厳密な（< でない）比較をする。UserScript は cutoff=now-7日（時刻保持）
+// かつ発売日をJST深夜0時へ組むため、7日前の発売日は境界外となる。この暦日正規化でも同じ境界になる。
+// Kindle候補はこの判定を経由せず、呼び出し側でISBN紙書籍経路だけに適用する。
+func IsRecentPaperRelease(releaseDate, now time.Time) bool {
+	releaseDay := midnightJST(releaseDate)
+	cutoff := midnightJST(now).AddDate(0, 0, -paperRecentDays)
+	return releaseDay.After(cutoff)
+}
+
+func midnightJST(t time.Time) time.Time {
+	jstTime := t.In(jst)
+	return time.Date(jstTime.Year(), jstTime.Month(), jstTime.Day(), 0, 0, 0, 0, jst)
 }
 
 // AuthorMatches は対象作者名が contributor 表記のいずれかと完全一致するかを返す（SPECIFICATION.md 13.3）。

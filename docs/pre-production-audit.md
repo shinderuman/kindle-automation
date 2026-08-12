@@ -117,3 +117,41 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 - [ ] 手動 invoke で SQS から1件ずつ疎通確認。
 - [ ] event source mapping 有効化 → 3 Scheduler 有効化。
 - [ ] 既存 `release-notifier` が有効であること。
+
+### 5.7 ISBN紙書籍候補のmanual疎通（SchedulersEnabled=false・WorkerMappingEnabled）
+
+ISBN形式Paper候補のrecent除外（§13.4）を含む「実作者 → `new_release_search` → `new_release_paper_detail` → `paper_books_asins.json`保存」1本を、本番S3へ書き込みつつ段階制御下で手動確認する手順。自動 live smoke（§2）は Amazon への読み取りのみで S3 を書かないため、この経路の S3 書込は本手動手順でのみ確認する。実行そのものは本監査時点では行わず、実行前に下記を読み合わせておく。
+
+前提（安全な段階制御）:
+- `SchedulersEnabled=false` で deploy 済み（3 Scheduler は無効。自動周期では動かない）。
+- `check-worker` の event source mapping が `WorkerMappingEnabled` の指定どおり（有効化して実施する。`docs/operations.md` §5.1 の `list-event-source-mappings` で `State`/`BatchSize=1` を確認）。
+- 対象 bucket の Versioning が `Enabled`（§5.6）。本手順の S3 書込は Versioning で保護され、別 backup copy は作らない。
+- `NewReleaseChecker.MinPrice` が apply 済み（§5.6）。`NewReleaseChecker.Enabled=true`。
+
+実行前に read-only で記録する（書き込まない）:
+- 対象作者 A と、検索結果に含まれる見込みの ISBN Paper 候補 ASIN（10〜13桁数字）を1件選ぶ。候補が recent窓（JST直近7日）内かつ MinPrice 以上になる作者・ASINを選ぶと保存まで確認できる。窓より古い ASIN を選んだ場合は recent除外のterminal結果を確認する。
+- 次の object の現時点 VersionId と size を記録する: `paper_books_asins.json`、`authors.json`、`notified_asins.json`、`upcoming_asins.json`、`unprocessed_asins.json`。
+  ```bash
+  aws s3api list-object-versions --bucket <BUCKET> --prefix paper_books_asins.json \
+    --query 'Versions[0].[VersionId,Size,LastModified]' --profile <P> --region <R>
+  # 同様に authors/notified/upcoming/unprocessed に対しても記録
+  ```
+- `paper_books_asins.json` の本文を read-only で取得し、対象 ASIN の有無・既存レコードの件数と並び順・未知 field の有無を記録しておく。
+
+実行（1本の疎通）:
+- scope を1作者へ絞るため、`schedule-checks` を全文一括 dispatch せず、対象作者 A の `new_release_search` 1件だけ SQS へ投入する（job schema は §8、`MessageGroupId=amazon-requests`、`MessageDeduplicationId` = `job_id` の SHA-256 hex）。投入は `aws sqs send-message` で行う。
+- event source mapping が有効なら `check-worker` が `new_release_search` を処理し、ISBN候補を `new_release_paper_detail` へ投入し、続いて同 detail を処理して `paper_books_asins.json` を upsert する。
+- 一括確認でよい場合は `aws lambda invoke --function-name <ScheduleChecksFunction> ...` で `new_release` 1周期を手動起動し、対象作者 A の経路だけ下記で検証する（他作者の経路は今回の検証対象外）。
+
+実行後に read-only で検証する（assert）:
+- `paper_books_asins.json` の VersionId が変化したか（書込発生の有無）。recent・MinPrice 両方を満たす候補なら VersionId が変わり、対象 ASIN が1件 upsert されている。recent外なら VersionId は変化せず対象 ASIN は不存在のまま。
+- upsertされた対象レコードの: 作者が A に一致、発売日が JST直近7日内（recent）、`CurrentPrice`/`MaxPrice` が MinPrice 以上または 0（unknown）、`CreatedAt`・4スペース indent・発売日降順の schema（§9.2）が維持されること。
+- 記録しておいた他の手動 record（別 ASIN）が件数・内容ともに保持されていること。未知 field が削られていないこと。
+- `notified_asins.json`・`upcoming_asins.json`・`unprocessed_asins.json` の VersionId が実行前から不変（ISBN Paper経路はこれらへ触れない、§13.4）。対象 ASIN がこれらに含まれないこと。
+- `authors.json` の `LatestRelease` が対象作者 A で更新されていないこと（ISBN Paper経路は `authors.LatestRelease` を更新しない、§13.4）。VersionId も不変が期待される（他作者の Kindle 経路が同時に動かなければ）。
+- `paper_to_kindle` の `gist_update` が決定的 job_id（`paper_to_kindle:nr_paper:<paperASIN>`）で投入されたこと（DLQ や SQS heap の read-only 確認、または次の Gist 実行結果）。
+- recent外 ASIN を選んだ場合は、当該 job のログ `error_type=paper_recent_excluded`・`result=job_terminal` を確認し、paper_books 保存も Gist 投入も起きていないことを上記と同じ方法で検証する。
+
+recovery:
+- 書込結果が想定と異なる場合は、記録した VersionId を使って Versioning から対象 object の旧 version を参照・復元する（§20.4）。別 backup copy は要求しない。
+

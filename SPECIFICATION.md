@@ -644,7 +644,7 @@ ASINが10〜13桁の数字だけで構成される紙書籍ISBN候補は、こ�
 
 作者名の比較では、全角ASCIIを半角へ変換し、全角・半角スペースを除去した正規化名同士を比較する。contributor 表記は役割（`(著)`等）や販売者・日付が混入し得るため、各 contributor ごとに役割表記を除去して正規化した完全名を作り、対象作者の正規化名と完全一致する contributor が1つでもあれば一致とする。空白で分解した姓・名トークン単位の部分一致は見逃しや誤検出を生むため行わない（例: contributor`山田 太郎`を`山田`/`太郎`に分けて対象`山田次郎`へ部分一致させることはしない）。
 
-UserScriptの直近7日間という判定窓は使用しない。これはGo側の新刊管理仕様に存在しないためである。UserScriptの`MIN_PRICE`に相当する最低価格除外は、`checker_configs.json`の`NewReleaseChecker.MinPrice`を用いる（§13.4, §16）。検索段階でのMinPriceによる事前除外は必須ではなく、Kindle詳細確認と紙書籍詳細確認の両方で最終保証する。
+UserScriptの直近7日間という判定窓は候補種別ごとに分離する。Kindle候補には7日窓を一切適用せず、旧PA-API版Go準拠の現在仕様（過去発売済みでも`authors.LatestRelease`の更新対象、`notified`/`upcoming`は将来発売分のみ）を維持する。ISBN形式の紙書籍候補だけがUserScript `new_release_checker`の`isbnMode=1/2`・`NEW_RELEASE_DAYS=7`を継承し、JST基準の直近7日recent判定（§13.4）を適用する。UserScriptの`MIN_PRICE`に相当する最低価格除外は、`checker_configs.json`の`NewReleaseChecker.MinPrice`を用いる（§13.4, §16）。検索段階でのMinPriceによる事前除外は必須ではなく、Kindle詳細確認と紙書籍詳細確認の両方で最終保証する。
 
 ### 13.4 商品詳細確認
 
@@ -684,6 +684,14 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 - 除外キーワードと年月タイトル条件に該当しない（該当は除外）
 
 紙書籍価格の取得を試みる。取得できた場合は`CurrentPrice`と`MaxPrice`をその価格へ設定し、その価格が`MinPrice`以下なら`min_price_excluded`として保存・Gist投入せず終了する。取得できなかった場合はunknownとして両者を0のまま保存し、価格0はMinPrice除外の対象にしない。紙書籍価格の本来の初期化は既存のPaper-to-Kindle Scheduler/Checker（§14）へ委ねる。
+
+#### ISBN紙書籍候補のrecent除外（JST直近7日）
+
+ISBN形式の紙書籍候補はUserScript `new_release_checker`の`isbnMode=1/2`・`NEW_RELEASE_DAYS=7`を継承し、JST基準の直近7日recent判定を適用する。Kindle候補にはこの窓を適用しない（§13.3）。発売日と処理時刻をそれぞれJST暦日へ正規化し、処理時刻のJST暦日から7日前より厳密に古い候補は`paper_recent_excluded`としてterminal除外し、`paper_books_asins.json`へ保存せずPaper Gistも投入しない。今日・未来・7日前境界は従来条件（MinPrice・upsert・Gist）へ進む。
+
+商品詳細確認（`new_release_paper_detail`）で発売日が確定した後、`paper_books_asins.json`へのupsert前にこの判定を必ず通す。検索結果で発売日が得られる場合の早期除外は任意で、商品詳細確認側を最終保証とする。除外された候補は`notified_asins.json`・`upcoming_asins.json`・`unprocessed_asins.json`・`authors.json`のいずれも触れない。
+
+この7日窓はUserScript由来の固定定数（JST・`NEW_RELEASE_DAYS=7`）であり、`checker_configs.json`へは設定しない。`MinPrice`が運用判断で調整され得る閾値であるのと対照的に、recent窓はUserScriptのISBN候補抽出契約（`isbnMode=1/2`で紙書籍を表示する期間）そのものへ合わせるためコード定数とする。両者を分離することで、`MinPrice`調整がrecent窓の意味を変えず、UserScript挙動との整合は固定定数へ保持される。
 
 ISBN紙書籍候補は`paper_books_asins.json`へ既存schema・ASIN単位・既保存ルールでupsertする。手動レコード・未知フィールド・`CreatedAt`・ETag競合時merge・重複排除・並び順・手動削除復活禁止の既存契約（§9.2, §9.4, §9.5）を維持する。ISBN候補を`notified_asins.json`、`upcoming_asins.json`、`unprocessed_asins.json`へ入れず、`authors.json`の`LatestRelease`を更新しない。Kindle版スウォッチ検出後の振る舞いは既存のPaper-to-Kindle Scheduler/Checker（§14）へ委ねる。
 
@@ -1099,6 +1107,7 @@ S3 backupを配列全体で無条件に上書きしてロールバックしな�
 - ISBN候補が`new_release_paper_detail`へ回り、Kindle候補経路へ入らない
 - 紙書籍候補の詳細確認（ASIN・タイトル・作者・発売日検証、価格0/未取得の保存）
 - MinPrice除外（Kindle候補と紙書籍候補の220/221除外・222通過、価格0は除外対象外）
+- ISBN紙書籍候補のJST直近7日recent除外（今日・1日前・7日前境界は通過、8日以上前はterminal除外。境界結果はUserScript `new_release_checker`実コードと一致。Kindle候補はrecent判定を適用せず既存LatestRelease/future判定を維持。PaperはMinPriceとrecent双方成立時だけ保存。除外経路はnotified/upcoming/unprocessed/authorsへ触れない）
 - `paper_books_asins.json`のupsert成功後にPaper Gistを常に投入し、enqueue失敗の再配信で`changed=false`でもreconcileすること
 - 検索側で既存paper ISBNの`new_release_paper_detail`投入をスキップし、新規paper ISBNだけ投入すること
 - `checker_configs.json`設定対象形状、旧フィールド削除、MinPrice必須validation
@@ -1142,6 +1151,8 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - 検索項目が揃う候補は`new_release_result`、不足候補は`new_release_detail`になる
 - ISBN候補が`new_release_paper_detail`へ投入され、商品ページを最大1回取得する。ただし`paper_books_asins.json`に既存のISBNは投入しない（§13.3）
 - ISBN紙書籍候補が`notified`/`upcoming`/`unprocessed`へ入らず`authors.LatestRelease`を更新しない
+- ISBN紙書籍候補のJST直近7日recent除外が、古い候補を`paper_books_asins.json`へ保存せずPaper Gistも投入せず、今日・未来・境界は保存すること
+- Kindle候補にrecent判定が適用されず、過去発売分でも`authors.LatestRelease`更新対象となること
 - S3変更後のGist更新を0リクエストの別ジョブとして再試行できる
 - `checker_configs.json`移行のdry-run/apply/`If-Match`回帰テスト
 - retryable errorをLambdaエラーとして返す
