@@ -19,9 +19,14 @@ package amazon
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 )
+
+// numericISBNRe は newrelease.IsISBNASIN(`^\d{10,13}$`) と等価。
+// application 層(newrelease)へ依存させないため amazon test 内で同じ意味を再現する。
+var numericISBNRe = regexp.MustCompile(`^\d{10,13}$`)
 
 // liveTimeout は live smoke 用の余裕を持った timeout。本番の15秒より長くはしない。
 const liveTimeout = 15 * time.Second
@@ -162,6 +167,45 @@ func TestLiveSmoke_Search_KindleMarker(t *testing.T) {
 	}
 	t.Logf("検索 %q 構造OK: hits=%d kindle=%d httpStatus=%d bytes=%d",
 		author, len(result.Hits), kindleCount, result.HTTPStatus, result.ResponseBytes)
+}
+
+// 杉山正明は歴史学者で紙専売の学術書が多く、digital-text 検索でもISBN(数字ASIN)候補が
+// 安定して混入するため New Release→Paper 経路の実HTTP検証の固定 query として使う。
+func TestLiveSmoke_Search_PaperISBN(t *testing.T) {
+	const author = "杉山正明"
+	ctx, cancel := context.WithTimeout(context.Background(), liveTimeout)
+	defer cancel()
+
+	result, err := liveSmokeClient().FetchSearch(ctx, author)
+	if err != nil {
+		t.Fatalf("FetchSearch %q returned transport error (block/timeout/通信失敗): %v", author, err)
+	}
+	if result.Category != CategoryOK {
+		t.Fatalf("FetchSearch %q Category=%s (HTTPStatus=%d bytes=%d): block/CAPTCHA/空結果/要素欠落の可能性",
+			author, categoryName(result.Category), result.HTTPStatus, result.ResponseBytes)
+	}
+	if len(result.Hits) == 0 {
+		t.Fatalf("検索結果containerが空(hits=0)。検索ページ構造変化または結果0件の可能性")
+	}
+	isbnCount := 0
+	var firstISBN string
+	for i, h := range result.Hits {
+		isISBN := numericISBNRe.MatchString(h.ASIN)
+		if isISBN {
+			isbnCount++
+			if firstISBN == "" {
+				firstISBN = h.ASIN
+			}
+		}
+		t.Logf("  hit[%d] asin=%s isKindle=%v isISBN=%v title=%q", i, h.ASIN, h.IsKindle, isISBN, h.Title)
+	}
+	if isbnCount == 0 {
+		t.Fatalf("10〜13桁の数字だけのISBN/紙書籍ASIN候補が1件もない(hits=%d)。"+
+			"New Release→Paper 振り分けの前提が崩れている、または検索ページ構造変化の可能性",
+			len(result.Hits))
+	}
+	t.Logf("検索 %q 構造OK: hits=%d isbn=%d firstISBN=%s httpStatus=%d bytes=%d",
+		author, len(result.Hits), isbnCount, firstISBN, result.HTTPStatus, result.ResponseBytes)
 }
 
 // categoryName は分類を文字列へ。Category の String 実装がないため smoke 用に手元で名前付けする。
