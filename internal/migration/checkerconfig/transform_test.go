@@ -2,6 +2,7 @@ package checkerconfig
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -77,7 +78,7 @@ func TestApplyMigration_PreservesMinPriceWhenPresent(t *testing.T) {
 }
 
 func TestApplyMigration_PreservesUnknownFieldsAndSections(t *testing.T) {
-	body := []byte(`{"ReportFailure":true,"FutureChecker":{"X":1},"SaleChecker":{"Enabled":true,"GistID":"g1","GistFilename":"sale.md","SaleThreshold":151,"PointPercent":20,"PriceChangeAmount":100,"Memo":"keep"}}`)
+	body := []byte(`{"ReportFailure":true,"FutureChecker":{"X":1},"SaleChecker":{"Enabled":true,"GistID":"g1","GistFilename":"sale.md","SaleThreshold":151,"PointPercent":20,"PriceChangeAmount":100,"Memo":"keep&a=b"}}`)
 	out, _, err := applyMigration(body)
 	if err != nil {
 		t.Fatalf("applyMigration: %v", err)
@@ -88,8 +89,28 @@ func TestApplyMigration_PreservesUnknownFieldsAndSections(t *testing.T) {
 		t.Errorf("unknown top-level section must be preserved")
 	}
 	sale := got["SaleChecker"].(map[string]any)
-	if sale["Memo"] != "keep" {
+	if sale["Memo"] != "keep&a=b" {
 		t.Errorf("unknown field within Checker must be preserved")
+	}
+	if strings.Contains(string(out), `\u0026`) {
+		t.Errorf("ampersand must not be HTML-escaped: %s", out)
+	}
+}
+
+func TestApplyMigration_UsesFourSpaceIndent(t *testing.T) {
+	body := []byte(`{"SaleChecker":{"Enabled":true,"GistID":"g1","GistFilename":"sale.md","SaleThreshold":151,"PointPercent":20,"PriceChangeAmount":100},"NewReleaseChecker":{"Enabled":false,"GistID":"g2","GistFilename":"new.md"},"PaperToKindleChecker":{"Enabled":true,"GistID":"g3","GistFilename":"paper.md"}}`)
+	out, _, err := applyMigration(body)
+	if err != nil {
+		t.Fatalf("applyMigration: %v", err)
+	}
+	for _, want := range []string{
+		"\n    \"NewReleaseChecker\": {",
+		"\n        \"MinPrice\": 221",
+		"\n    \"PaperToKindleChecker\": {",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("4-space indented output missing %q:\n%s", want, out)
+		}
 	}
 }
 

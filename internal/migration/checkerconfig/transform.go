@@ -1,6 +1,7 @@
 package checkerconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -50,11 +51,11 @@ func applyMigration(body []byte) ([]byte, report, error) {
 			top[checker] = enc
 		}
 	}
-	out, err := json.Marshal(top)
+	out, err := json.MarshalIndent(top, "", "    ")
 	if err != nil {
 		return nil, report{}, fmt.Errorf("encode top: %w", err)
 	}
-	return out, rep, nil
+	return bytes.ReplaceAll(out, []byte(`\u0026`), []byte("&")), rep, nil
 }
 
 func ensureMinPrice(m map[string]json.RawMessage) (bool, error) {

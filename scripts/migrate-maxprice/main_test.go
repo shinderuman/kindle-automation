@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,7 @@ func TestMigrateObject_Apply(t *testing.T) {
 type applyStore struct {
 	body     []byte
 	etag     string
+	putBody  []byte
 	putOpts  storage.PutOptions
 	putCalls int
 }
@@ -176,7 +178,8 @@ func (s *applyStore) Get(_ context.Context, _ string) (storage.Object, error) {
 	return storage.Object{Body: s.body, ETag: s.etag}, nil
 }
 
-func (s *applyStore) Put(_ context.Context, _ string, _ []byte, opts storage.PutOptions) error {
+func (s *applyStore) Put(_ context.Context, _ string, body []byte, opts storage.PutOptions) error {
+	s.putBody = append([]byte(nil), body...)
 	s.putOpts = opts
 	s.putCalls++
 	return nil
@@ -212,6 +215,44 @@ func TestMigrateObject_DryRunDoesNotPut(t *testing.T) {
 	}
 	if store.putCalls != 0 {
 		t.Errorf("dry-run が Put を呼んだ: %d", store.putCalls)
+	}
+}
+
+func TestMigrateObject_UnchangedApplyDoesNotPut(t *testing.T) {
+	ctx := context.Background()
+	body := []byte(`[{"ASIN":"B000000001","CurrentPrice":759,"MaxPrice":759}]`)
+	store := &applyStore{body: body, etag: "etag-123"}
+
+	if _, err := migrateObject(ctx, store, "notified_asins.json", true); err != nil {
+		t.Fatalf("migrateObject apply: %v", err)
+	}
+	if store.putCalls != 0 {
+		t.Errorf("変更なしobjectをPutした: %d", store.putCalls)
+	}
+}
+
+func TestMigrateObject_PreservesRawFieldsAndIndents(t *testing.T) {
+	ctx := context.Background()
+	body := []byte(`[{"ASIN":"B000000001","Title":"A&B","ReleaseDate":"2026-08-27T00:00:00.000Z","CurrentPrice":759,"MaxPrice":792,"URL":"https://example.test/?a=1&b=2","Memo":{"x":1}}]`)
+	store := &applyStore{body: body, etag: "etag-123"}
+
+	if _, err := migrateObject(ctx, store, "unprocessed_asins.json", true); err != nil {
+		t.Fatalf("migrateObject apply: %v", err)
+	}
+	got := string(store.putBody)
+	for _, want := range []string{
+		`"ReleaseDate": "2026-08-27T00:00:00.000Z"`,
+		`"MaxPrice": 759`,
+		`"URL": "https://example.test/?a=1&b=2"`,
+		`"Memo": {`,
+		"\n    {",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("出力に %q がない:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"CreatedAt"`) {
+		t.Errorf("存在しなかったCreatedAtを追加した:\n%s", got)
 	}
 }
 

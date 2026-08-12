@@ -100,24 +100,185 @@ func migrateObject(ctx context.Context, store storage.ObjectStore, key string, a
 	if err != nil {
 		return objectReport{}, fmt.Errorf("get %s: %w", key, err)
 	}
-	records, err := storage.DecodeBooks(obj.Body)
+	before, err := storage.DecodeBooks(obj.Body)
 	if err != nil {
 		return objectReport{}, fmt.Errorf("decode %s: %w", key, err)
 	}
-	migrated, changed, currentZero := applyMigration(records)
-	if err := validateInvariants(records, migrated, key); err != nil {
+	body, changed, currentZero, err := migrateJSON(obj.Body)
+	if err != nil {
+		return objectReport{}, fmt.Errorf("migrate %s: %w", key, err)
+	}
+	after, err := storage.DecodeBooks(body)
+	if err != nil {
+		return objectReport{}, fmt.Errorf("decode migrated %s: %w", key, err)
+	}
+	if err := validateInvariants(before, after, key); err != nil {
 		return objectReport{}, err
 	}
-	body, err := storage.EncodeBooks(migrated)
-	if err != nil {
-		return objectReport{}, fmt.Errorf("encode %s: %w", key, err)
+	if err := validateRawInvariants(obj.Body, body, key); err != nil {
+		return objectReport{}, err
 	}
-	if apply {
+	if apply && changed > 0 {
 		if err := store.Put(ctx, key, body, storage.PutOptions{IfMatch: obj.ETag}); err != nil {
 			return objectReport{}, fmt.Errorf("put %s: %w", key, err)
 		}
 	}
-	return objectReport{Key: key, Total: len(records), Changed: changed, CurrentZero: currentZero}, nil
+	return objectReport{Key: key, Total: len(before), Changed: changed, CurrentZero: currentZero}, nil
+}
+
+type rawField struct {
+	value []byte
+	start int
+	end   int
+}
+
+func migrateJSON(body []byte) ([]byte, int, int, error) {
+	var records []json.RawMessage
+	if err := json.Unmarshal(body, &records); err != nil {
+		return nil, 0, 0, err
+	}
+	changed := 0
+	currentZero := 0
+	for i, record := range records {
+		fields, err := scanObject(record)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("record %d: %w", i, err)
+		}
+		current, ok := fields["CurrentPrice"]
+		if !ok {
+			return nil, 0, 0, fmt.Errorf("record %d: CurrentPrice missing", i)
+		}
+		currentPrice, err := rawNumber(current.value)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("record %d CurrentPrice: %w", i, err)
+		}
+		if currentPrice == 0 {
+			currentZero++
+		}
+		max, exists := fields["MaxPrice"]
+		if exists {
+			maxPrice, err := rawNumber(max.value)
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("record %d MaxPrice: %w", i, err)
+			}
+			if maxPrice == currentPrice {
+				continue
+			}
+			records[i] = append(append(append([]byte{}, record[:max.start]...), current.value...), record[max.end:]...)
+			changed++
+			continue
+		}
+		if currentPrice == 0 {
+			continue
+		}
+		insertAt := len(record) - 1
+		for insertAt > 0 && (record[insertAt-1] == ' ' || record[insertAt-1] == '\n' || record[insertAt-1] == '\r' || record[insertAt-1] == '\t') {
+			insertAt--
+		}
+		addition := append([]byte(`,"MaxPrice":`), current.value...)
+		records[i] = append(append(append([]byte{}, record[:insertAt]...), addition...), record[insertAt:]...)
+		changed++
+	}
+
+	var compact bytes.Buffer
+	compact.WriteByte('[')
+	for i, record := range records {
+		if i > 0 {
+			compact.WriteByte(',')
+		}
+		compact.Write(record)
+	}
+	compact.WriteByte(']')
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, compact.Bytes(), "", "    "); err != nil {
+		return nil, 0, 0, err
+	}
+	return indented.Bytes(), changed, currentZero, nil
+}
+
+func scanObject(record []byte) (map[string]rawField, error) {
+	dec := json.NewDecoder(bytes.NewReader(record))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, fmt.Errorf("JSON objectではありません")
+	}
+	fields := make(map[string]rawField)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, fmt.Errorf("field名が文字列ではありません")
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return nil, fmt.Errorf("field %s が重複しています", key)
+		}
+		pos := int(dec.InputOffset())
+		for pos < len(record) && (record[pos] == ' ' || record[pos] == '\n' || record[pos] == '\r' || record[pos] == '\t') {
+			pos++
+		}
+		if pos >= len(record) || record[pos] != ':' {
+			return nil, fmt.Errorf("field %s の区切りが不正です", key)
+		}
+		pos++
+		for pos < len(record) && (record[pos] == ' ' || record[pos] == '\n' || record[pos] == '\r' || record[pos] == '\t') {
+			pos++
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, fmt.Errorf("field %s: %w", key, err)
+		}
+		fields[key] = rawField{value: value, start: pos, end: pos + len(value)}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+func rawNumber(raw []byte) (float64, error) {
+	var value float64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func validateRawInvariants(beforeBody, afterBody []byte, key string) error {
+	var before, after []map[string]json.RawMessage
+	if err := json.Unmarshal(beforeBody, &before); err != nil {
+		return fmt.Errorf("%s: decode raw before: %w", key, err)
+	}
+	if err := json.Unmarshal(afterBody, &after); err != nil {
+		return fmt.Errorf("%s: decode raw after: %w", key, err)
+	}
+	if len(before) != len(after) {
+		return fmt.Errorf("%s: raw record count changed", key)
+	}
+	for i := range before {
+		for field, value := range before[i] {
+			if field == "MaxPrice" {
+				continue
+			}
+			got, ok := after[i][field]
+			if !ok || !rawJSONEqual(value, got) {
+				return fmt.Errorf("%s: field %s changed at record %d", key, field, i)
+			}
+		}
+		for field := range after[i] {
+			if field != "MaxPrice" {
+				if _, ok := before[i][field]; !ok {
+					return fmt.Errorf("%s: field %s added at record %d", key, field, i)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // applyMigration は SPECIFICATION.md 20.2。CurrentPrice 未取得（0円）時は MaxPrice も未取り。
@@ -201,11 +362,19 @@ func extraEqual(a, b map[string]json.RawMessage) bool {
 		if !ok {
 			return false
 		}
-		if !bytes.Equal(v, bv) {
+		if !rawJSONEqual(v, bv) {
 			return false
 		}
 	}
 	return true
+}
+
+func rawJSONEqual(a, b []byte) bool {
+	var compactA, compactB bytes.Buffer
+	if json.Compact(&compactA, a) != nil || json.Compact(&compactB, b) != nil {
+		return false
+	}
+	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
 func splitKeys(csv string) []string {
