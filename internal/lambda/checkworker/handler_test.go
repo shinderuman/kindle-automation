@@ -81,7 +81,6 @@ func (f *countPaperFetcher) FetchKindlePage(_ context.Context, _ string) (papert
 
 const testCheckerConfig = `{"SaleChecker":{"Enabled":true,"GistID":"gist-test","GistFilename":"sale.md","SaleThreshold":100,"PointPercent":10,"PriceChangeAmount":50}}`
 
-// nrPaperStoreStub は newrelease.PaperCandidateStore の no-op stub。
 type nrPaperStoreStub struct{}
 
 func (nrPaperStoreStub) UpsertChanged(context.Context, book.KindleBook) (bool, error) {

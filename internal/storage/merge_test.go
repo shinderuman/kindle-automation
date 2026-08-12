@@ -306,7 +306,6 @@ func TestUpsertBookRecordChanged_ReportsChangedForAddAndModify(t *testing.T) {
 		t.Errorf("new ASIN must report changed=true")
 	}
 
-	// 同じ内容の再upsertは未変更（changed=false）。CreatedAt は保持され比較から除外される。
 	changed, err = UpsertBookRecordChanged(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
 		ASIN: "B0FX3X569X", Title: "T", URL: "https://u",
 		ReleaseDate:  time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
@@ -320,7 +319,6 @@ func TestUpsertBookRecordChanged_ReportsChangedForAddAndModify(t *testing.T) {
 		t.Errorf("unchanged re-upsert must report changed=false")
 	}
 
-	// Amazon 由来 field（価格）が変われば changed=true。
 	changed, err = UpsertBookRecordChanged(context.Background(), store, "k", BookRecord{Book: book.KindleBook{
 		ASIN: "B0FX3X569X", Title: "T", URL: "https://u",
 		ReleaseDate:  time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),

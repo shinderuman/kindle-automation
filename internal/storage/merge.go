@@ -107,7 +107,6 @@ func UpsertBookRecordChanged(ctx context.Context, store ObjectStore, key string,
 	return changed, err
 }
 
-// bookAmazonFieldsEqual は Amazon 由来 field の一致を返す。CreatedAt と Extra（未知 field）は比較しない。
 func bookAmazonFieldsEqual(a, b book.KindleBook) bool {
 	return a.ASIN == b.ASIN &&
 		a.Title == b.Title &&
