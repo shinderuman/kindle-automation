@@ -111,6 +111,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 - [ ] 対象 bucket の Versioning が `Enabled` であることを確認（read-only）。`Suspended`/未設定なら切り替え中止。確認には `s3:GetBucketVersioning` 権限のある profile が必要（権限不足の profile では AccessDenied で確認できない）。
 - [ ] Versioning=Enabled を確認したら backup prefix copy は作らず、対象 object の現時点 VersionId を記録（docs/operations.md §5.0）。
 - [ ] 既存3 Checker の EventBridge trigger を無効化。
+- [ ] `migrate-checker-config` で `checker_configs.json` を dry-run → apply（§20.5）。`go run ./cmd/migrate-checker-config -bucket ... -region ... [-key checker_configs.json]`（dry-run 既定）で `NewReleaseChecker.MinPrice=221` 追加と §16 旧 field 削除を確認後、`-apply` を明示指定して実行（取得時 ETag の `If-Match` 付き）。MaxPrice 初期化・Scheduler 有効化より前に必須（新 Scheduler は `MinPrice` 必須で起動 validation するため）。Versioning で既に保護されているため別途 object 全体 backup は要求しない。
 - [ ] `migrate-maxprice` dry-run → apply（§20.2, docs/operations.md §5）。
 - [ ] 既知HTML fixture で新Lambda 確認。
 - [ ] 手動 invoke で SQS から1件ずつ疎通確認。

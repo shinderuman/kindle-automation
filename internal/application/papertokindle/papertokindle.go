@@ -447,8 +447,7 @@ func kindleURL(asin, partnerTag string) string {
 	return u
 }
 
-// IsSameReleaseDayJST は2つの時刻が同じJST暦日かを返す。
-// 2つの時刻が同じJST暦日か（SPECIFICATION.md 14.3）。
+// IsSameReleaseDayJST は2つの時刻が同じ JST 暦日か（SPECIFICATION.md 14.3）。
 func IsSameReleaseDayJST(a, b time.Time) bool {
 	return a.In(jst).Format("2006-01-02") == b.In(jst).Format("2006-01-02")
 }

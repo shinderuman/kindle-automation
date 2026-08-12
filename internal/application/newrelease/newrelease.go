@@ -49,11 +49,9 @@ type SearchCategory int
 const (
 	// SearchOK は検索ページ1回の正常取得を表す。
 	SearchOK SearchCategory = iota
-	// SearchEmpty は検索結果0件を表す。
-	// 検索ページは検証できたが結果0件。既存Go実装と同じく再試行可能。
+	// SearchEmpty は検索ページ検証後に結果0件。既存Go実装と同じく再試行可能。
 	SearchEmpty
-	// SearchRetryable は再試行可能な取得失敗を表す。
-	// 403/429/5xx/CAPTCHA/構造欠落。再試行する。
+	// SearchRetryable は 403/429/5xx/CAPTCHA/構造欠落などの再試行可能な取得失敗。
 	SearchRetryable
 )
 
@@ -85,14 +83,11 @@ type ProductCategory int
 const (
 	// ProductOK は商品ページの正常取得を表す。
 	ProductOK ProductCategory = iota
-	// ProductNotFound は商品不存在を表す。
-	// 404 または商品不存在。terminal。
+	// ProductNotFound は 404 または商品不存在。terminal。
 	ProductNotFound
-	// ProductPermanentClientError は恒久的 4xx エラーを表す。
-	// 恒久的 4xx。terminal。
+	// ProductPermanentClientError は恒久的 4xx。terminal。
 	ProductPermanentClientError
-	// ProductRetryable は再試行可能な取得失敗を表す。
-	// 403/429/5xx/CAPTCHA/構造欠落/解析失敗。再試行する。
+	// ProductRetryable は 403/429/5xx/CAPTCHA/構造欠落/解析失敗などの再試行可能な取得失敗。
 	ProductRetryable
 )
 
@@ -620,8 +615,7 @@ func formatNewReleaseMessage(author string, c Candidate) string {
 		c.Title, author, c.ReleaseDate.Format("2006-01-02"), c.ASIN, c.URL)
 }
 
-// IsISBNASIN は ASIN 文字列が紙書籍 ISBN かを返す。
-// 10〜13桁の数字だけで構成される紙書籍ISBNか（SPECIFICATION.md 13.3）。
+// IsISBNASIN は ASIN が 10〜13 桁の数字のみで構成される紙書籍 ISBN かを返す（SPECIFICATION.md 13.3）。
 func IsISBNASIN(asin string) bool {
 	return isbnRe.MatchString(asin)
 }
@@ -641,8 +635,7 @@ func ExcludedByYearMonth(title string) bool {
 	return yearMonthRe.MatchString(title)
 }
 
-// IsFutureRelease は発売日が now より未来かを返す。
-// SPECIFICATION.md 13.6。
+// IsFutureRelease は発売日が now より未来か（SPECIFICATION.md 13.6）。
 func IsFutureRelease(releaseDate, now time.Time) bool {
 	return releaseDate.After(now)
 }

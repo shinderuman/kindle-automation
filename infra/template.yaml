@@ -22,7 +22,7 @@ Parameters:
     Default: "false"
   WorkerMappingEnabled:
     Type: String
-    Description: check-worker の SQS event source mapping 初期状態（true=有効 / false=無効）。Scheduler 有効化parameterとは独立で、SPECIFICATION.md 20.3 step8 で個別に有効化する。
+    Description: check-worker の SQS event source mapping 初期状態（true=有効 / false=無効）。Scheduler 有効化parameterとは独立で、SPECIFICATION.md 20.3 step10 で個別に有効化する。
     AllowedValues: ["true", "false"]
     Default: "false"
 
@@ -126,7 +126,7 @@ Resources:
             Queue: !GetAtt WorkQueue.Arn
             BatchSize: 1
             # worker event source mapping は EventBridge Scheduler の有効化parameter（SchedulersEnabled）と独立。
-            # Scheduler有効化parameter（step9）と混同せず、step8 でこのparameter経由で個別に有効化する。
+            # Scheduler有効化parameter（step11）と混同せず、step10 でこのparameter経由で個別に有効化する。
             Enabled: !If [WorkerMappingEnabled, true, false]
             # handler は失敗時に error を返し SQS へ再配信させる（SPECIFICATION.md 7.4）。
 

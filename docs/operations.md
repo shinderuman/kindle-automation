@@ -58,7 +58,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 
 - 両 Lambda の Log Group が作成され、保持期間が30日であること。
 - Work Queue / Work DLQ / Scheduler DLQ が FIFO / Standard 構成どおりに作成されていること。
-- event source mapping の `BatchSize=1` が設定されていること。check-worker は失敗時に Lambda error を返し SQS へ再配信させる契約（partial batch response は使用しない）。
+- check-worker の event source mapping が `BatchSize=1` かつ `WorkerMappingEnabled` の指定どおりの有効状態（初回は無効）であること。check-worker は失敗時に Lambda error を返し SQS へ再配信させる契約（partial batch response は使用しない）。`WorkerMappingEnabled` は `SchedulersEnabled` とは独立した parameter なので、3 Scheduler とは別々に有効状態を確認する。確認は `aws lambda list-event-source-mappings --profile <P> --region <R> --query "EventSourceMappings[?contains(FunctionArn,'CheckWorkerFunction')].{State:State,BatchSize:BatchSize}"`（`State` が `Enabled`/`Disabled`、`BatchSize` が 1 であること）。
 - 3 Scheduler が `SchedulersEnabled` の指定どおりの有効状態であること（初回は無効）。
 - 2 Lambda の IAM role が共有されていないこと。
 - S3 bucket リソースが stack 削除対象に入っていないこと。
