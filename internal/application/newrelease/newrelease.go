@@ -165,10 +165,12 @@ type PaperPageFetcher interface {
 	FetchPaperPage(ctx context.Context, asin string) (PaperPageResult, error)
 }
 
-// PaperCandidateStore は paper_books_asins.json へのASIN単位冪等upsertと変更検知を担う（SPECIFICATION.md 13.4/15）。
-// Amazon 由来 field の追加・変更があった場合だけ changed=true を返し、未変更重複では Gist job を増やさない。
+// PaperCandidateStore は paper_books_asins.json へのASIN単位冪等upsertと存在判定を担う（SPECIFICATION.md 13.3/13.4/15）。
+// Amazon 由来 field の追加・変更があった場合だけ changed=true を返す。
 type PaperCandidateStore interface {
 	UpsertChanged(ctx context.Context, b book.KindleBook) (bool, error)
+	// Exists はASINが paper_books_asins.json に存在するかを返す（ISBN候補の事前除外用）。
+	Exists(ctx context.Context, asin string) (bool, error)
 }
 
 // NotifiedStore は notified_asins の保存期間適用・存在判定・冪等upsertを担う。
@@ -380,7 +382,15 @@ func enqueueCandidate(ctx context.Context, deps Dependencies, j job.Job, hit Sea
 	}
 	// SPECIFICATION.md 13.3/13.4: ISBN候補は紙経路（new_release_paper_detail）へ振り分け、捨てない。
 	// 紙候補は notified/upcoming に入れないため notified 存在判定は使わず、紙detailで paper_books へ冪等upsertする。
+	// 既存paper ASINを通常周期のdetail/Gistから事前除外するため、paper_booksの既存判定を挟む。
 	if IsISBNASIN(hit.ASIN) {
+		exists, err := deps.PaperCandidateStore.Exists(ctx, hit.ASIN)
+		if err != nil {
+			return fmt.Errorf("check paper_books %s: %w", hit.ASIN, err)
+		}
+		if exists {
+			return nil
+		}
 		return deps.Enqueuer.Enqueue(ctx, buildPaperDetailJob(j, hit))
 	}
 	exists, err := deps.NotifiedStore.Exists(ctx, hit.ASIN)
@@ -581,18 +591,14 @@ func HandleNewReleasePaperDetail(ctx context.Context, deps Dependencies, j job.J
 		MaxPrice:     price,
 		CreatedAt:    deps.Clock(),
 	}
-	changed, err := deps.PaperCandidateStore.UpsertChanged(ctx, b)
-	if err != nil {
+	if _, err := deps.PaperCandidateStore.UpsertChanged(ctx, b); err != nil {
 		return execution.Errored(errorTypePaperStore, result.HTTPStatus, result.ResponseBytes),
 			fmt.Errorf("upsert paper book %s: %w", asin, err)
 	}
-	// 変更時だけ Gist job を投入し、未変更重複での無駄な更新を避ける（SPECIFICATION.md 13.4/15）。
-	// changed=false の再配信でも paper_books は反映済みのため Gist 省略は安全。
-	if changed {
-		if err := deps.Enqueuer.Enqueue(ctx, buildNewReleasePaperGistJob(j, asin)); err != nil {
-			return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
-				fmt.Errorf("enqueue new_release paper gist: %w", err)
-		}
+	// upsert後のenqueue失敗を再配信で補完するため、changed=falseとなる再配信でもPaper Gistを投入する。
+	if err := deps.Enqueuer.Enqueue(ctx, buildNewReleasePaperGistJob(j, asin)); err != nil {
+		return execution.Errored(errorTypeEnqueueFailed, result.HTTPStatus, result.ResponseBytes),
+			fmt.Errorf("enqueue new_release paper gist: %w", err)
 	}
 	return execution.Completed(result.HTTPStatus, result.ResponseBytes), nil
 }

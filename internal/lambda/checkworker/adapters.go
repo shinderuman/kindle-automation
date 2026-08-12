@@ -41,6 +41,11 @@ func (s paperBooksStore) UpsertChanged(ctx context.Context, b book.KindleBook) (
 	return s.inner.UpsertChanged(ctx, b)
 }
 
+// Exists は paper_books_asins.json の存在判定を newrelease.PaperCandidateStore へ適合させる bridge。
+func (s paperBooksStore) Exists(ctx context.Context, asin string) (bool, error) {
+	return s.inner.Exists(ctx, asin)
+}
+
 type paperKnownStateQuerier struct{ inner *storage.KnownStateQuerier }
 
 // KnownState は storage.KnownState を papertokindle.KnownState へ変換する Papertokindle.KnownStateQuerier bridge。

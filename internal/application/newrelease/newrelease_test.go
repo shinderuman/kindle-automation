@@ -82,10 +82,14 @@ func (f *fakePaperPageFetcher) FetchPaperPage(_ context.Context, _ string) (Pape
 }
 
 type fakePaperCandidateStore struct {
-	changed   bool
-	upserts   []book.KindleBook
-	upsertErr error
-	changeFor map[string]bool
+	changed     bool
+	upserts     []book.KindleBook
+	upsertErr   error
+	changeFor   map[string]bool
+	exists      bool
+	existsErr   error
+	existsFor   map[string]bool
+	existsCalls int
 }
 
 func (s *fakePaperCandidateStore) UpsertChanged(_ context.Context, b book.KindleBook) (bool, error) {
@@ -97,6 +101,17 @@ func (s *fakePaperCandidateStore) UpsertChanged(_ context.Context, b book.Kindle
 		return s.changeFor[b.ASIN], nil
 	}
 	return s.changed, nil
+}
+
+func (s *fakePaperCandidateStore) Exists(_ context.Context, asin string) (bool, error) {
+	s.existsCalls++
+	if s.existsErr != nil {
+		return false, s.existsErr
+	}
+	if s.existsFor != nil {
+		return s.existsFor[asin], nil
+	}
+	return s.exists, nil
 }
 
 type fakeNotifiedStore struct {
@@ -1209,7 +1224,7 @@ func TestHandleNewReleasePaperDetail_DateUnavailableIsRetryable(t *testing.T) {
 	}
 }
 
-func TestHandleNewReleasePaperDetail_PriceUnknownSavesZeroAndEnqueuesGistOnChange(t *testing.T) {
+func TestHandleNewReleasePaperDetail_PriceUnknownSavesZeroAndEnqueuesGist(t *testing.T) {
 	info := paperPaperPageInfo("1234567890")
 	info.PaperPrice = book.UnknownPrice()
 	store := &fakePaperCandidateStore{changed: true}
@@ -1230,7 +1245,7 @@ func TestHandleNewReleasePaperDetail_PriceUnknownSavesZeroAndEnqueuesGistOnChang
 	}
 }
 
-func TestHandleNewReleasePaperDetail_UnchangedSkipsGist(t *testing.T) {
+func TestHandleNewReleasePaperDetail_EnqueuesGistEvenWhenUnchanged(t *testing.T) {
 	store := &fakePaperCandidateStore{changed: false}
 	deps := baseDeps()
 	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
@@ -1243,8 +1258,8 @@ func TestHandleNewReleasePaperDetail_UnchangedSkipsGist(t *testing.T) {
 		t.Errorf("upsert still runs to keep idempotency, got %d", len(store.upserts))
 	}
 	enq := deps.Enqueuer.(*fakeEnqueuer)
-	if len(enq.jobs) != 0 {
-		t.Errorf("unchanged paper_books must not enqueue gist, got %+v", enq.jobs)
+	if len(enq.jobs) != 1 || enq.jobs[0].Target.GistType != "paper_to_kindle" {
+		t.Errorf("upsert success must enqueue paper gist even when changed=false: %+v", enq.jobs)
 	}
 }
 
@@ -1389,5 +1404,112 @@ func TestHandleNewReleasePaperDetail_GistJobIdIsDeterministicPerASIN(t *testing.
 	want := scheduling.JobID(string(job.KindGistUpdate), "nr:c", "paper_to_kindle:nr_paper:1234567890")
 	if enq.jobs[0].JobID != want {
 		t.Errorf("gist job_id = %q, want %q", enq.jobs[0].JobID, want)
+	}
+}
+
+type reconcilePaperStore struct {
+	upserts int
+}
+
+func (s *reconcilePaperStore) UpsertChanged(_ context.Context, b book.KindleBook) (bool, error) {
+	s.upserts++
+	if s.upserts == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *reconcilePaperStore) Exists(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+func TestHandleNewReleasePaperDetail_GistReconcilesAcrossEnqueueFailureAndRedelivery(t *testing.T) {
+	store := &reconcilePaperStore{}
+	enq := &reconcileEnqueuer{failFirst: true}
+	deps := baseDeps()
+	deps.PaperPageFetcher.(*fakePaperPageFetcher).result = PaperPageResult{Category: ProductOK, Info: paperPaperPageInfo("1234567890")}
+	deps.PaperCandidateStore = store
+	deps.Enqueuer = enq
+	j := paperDetailJob("1234567890", "海李")
+
+	oc1, err1 := HandleNewReleasePaperDetail(context.Background(), deps, j)
+	if err1 == nil {
+		t.Fatalf("first run: paper saved then gist enqueue failure must return error, got %+v", oc1)
+	}
+	if oc1.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("first run error_type = %q, want %q", oc1.ErrorType, errorTypeEnqueueFailed)
+	}
+	if store.upserts != 1 {
+		t.Errorf("first run: paper upsert count = %d, want 1", store.upserts)
+	}
+	if len(enq.jobs) != 0 {
+		t.Errorf("first run: gist must not be recorded as enqueued on failure")
+	}
+
+	oc2, err2 := HandleNewReleasePaperDetail(context.Background(), deps, j)
+	if err2 != nil {
+		t.Fatalf("second run (redelivery): must succeed with gist reconciled: %v", err2)
+	}
+	if oc2.Result != execution.ResultCompleted {
+		t.Errorf("second run result = %v, want completed", oc2.Result)
+	}
+	if store.upserts != 2 {
+		t.Errorf("second run: paper upsert count = %d, want 2", store.upserts)
+	}
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindGistUpdate || enq.jobs[0].Target.GistType != "paper_to_kindle" {
+		t.Fatalf("second run: gist job must be enqueued even with changed=false: %+v", enq.jobs)
+	}
+	wantID := buildNewReleasePaperGistJob(j, "1234567890").JobID
+	if enq.jobs[0].JobID != wantID {
+		t.Errorf("second run gist JobID = %q, want deterministic %q", enq.jobs[0].JobID, wantID)
+	}
+}
+
+func TestHandleNewReleaseSearch_ISBNCandidateExistingPaperSkipsDetail(t *testing.T) {
+	isbn := completeHit("1234567890123")
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.PaperCandidateStore.(*fakePaperCandidateStore).exists = true
+
+	if _, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李")); err != nil {
+		t.Fatalf("HandleNewReleaseSearch: %v", err)
+	}
+	if got := len(deps.Enqueuer.(*fakeEnqueuer).jobs); got != 0 {
+		t.Errorf("ISBN candidate already in paper_books must not enqueue detail, got %d", got)
+	}
+}
+
+func TestHandleNewReleaseSearch_ISBNCandidatePaperExistsErrorPropagates(t *testing.T) {
+	isbn := completeHit("1234567890")
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{isbn}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.PaperCandidateStore.(*fakePaperCandidateStore).existsErr = errors.New("paper_books s3 failed")
+
+	oc, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李"))
+	if err == nil {
+		t.Fatal("paper_books exists error must propagate")
+	}
+	if oc.ErrorType != errorTypeEnqueueFailed {
+		t.Errorf("error_type = %q, want %q", oc.ErrorType, errorTypeEnqueueFailed)
+	}
+}
+
+func TestHandleNewReleaseSearch_ISBNExistsCheckDoesNotAffectKindleCandidates(t *testing.T) {
+	fetcher := &fakeSearchFetcher{result: SearchResult{Category: SearchOK, Hits: []SearchHit{completeHit("B0FX3X569X")}}}
+	deps := baseDeps()
+	deps.SearchFetcher = fetcher
+	deps.PaperCandidateStore.(*fakePaperCandidateStore).exists = true
+
+	if _, err := HandleNewReleaseSearch(context.Background(), deps, searchJob("海李")); err != nil {
+		t.Fatalf("HandleNewReleaseSearch: %v", err)
+	}
+	enq := deps.Enqueuer.(*fakeEnqueuer)
+	if len(enq.jobs) != 1 || enq.jobs[0].Kind != job.KindNewReleaseResult {
+		t.Fatalf("Kindle candidate must route to result regardless of paper exists flag, got %+v", enq.jobs)
+	}
+	if deps.PaperCandidateStore.(*fakePaperCandidateStore).existsCalls != 0 {
+		t.Errorf("paper exists check must not run for Kindle candidates")
 	}
 }

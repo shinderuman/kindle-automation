@@ -254,7 +254,7 @@ Amazon系の1件が再試行中は、`amazon-requests`の後続ジョブを待�
 | `paper_to_kindle_detail` | `amazon-requests` | Kindle商品ページ1回 | Kindle版候補の検証と保存 |
 | `gist_update` | `external-updates` | 0回 | Sale、Author、Paper-to-Kindle Gistの再生成 |
 
-検索結果で必須項目が揃った候補は候補ごとに`new_release_result`、不足する候補は候補ごとに`new_release_detail`を投入する。検索job自身は候補のS3保存と商品通知を行わない。検索候補ASINが10〜13桁の数字だけのISBNの場合は`new_release_result`にも`new_release_detail`にも入れず、候補ごとに`new_release_paper_detail`を投入して紙書籍候補として検証する（§13.4）。ISBN候補を候補段階で除外しない。紙書籍ページでKindle版を検出した場合も同様に`paper_to_kindle_detail`を投入する。
+検索結果で必須項目が揃った候補は候補ごとに`new_release_result`、不足する候補は候補ごとに`new_release_detail`を投入する。検索job自身は候補のS3保存と商品通知を行わない。検索候補ASINが10〜13桁の数字だけのISBNの場合は`new_release_result`にも`new_release_detail`にも入れず、候補ごとに`new_release_paper_detail`を投入して紙書籍候補として検証する（§13.4）。ただし最新の`paper_books_asins.json`に同ASINが既存の場合は投入しない（§13.3）。ISBN候補を候補段階で除外しない。紙書籍ページでKindle版を検出した場合も同様に`paper_to_kindle_detail`を投入する。
 
 `schedule-checks`は`SendMessageBatch`の10件単位を順番に送信し、並列送信しない。セール周回では全`sale_check`の送信成功後にだけ`sale_finalize`を送る。batch内に失敗entryが1件でもあればdispatchを失敗させ、同じ`cycle_id`と`job_id`でScheduler再試行を受ける。
 
@@ -640,7 +640,7 @@ https://www.amazon.co.jp/s?k={URLエンコードした作者名}&i=digital-text&
 - タイトルに`\d{4}年\d{1,2}月`を含む
 - 検索結果の作者表記が対象作者と一致しない
 
-ASINが10〜13桁の数字だけで構成される紙書籍ISBN候補は、ここで除外せず`new_release_paper_detail`へ回す（§13.4）。ISBN候補は`notified_asins.json`の通知履歴確認対象外とし、重複除外は`paper_books_asins.json`のASIN単位upsertで冪等に行う。
+ASINが10〜13桁の数字だけで構成される紙書籍ISBN候補は、ここで除外せず`new_release_paper_detail`へ回す（§13.4）。ISBN候補は`notified_asins.json`の通知履歴確認対象外とし、代わりに最新の`paper_books_asins.json`に同ASINが既存かを確認する。既存なら手動編集含め既に正本へ保持されているため`new_release_paper_detail`を投入せず、通常周期で既存ASINのdetailとGistを繰り返さない。新規の場合だけ`new_release_paper_detail`を投入し、重複除外はpaper側のASIN単位upsertで冪等に行う。この存在確認はS3読み取りであり検索jobのAmazonアクセス回数（最大1回）には影響しない。
 
 作者名の比較では、全角ASCIIを半角へ変換し、全角・半角スペースを除去した正規化名同士を比較する。contributor 表記は役割（`(著)`等）や販売者・日付が混入し得るため、各 contributor ごとに役割表記を除去して正規化した完全名を作り、対象作者の正規化名と完全一致する contributor が1つでもあれば一致とする。空白で分解した姓・名トークン単位の部分一致は見逃しや誤検出を生むため行わない（例: contributor`山田 太郎`を`山田`/`太郎`に分けて対象`山田次郎`へ部分一致させることはしない）。
 
@@ -687,7 +687,7 @@ Kindle種別は検索URLの`i=digital-text`だけで確定せず、カード内�
 
 ISBN紙書籍候補は`paper_books_asins.json`へ既存schema・ASIN単位・既保存ルールでupsertする。手動レコード・未知フィールド・`CreatedAt`・ETag競合時merge・重複排除・並び順・手動削除復活禁止の既存契約（§9.2, §9.4, §9.5）を維持する。ISBN候補を`notified_asins.json`、`upcoming_asins.json`、`unprocessed_asins.json`へ入れず、`authors.json`の`LatestRelease`を更新しない。Kindle版スウォッチ検出後の振る舞いは既存のPaper-to-Kindle Scheduler/Checker（§14）へ委ねる。
 
-`paper_books_asins.json`へ内容が実際に追加・変更された場合だけ、Paper-to-Kindle用`gist_update`を決定的なIDで投入する（§15）。同一内容の重複upsertではGist更新jobを投入せず、不要なGist更新を増やさない。
+`paper_books_asins.json`へのupsert成功後は、内容の追加・変更（`changed`）にかかわらず、Paper-to-Kindle用`gist_update`を決定的なIDで投入する（§15）。初回のenqueueが失敗してSQS再配信された場合、再実行では`changed=false`となるが、同じ決定的`job_id`でGist jobを再投入し「S3更新済み・Gist enqueueだけ失敗」の欠落をreconcileする（7.5）。Gistは`paper_books_asins.json`全体から毎回再生成するため冗長な再投入は安全であり、FIFOの5分重複排除だけを正しさの根拠にしない。通常周期では検索側の既存paper判定（§13.3）により既存ASINのdetail/Gistを繰り返さない。
 
 ### 13.5 作者の最新作更新
 
@@ -775,7 +775,7 @@ Amazon内検索によるKindle候補探索は行わない。UserScriptと同様�
 |---|---|---|
 | Sale | `sale_finalize`が`gist_update`を投入 | 発売日降順の`unprocessed_asins.json` |
 | New Release | accepted candidate処理後に`gist_update`を投入 | 作者、作者URL、最新発売日、最新作、最新作URLの表 |
-| Paper-to-Kindle | 紙書籍価格を取得できたcheck成功時、候補検出後のdetail成功時、ISBN紙書籍候補の`new_release_paper_detail`成功かつ`paper_books_asins.json`へ追加・変更があった場合に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
+| Paper-to-Kindle | 紙書籍価格を取得できたcheck成功時、候補検出後のdetail成功時、ISBN紙書籍候補の`new_release_paper_detail`のpaper_books upsert成功後（追加・変更にかかわらず）に`gist_update`を投入 | 発売日降順の`paper_books_asins.json` |
 
 Gist IDとfilenameは既存`checker_configs.json`の値を使用する。`gist_update`は実行時点のS3全体からMarkdownを再生成する。GitHub API失敗は当該Gistジョブのエラーとして再試行し、先に完了したS3更新は巻き戻さない。
 
@@ -1099,7 +1099,8 @@ S3 backupを配列全体で無条件に上書きしてロールバックしな�
 - ISBN候補が`new_release_paper_detail`へ回り、Kindle候補経路へ入らない
 - 紙書籍候補の詳細確認（ASIN・タイトル・作者・発売日検証、価格0/未取得の保存）
 - MinPrice除外（Kindle候補と紙書籍候補の220/221除外・222通過、価格0は除外対象外）
-- `paper_books_asins.json`の変更検知によるPaper Gist投入と、未変更重複のスキップ
+- `paper_books_asins.json`のupsert成功後にPaper Gistを常に投入し、enqueue失敗の再配信で`changed=false`でもreconcileすること
+- 検索側で既存paper ISBNの`new_release_paper_detail`投入をスキップし、新規paper ISBNだけ投入すること
 - `checker_configs.json`設定対象形状、旧フィールド削除、MinPrice必須validation
 
 ### 22.2 HTML fixtureテスト
@@ -1139,7 +1140,7 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - 検索・紙書籍確認から後続ジョブを投入する
 - 新刊検索job自身がS3保存と商品通知を行わない
 - 検索項目が揃う候補は`new_release_result`、不足候補は`new_release_detail`になる
-- ISBN候補が`new_release_paper_detail`へ投入され、商品ページを最大1回取得する
+- ISBN候補が`new_release_paper_detail`へ投入され、商品ページを最大1回取得する。ただし`paper_books_asins.json`に既存のISBNは投入しない（§13.3）
 - ISBN紙書籍候補が`notified`/`upcoming`/`unprocessed`へ入らず`authors.LatestRelease`を更新しない
 - S3変更後のGist更新を0リクエストの別ジョブとして再試行できる
 - `checker_configs.json`移行のdry-run/apply/`If-Match`回帰テスト

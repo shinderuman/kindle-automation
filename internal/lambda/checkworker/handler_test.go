@@ -87,6 +87,10 @@ func (nrPaperStoreStub) UpsertChanged(context.Context, book.KindleBook) (bool, e
 	return false, nil
 }
 
+func (nrPaperStoreStub) Exists(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 func newWorker(saleF *countSaleFetcher, nrF *countNRFetcher, paperF *countPaperFetcher, gistDeps gist.Dependencies) *Worker {
 	clock := func() time.Time { return time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC) }
 	store := storage.NewMemStore()
