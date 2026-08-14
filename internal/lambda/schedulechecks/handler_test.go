@@ -27,10 +27,6 @@ func (e *recordingEnqueuer) EnqueueBatch(_ context.Context, jobs []job.Job) erro
 	return nil
 }
 
-type fakeMerger struct{}
-
-func (fakeMerger) MergeUpcoming(_ context.Context) (int, error) { return 0, nil }
-
 type enabledConfig struct{}
 
 func (enabledConfig) IsEnabled(_ context.Context, _ job.CheckType) (bool, error) { return true, nil }
@@ -56,7 +52,6 @@ func newScheduler(store storage.ObjectStore, enq *recordingEnqueuer, sender *fak
 			AuthorReader:   authorReader{store: store},
 			ConfigReader:   enabledConfig{},
 			Enqueuer:       enq,
-			UpcomingMerger: fakeMerger{},
 			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 		ErrorSender: sender,
@@ -82,6 +77,44 @@ func TestHandleEvent_SchedulerRouteDispatches(t *testing.T) {
 	}
 	if finalize != 1 {
 		t.Errorf("sale_finalize count = %d, want 1 (jobs=%v)", finalize, enq.jobs)
+	}
+}
+
+func TestHandleEvent_SaleDispatchKeepsUpcomingAndManualUnprocessed(t *testing.T) {
+	store := storage.NewMemStore()
+	// unprocessed_asins.json は人間が macFUSE 経由で手動追加するSale追跡対象（SPECIFICATION.md 9.1/10）。
+	// upcoming は人間未承認候補の staging であり、dispatch はこれへ触れない。
+	store.Seed("unprocessed_asins.json", `[{"ASIN":"B0MANUAL0001","Title":"手動","ReleaseDate":"2026-01-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-01-01T00:00:00Z"}]`)
+	upcomingBody := `[{"ASIN":"B0UPCOMING01","Title":"候補","ReleaseDate":"2026-09-01T00:00:00Z","CurrentPrice":0,"MaxPrice":0,"URL":"","CreatedAt":"2026-08-01T00:00:00Z"}]`
+	store.Seed("upcoming_asins.json", upcomingBody)
+	enq := &recordingEnqueuer{}
+	sched := newScheduler(store, enq, nil)
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
+
+	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	upcomingObj, err := store.Get(context.Background(), "upcoming_asins.json")
+	if err != nil {
+		t.Fatalf("get upcoming: %v", err)
+	}
+	if string(upcomingObj.Body) != upcomingBody {
+		t.Errorf("upcoming must not be merged or cleared by sale dispatch: %s", upcomingObj.Body)
+	}
+	unprocessedObj, err := store.Get(context.Background(), "unprocessed_asins.json")
+	if err != nil {
+		t.Fatalf("get unprocessed: %v", err)
+	}
+	if !strings.Contains(string(unprocessedObj.Body), "B0MANUAL0001") {
+		t.Errorf("manual unprocessed record lost: %s", unprocessedObj.Body)
+	}
+	if strings.Contains(string(unprocessedObj.Body), "B0UPCOMING01") {
+		t.Errorf("upcoming ASIN must not be merged into unprocessed: %s", unprocessedObj.Body)
+	}
+	for _, j := range enq.jobs {
+		if j.Kind == job.KindSaleCheck && j.Target.ASIN == "B0UPCOMING01" {
+			t.Errorf("upcoming ASIN must not be dispatched as sale target: %+v", j)
+		}
 	}
 }
 
@@ -177,7 +210,6 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 			AuthorReader:   authorReader{store: store},
 			ConfigReader:   checkerConfigReader{store: store, key: "checker_configs.json"},
 			Enqueuer:       enq,
-			UpcomingMerger: fakeMerger{},
 			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 	}
@@ -214,10 +246,9 @@ func TestHandleEvent_CheckerConfigLoadFailurePropagates(t *testing.T) {
 	enq := &recordingEnqueuer{}
 	sched := &Scheduler{
 		Deps: dispatch.Dependencies{
-			ConfigReader:   checkerConfigReader{store: failingConfigStore{}, key: "checker_configs.json"},
-			Enqueuer:       enq,
-			UpcomingMerger: fakeMerger{},
-			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
+			ConfigReader: checkerConfigReader{store: failingConfigStore{}, key: "checker_configs.json"},
+			Enqueuer:     enq,
+			Keys:         dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 	}
 	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
@@ -245,7 +276,6 @@ func TestHandleEvent_DispatchEnqueueFailurePropagates(t *testing.T) {
 			AuthorReader:   authorReader{store: store},
 			ConfigReader:   enabledConfig{},
 			Enqueuer:       &failingEnqueuer{err: errors.New("sqs throttled")},
-			UpcomingMerger: fakeMerger{},
 			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 	}

@@ -54,7 +54,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 | §6 | EventBridge Scheduler 入力 JSON 形式, cron, `cycle_id` 生成 | `infra/template.yaml`, `internal/domain/scheduling`, `internal/lambda/schedulechecks/dto.go` |
 | §7 | MessageGroupId(amazon-requests/external-updates), MessageDeduplicationId=SHA-256 hex, BatchSize=1, SendMessageBatch 10件単位, sale_finalize の最終単独送信 | `internal/job/job.go`, `internal/queue/queue.go`, `internal/application/dispatch/dispatch.go` |
 | §9.2 / §9.3 | 4スペース indent, `&` 非変換, 発売日降順/同日タイトル昇順, 未知 field 保持 | `internal/storage/codec.go` |
-| §9.5 / §10 | If-Match 条件付き書き込み, 412 時最大3回再 merge, Upcoming ETag 不変時のみ空配列化 | `internal/storage/merge.go`, `internal/storage/highlevel.go` |
+| §9.5 / §10 | If-Match 条件付き書き込み, 412 時最大3回再 merge, upcoming の自動 merge/clear 不存在（notified/upcoming upsert のみ） | `internal/storage/merge.go`, `internal/storage/highlevel.go` |
 | §11.3 | 404/asin_mismatch/not_kindle/permanent 4xx=terminal, 403/429/5xx/timeout/CAPTCHA/body超過/構造欠落/解析失敗=retryable | `internal/amazon/client.go`, `internal/amazon/response.go`, 各 application |
 | §12.3 / §12.4 / §12.5 | セール4条件の独立性, 紙書籍価格不使用, セール成立時も MaxPrice/CurrentPrice 更新, 価格変動通知との排他 | `internal/domain/sale/sale.go`, `internal/domain/book/book.go`, `internal/application/sale/sale.go` |
 | §13.3 | 対象作者名と contributor 表記を正規化した完全名同士で完全一致比較する。空白トークン部分一致は行わず、姓だけ同一の別人を誤検出しない | `internal/application/newrelease/newrelease.go` |

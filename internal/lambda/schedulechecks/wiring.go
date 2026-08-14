@@ -69,9 +69,8 @@ func buildScheduler(ctx context.Context) (*Scheduler, error) {
 		AuthorReader:   authorReader{store: store},
 		// checker_configs.json は手動更新され得る可変設定のため、IsEnabled の呼び出しごとに
 		// 最新値を読む（cold start に固定しない）。store/key は不変なので cold start 再利用できる。
-		ConfigReader:   checkerConfigReader{store: store, key: env.CheckerConfigKey},
-		Enqueuer:       queue.NewEnqueuer(sqsClient, env.QueueURL, logger),
-		UpcomingMerger: upcomingMerger{store: store, unprocessedKey: env.UnprocessedKey, upcomingKey: env.UpcomingKey},
+		ConfigReader: checkerConfigReader{store: store, key: env.CheckerConfigKey},
+		Enqueuer:     queue.NewEnqueuer(sqsClient, env.QueueURL, logger),
 		Keys: dispatch.Keys{
 			Unprocessed: env.UnprocessedKey,
 			Authors:     env.AuthorsKey,

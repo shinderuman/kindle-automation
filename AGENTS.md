@@ -209,7 +209,6 @@ job schemaを変更する場合は`version`を使って後方互換性または�
 - 紙書籍とKindle版の対応判定
 - Author、Bookの重複排除と並び順
 - `cycle_id`、`job_id`生成
-- Upcomingのmerge・消去可否判定
 
 セールの価格差、ポイント数、ポイント還元率、クーポンは独立した条件とし、主従を設けない。紙書籍価格とKindle価格の差はセール条件に使用しない。
 
@@ -234,10 +233,11 @@ job schemaを変更する場合は`version`を使って後方互換性または�
 
 - 新刊・Kindle版検出結果を`unprocessed_asins.json`へ直接追加しない
 - `notified_asins.json`と`upcoming_asins.json`へupsertする
-- セールdispatch開始時にUpcomingをUnprocessedへ条件付きmergeする
-- 重複ASINは既存Unprocessed側を優先する
-- UpcomingのETagが変わっていない場合だけ空配列にする
-- 処理中に追加されたUpcomingを消去しない
+- upcomingからunprocessedへの自動merge、upcomingの自動clearを実装しない。該当するinterface・設定・ログ・テストを追加しない
+- `upcoming_asins.json`は自動検出済み・人間未承認のKindle候補。人間確認待ちのステージング領域であり、削除は人間の手動操作だけ
+- `unprocessed_asins.json`は人間がmacFUSE経由で手動追加するSale追跡対象の正本。自動処理は価格履歴更新のためだけに書き、対象を追加しない
+- `notified_asins.json`は再通知防止と既存`release-notifier`の発売日通知用の通知履歴であり、人間承認を意味しない
+- `release-notifier`のnotifiedとunprocessedの参照仕様を変更しない
 - DynamoDBや分散lockを追加しない
 
 ## 8. 設定と秘密情報
@@ -293,7 +293,9 @@ Go標準`testing` packageを使用し、table-driven testを優先する。test�
 - Amazon商品・検索HTML fixtureの抽出
 - CAPTCHA、短い200、404、要素欠落、価格解析失敗の分類
 - S3 JSONの入出力契約と未知field保持
-- ETag競合、手動追加、手動削除、Upcoming競合
+- ETag競合、手動追加、手動削除
+- 新刊検出時のnotified/upcoming upsert、通知、unprocessed非更新
+- セール周期のdispatchでupcomingがmergeもclearもされず、unprocessedの手動レコードが保持される
 - 外部adapterをstubへ差し替えた各ユースケース
 - Lambdaハンドラーのevent decodeとerror伝播
 - 通知とGistの失敗時の状態
@@ -380,7 +382,7 @@ go build -o /dev/null .
 - Lambda handlerが薄い
 - domainがAWS SDKとHTTPに依存していない
 - 既存S3 schema、未知field、手動編集が保持される
-- Upcoming競合処理が維持される
+- upcomingからunprocessedへの自動mergeとupcomingの自動clearが存在しない
 - セール4条件が独立し、紙書籍価格を使っていない
 - セール成立時も価格履歴を保存する
 - クーポンの直接text nodeを抽出する

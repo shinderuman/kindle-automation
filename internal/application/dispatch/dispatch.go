@@ -48,18 +48,12 @@ type Enqueuer interface {
 	EnqueueBatch(ctx context.Context, jobs []job.Job) error
 }
 
-// UpcomingMerger はセール周期開始時の Upcoming→Unprocessed 条件付き merge 抽象（SPECIFICATION.md 10）。
-type UpcomingMerger interface {
-	MergeUpcoming(ctx context.Context) (int, error)
-}
-
 // Dependencies は Run へ注入する dispatch ユースケースの依存セット。
 type Dependencies struct {
 	AsinListReader AsinListReader
 	AuthorReader   AuthorReader
 	ConfigReader   ConfigReader
 	Enqueuer       Enqueuer
-	UpcomingMerger UpcomingMerger
 	Keys           Keys
 }
 
@@ -72,7 +66,6 @@ type DispatchResult struct {
 	CycleTargetCount int
 	TargetCount      int
 	EnqueuedCount    int
-	UpcomingMerged   int
 	SlotIndex        int
 	SlotCount        int
 }
@@ -129,13 +122,6 @@ func cycleWindow(checkType job.CheckType) (time.Duration, error) {
 }
 
 func runSale(ctx context.Context, deps Dependencies, event Event, result DispatchResult) (DispatchResult, error) {
-	if result.SlotIndex == 0 {
-		merged, err := deps.UpcomingMerger.MergeUpcoming(ctx)
-		if err != nil {
-			return DispatchResult{}, fmt.Errorf("merge upcoming: %w", err)
-		}
-		result.UpcomingMerged = merged
-	}
 	asins, err := deps.AsinListReader.LoadAsins(ctx, deps.Keys.Unprocessed)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("load unprocessed: %w", err)

@@ -7,9 +7,6 @@ import (
 	"github.com/shinderuman/kindle-automation/internal/storage"
 )
 
-// mergeMaxRetries は Upcoming→Unprocessed 条件付き merge の前提不一致再試行回数（SPECIFICATION.md 9.5 は最大3回）。
-const mergeMaxRetries = 3
-
 type asinListReader struct{ store storage.ObjectStore }
 
 // LoadAsins は対象 object の全 ASIN を返す。対象 object（unprocessed_asins・paper_books_asins）は
@@ -49,15 +46,4 @@ func (r authorReader) LoadAuthorNames(ctx context.Context, key string) ([]string
 		names = append(names, rec.Author.Name)
 	}
 	return names, nil
-}
-
-type upcomingMerger struct {
-	store          storage.ObjectStore
-	unprocessedKey string
-	upcomingKey    string
-}
-
-// MergeUpcoming は Upcoming を Unprocessed へ条件付き merge する（SPECIFICATION.md 10）。
-func (m upcomingMerger) MergeUpcoming(ctx context.Context) (int, error) {
-	return storage.MergeUpcoming(ctx, m.store, m.unprocessedKey, m.upcomingKey, mergeMaxRetries)
 }

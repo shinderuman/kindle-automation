@@ -39,7 +39,7 @@ func (s *Scheduler) HandleSchedule(ctx context.Context, event dispatch.Event) er
 }
 
 // logCycle は Disabled のとき cycle_disabled、それ以外は cycle_dispatched へ
-// target_count/enqueued_count/upcoming_merged を含める（SPECIFICATION.md 18.3）。
+// target_count/enqueued_count を含める（SPECIFICATION.md 18.3）。
 func (s *Scheduler) logCycle(ctx context.Context, event dispatch.Event, result dispatch.DispatchResult) {
 	if s.Logger == nil {
 		return
@@ -58,7 +58,6 @@ func (s *Scheduler) logCycle(ctx context.Context, event dispatch.Event, result d
 		slog.Int("cycle_target_count", result.CycleTargetCount),
 		slog.Int("target_count", result.TargetCount),
 		slog.Int("enqueued_count", result.EnqueuedCount),
-		slog.Int("upcoming_merged", result.UpcomingMerged),
 	)
 	s.Logger.LogAttrs(ctx, slog.LevelInfo, logging.EventCycleDispatched, attrs...)
 }

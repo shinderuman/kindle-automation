@@ -79,9 +79,7 @@ func UpdatePriceHistory(old KindleBook, current Price, now time.Time) KindleBook
 	return updated
 }
 
-// DedupBooks は ASIN が同一の書籍を先頭出現優先で重複排除する（SPECIFICATION.md 9.2/10）。
-// SPECIFICATION.md 10 の「重複時は既存 unprocessed 側を優先」は、
-// 呼び出し側で append(original, upcoming...) の順序を保証することで実現する。
+// DedupBooks は ASIN が同一の書籍を先頭出現優先で重複排除する（SPECIFICATION.md 9.2）。
 // ASIN が空のレコードは重複排除の判定対象にできず、そのまま残す。
 func DedupBooks(books []KindleBook) []KindleBook {
 	seen := make(map[string]struct{})

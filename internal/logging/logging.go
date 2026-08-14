@@ -21,7 +21,7 @@ import (
 // 周回・job・通知・Gist・Alarmの各結果を表す。metric filter は level=ERROR で集計するため、
 // これらのイベント名自体は metric 分割に使わない（18.2）。
 const (
-	// EventCycleDispatched は周回が対象 job の投入を完了したことを記録する（target_count・enqueued_count・upcoming_merged を含む）。
+	// EventCycleDispatched は周回が対象 job の投入を完了したことを記録する（target_count・enqueued_count を含む）。
 	EventCycleDispatched = "cycle_dispatched"
 	// EventCycleDisabled は Checker 設定で check_type が無効なため投入を省略したことを記録する。
 	EventCycleDisabled = "cycle_disabled"

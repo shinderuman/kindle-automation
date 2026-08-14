@@ -62,24 +62,12 @@ func (f fakeConfig) IsEnabled(_ context.Context, _ job.CheckType) (bool, error) 
 	return f.enabled, f.err
 }
 
-type fakeUpcoming struct {
-	calls  int
-	merged int
-	err    error
-}
-
-func (f *fakeUpcoming) MergeUpcoming(_ context.Context) (int, error) {
-	f.calls++
-	return f.merged, f.err
-}
-
 func baseDeps(enq *fakeEnqueuer) Dependencies {
 	return Dependencies{
 		AsinListReader: fakeAsinReader{},
 		AuthorReader:   fakeAuthorReader{},
 		ConfigReader:   fakeConfig{enabled: true},
 		Enqueuer:       enq,
-		UpcomingMerger: &fakeUpcoming{},
 		Keys:           Keys{Unprocessed: "unprocessed", Authors: "authors", PaperBooks: "paper"},
 	}
 }
@@ -116,11 +104,9 @@ func valuesForSlot(t *testing.T, prefix string, count, slot, slotCount int) []st
 	return values
 }
 
-func TestRun_SaleFirstSlotMergesUpcomingAndEnqueuesOnlyItsShard(t *testing.T) {
+func TestRun_SaleFirstSlotEnqueuesOnlyItsShard(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
-	upcoming := &fakeUpcoming{merged: 7}
 	deps := baseDeps(enq)
-	deps.UpcomingMerger = upcoming
 	selected := valuesForSlot(t, "B0SALE", 2, 0, 24)
 	other := valuesForSlot(t, "B0OTHER", 1, 1, 24)[0]
 	deps.AsinListReader = fakeAsinReader{asins: []string{selected[0], other, selected[1]}}
@@ -138,29 +124,11 @@ func TestRun_SaleFirstSlotMergesUpcomingAndEnqueuesOnlyItsShard(t *testing.T) {
 			t.Errorf("unexpected job: %+v", queued)
 		}
 	}
-	if upcoming.calls != 1 || result.UpcomingMerged != 7 {
-		t.Errorf("upcoming calls=%d merged=%d", upcoming.calls, result.UpcomingMerged)
-	}
 	if result.CycleID != "sale:2026-08-14T15:00:00Z" || result.SlotIndex != 0 || result.SlotCount != 24 {
 		t.Errorf("cycle metadata = %+v", result)
 	}
 	if result.CycleTargetCount != 3 || result.TargetCount != 2 || result.EnqueuedCount != 2 {
 		t.Errorf("counts = %+v", result)
-	}
-}
-
-func TestRun_SaleNonFirstSlotDoesNotMergeUpcoming(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	upcoming := &fakeUpcoming{}
-	deps := baseDeps(enq)
-	deps.UpcomingMerger = upcoming
-	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 1, 1, 24)}
-
-	if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 1)); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if upcoming.calls != 0 {
-		t.Errorf("MergeUpcoming calls = %d, want 0", upcoming.calls)
 	}
 }
 
@@ -427,11 +395,6 @@ func TestRun_PropagatesDependencyFailures(t *testing.T) {
 			setup: func(deps *Dependencies) {
 				deps.ConfigReader = fakeConfig{enabled: true, err: errors.New("config down")}
 			},
-		},
-		{
-			name:  "upcoming",
-			event: eventAtSlot(job.CheckSale, 0),
-			setup: func(deps *Dependencies) { deps.UpcomingMerger = &fakeUpcoming{err: errors.New("merge down")} },
 		},
 		{
 			name:  "unprocessed",

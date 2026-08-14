@@ -33,7 +33,6 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 		CycleTargetCount: 271,
 		TargetCount:      5,
 		EnqueuedCount:    6,
-		UpcomingMerged:   2,
 		SlotIndex:        23,
 		SlotCount:        24,
 	}
@@ -62,9 +61,6 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	if m["enqueued_count"] != float64(6) {
 		t.Errorf("enqueued_count = %v, want 6", m["enqueued_count"])
 	}
-	if m["upcoming_merged"] != float64(2) {
-		t.Errorf("upcoming_merged = %v, want 2", m["upcoming_merged"])
-	}
 	if m["slot_index"] != float64(23) || m["slot_count"] != float64(24) {
 		t.Errorf("slot = (%v, %v), want (23, 24)", m["slot_index"], m["slot_count"])
 	}
@@ -91,7 +87,7 @@ func TestLogCycle_DisabledWhenCheckerOff(t *testing.T) {
 	if m["cycle_id"] != result.CycleID || m["slot_index"] != float64(36) || m["slot_count"] != float64(72) {
 		t.Errorf("cycle metadata = %v", m)
 	}
-	for _, k := range []string{"target_count", "enqueued_count", "upcoming_merged"} {
+	for _, k := range []string{"target_count", "enqueued_count"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("disabled cycle must not include %s", k)
 		}

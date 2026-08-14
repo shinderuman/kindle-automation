@@ -102,7 +102,6 @@ Lambda関数は2本とする。
 - 対象の重複排除
 - 周回を識別する`cycle_id`と各`job_id`の生成
 - 対象単位のSQSメッセージ投入
-- セール周期開始時のUpcoming取り込み
 - CloudWatch Alarmイベントを受けた場合の運用Slack通知
 
 Amazonへはアクセスしない。業務判定や商品通知も行わない。
@@ -307,10 +306,10 @@ S3の複数object更新をtransactionとして扱わない。job再実行時は�
 |---|---|---|
 | `authors.json` | 新刊対象作者と最新作 | 読み書きする |
 | `paper_books_asins.json` | Kindle版待ちの紙書籍 | 読み書きする。新刊検索のISBN候補（§13.4）もここへupsertする |
-| `unprocessed_asins.json` | セール対象Kindle書籍 | 読み書きする |
+| `unprocessed_asins.json` | 人間がmacFUSE経由で手動追加するセール追跡対象Kindle書籍。自動処理は価格履歴更新のためだけに書き、対象を追加しない | 読み書きする |
 | `excluded_title_keywords.json` | 新刊除外語 | 読み取る |
-| `notified_asins.json` | 新刊通知履歴、既存発売日通知の入力 | 読み書きする |
-| `upcoming_asins.json` | 新刊・Kindle版検出からSale Checkerへの受け渡し | 読み書きする |
+| `notified_asins.json` | 新刊の再通知防止用通知履歴。既存`release-notifier`の発売日通知の入力。人間の承認を意味しない | 読み書きする |
+| `upcoming_asins.json` | 自動検出済み・人間未承認のKindle候補。人間確認待ちのステージング領域 | 読み書きする |
 | `checker_configs.json` | 有効化、判定値、Gist設定 | 読み取る |
 | `prev_index_new_release.txt` | 旧スロット位置 | 新システムでは使用せず、削除もしない |
 | `prev_index_paper_to_kindle.txt` | 旧スロット位置 | 新システムでは使用せず、削除もしない |
@@ -401,18 +400,11 @@ UserScriptのMulti Site Keybind ManagerでAmazonページ上のOption+↑を押�
     └─ upcoming_asins.jsonへupsert
 ```
 
-セール周回の`schedule-checks`は、ジョブ投入前に次を行う。
+`upcoming_asins.json`は、自動検出済み・人間未承認のKindle候補を置く人間確認待ちのステージング領域である。自動処理は検出結果のupsertだけを行い、upcomingから`unprocessed_asins.json`へのmerge、およびupcomingの空配列化（clear）を一切行わない。upcomingの内容を確認した人間が、承認した対象をmacFUSE経由で`unprocessed_asins.json`へ手動追加する。セール対象は常に`unprocessed_asins.json`の現在内容だけとする。
 
-1. `unprocessed_asins.json`と`upcoming_asins.json`を本文・ETag付きで取得する
-2. ASINで統合する。重複時は既存`unprocessed_asins.json`側を優先する
-3. 条件付き更新で統合結果を`unprocessed_asins.json`へ保存する
-4. UpcomingのETagが開始時と同じ場合だけ`upcoming_asins.json`を空配列にする
-5. Upcomingが変更されていた場合は消去せず、次のセール周回へ残す
-6. 統合後の`unprocessed_asins.json`をセール対象としてジョブ化する
+`unprocessed_asins.json`は人間が手動管理するSale追跡対象の正本であり、自動処理が対象を追加する経路を持たない。`notified_asins.json`は再通知防止の通知履歴であり、既存`release-notifier`が発売日通知の入力として参照する。人間の承認を意味せず、notifiedに存在することがupcomingやunprocessedへの登録を表さない。`release-notifier`のnotifiedとunprocessedの参照仕様は変更しない。`authors.json`は新刊対象作者と最新作の管理、`paper_books_asins.json`はKindle版待ちの紙書籍の管理に用いる。
 
-既存実装ではセール処理末尾に行っていた取り込みを、分散実行では周回開始時に行う。条件付き更新と「変更時は消去しない」という競合回避の目的は維持する。取り込み後にジョブ投入が失敗しても、対象は`unprocessed_asins.json`へ残り、次の周回で処理される。
-
-`upcoming_asins.json`は§9.1の存在必須objectであり、手順4の空配列化は同objectの再取得を前提とする。手順3で`unprocessed_asins.json`へのmergeがcommitされた後、手順4の再取得時に同objectが削除（手動削除・rename相当の`ErrObjectNotFound`）されていた場合は、空配列化成功とみなさずerrorとする。ETag変更（手順5）は手動・並行更新の保護であり、object欠落とは区別する。この時点で`unprocessed_asins.json`へのmergeは既にcommit済みであり、複数object更新をtransactionとみなさない方針（§7.5）に従い巻き戻さない。再実行時はmergeがASIN単位で冪等に補完され、Upcomingが復元されていればclearが完了する。
+upcomingは自動追加のみで、検出のたびに蓄積する。削除は人間の手動操作だけで行う。
 
 ## 11. Amazon HTTP取得
 
@@ -546,7 +538,7 @@ response byte数だけの固定下限は設けない。短い本文であって�
 - 1日: 全対象を12周
 - 1ジョブ: 1 ASIN、商品ページ1リクエスト
 
-周回先頭slotでUpcomingをUnprocessedへ統合し、24 slotへ安定ハッシュ分割して処理する。
+対象を24 slotへ安定ハッシュ分割して処理する。Upcomingの取り込みは行わない（§10）。
 
 ### 12.2 取得値
 
@@ -942,7 +934,7 @@ Cookie、Authorization、アクセストークン、Slack token、GitHub token�
 
 ### 18.3 固定イベント名
 
-- `cycle_dispatched`: 周回対象数、slot対象数、投入成功数、Upcoming取り込み数、slot番号
+- `cycle_dispatched`: 周回対象数、slot対象数、投入成功数、slot番号
 - `cycle_disabled`: Checker設定により投入を省略
 - `job_completed`: 正常処理結果
 - `job_terminal`: 404、対象種別不一致等の再試行しない結果
@@ -986,7 +978,7 @@ IAMは関数別に分ける。
 
 ### `schedule-checks`
 
-- 対象S3キーの`GetObject`、`PutObject`
+- 対象S3キーの`GetObject`
 - Work Queueへの`SendMessage`
 - 必要なSSM parameterの`GetParameter`または`GetParameters`
 - SecureStringがcustomer managed KMS keyを使用する場合だけ、そのkeyの`kms:Decrypt`
@@ -1146,9 +1138,10 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - 412後に最新本文へmergeして再試行
 - 手動追加された別ASINを保持
 - 手動削除された処理対象を再追加しない
-- 処理中にUpcomingが増えた場合に消去しない
 - 同一ASINの重複実行でレコードが増えない
 - 未知フィールドを保持する
+- 新刊検出時にnotifiedとupcomingへupsertされ、unprocessedが更新されない
+- セール周期のdispatchでもupcomingがmergeもclearもされず、unprocessedの手動レコードが保持される
 
 ### 22.4 ユースケース・ハンドラーテスト
 
@@ -1172,6 +1165,7 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - S3保存失敗時に商品通知しない
 - 通知失敗時に保存済み価格を巻き戻さない
 - `sale_finalize`が1周1回だけSale用`gist_update`を投入する
+- セール周期のdispatchがupcomingへmerge・clearを行わず、`unprocessed_asins.json`の manual record をそのまま対象にする
 
 ## 23. 受け入れ条件
 
@@ -1186,7 +1180,8 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - セール成立時も価格履歴が更新される
 - 紙書籍価格をセール判定へ使用していない
 - UserScriptと同じ方法でクーポン文言を取得できる
-- 既存S3 JSONのschema、手動追加、Upcoming競合回避を維持する
+- 既存S3 JSONのschema、手動追加、未知field保持を維持する
+- upcomingからunprocessedへの自動mergeとupcomingの自動clearが存在しない
 - 既存`release-notifier`が同じS3データで動作する
 - エラーと正常処理が同じ形式の構造化ログへ出る
 - 初期カスタムメトリクスはログ由来の単一ErrorCountだけである

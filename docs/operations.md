@@ -215,6 +215,7 @@ go run ./scripts/migrate-maxprice -bucket <BUCKET> -region <R>
 - ASIN 集合が変化しないこと。
 - 各レコードの `CurrentPrice` が変化しないこと。
 - `MaxPrice` 以外の field と未知 field（Extra）が保持されること。
+- `upcoming_asins.json` は自動検出済み・人間未承認のKindle候補。Sale 追跡対象への反映は人間が `unprocessed_asins.json` へ手動追加して行うため、本パッチは価格履歴の初期化のみを担う（§10）。
 
 ### 5.3 apply（明示指定時のみ）
 
@@ -237,3 +238,9 @@ apply 後も §5.2 の検証項目を再確認する。
 自動処理側は ETag 競合時に手動変更を読み直して merge する。
 手動側が古い copy を後から無条件 upload した場合は S3 の条件付き書き込みで検出できないため、
 上記手順で回避する。
+
+`upcoming_asins.json` は自動検出済み・人間未承認の Kindle 候補のステージング領域である（`SPECIFICATION.md` §10）。
+内容を確認した人間が承認対象を `unprocessed_asins.json`（macFUSE 経由）へ手動追加し、
+不要候補は `upcoming_asins.json` から手動削除する。自動処理が upcoming を unprocessed へ merge したり
+upcoming を空配列化したりする経路は存在しない。`notified_asins.json` は再通知防止の通知履歴であり
+人間承認を意味しないため、承認済みかどうかの判断材料には使わない。

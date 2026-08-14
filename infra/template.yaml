@@ -349,14 +349,13 @@ Resources:
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
       Policies:
+        # Upcoming 自動 merge 廃止後、schedule-checks は S3 を読み取り専用で使う（SPECIFICATION.md 10, 19）。
         - PolicyName: s3-checker-data
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
+                Action: s3:GetObject
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${S3BucketName}/*"
         - PolicyName: sqs-send
           PolicyDocument:
