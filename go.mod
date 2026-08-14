@@ -2,10 +2,7 @@ module github.com/shinderuman/kindle-automation
 
 go 1.25.0
 
-// govulncheck が検出した13件の標準ライブラリ脆弱性（crypto/tls, net/url, net/http,
-// html/template, net/textproto, crypto/x509, net @ go1.25.5）は、すべて go1.25.12 以降で修正済み。
-// 実行環境が修正済み toolchain を使うよう固定する（AGENTS.md §12 品質確認）。
-toolchain go1.25.12
+toolchain go1.25.13
 
 require (
 	github.com/PuerkitoBio/goquery v1.12.0
