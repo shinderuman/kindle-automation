@@ -88,11 +88,14 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 ### 5.2 EventBridge Scheduler
 - [ ] Scheduler 実行時に `<aws.scheduler.scheduled-time>` が入力 JSON へ展開されること。
 - [ ] 同一 Scheduler 再試行で `cycle_id` が同一になること。
+- [ ] Sale=`cron(0/5 * * * ? *)`、New Release=`cron(1/5 * * * ? *)`、Paper-to-Kindle=`cron(2/5 * * * ? *)`、timezone=`Asia/Tokyo`であること。
+- [ ] Saleの24 slot、新刊・Paperの72 slotで同じ周期窓の`cycle_id`が共通し、対象が安定ハッシュで各1 slotだけに割り当てられること。
 - [ ] `SchedulersEnabled` default false で3 Scheduler が無効状態で作成されること。
 - [ ] Scheduler RetryPolicy(maxRetry=3, maxEventAge=240), Scheduler DLQ が設定どおりこと。
 
 ### 5.3 SQS / S3 / SSM 実動作
 - [ ] Work Queue の MessageGroupId `amazon-requests` 排他で Amazon リクエストが直列化されること。
+- [ ] `cycle_dispatched`の`slot_index`、`slot_count`、`cycle_target_count`、`target_count`から、全件一括ではなく5分slot分だけが投入されること。
 - [ ] maxReceiveCount=5 到達で DLQ へ移行すること。
 - [ ] S3 `If-Match` 条件付き書き込みで 412 発生時、最大3回再 merge されること（MemStore テスト済み、実S3で確認）。
 - [ ] SSM `/myapp/secure/{KEY}` → `ParameterNotFound` 時 `/myapp/plain/{KEY}` へ fallback すること。SecureString が customer managed KMS の場合は `kms:Decrypt` 追加要否を確認。
@@ -115,6 +118,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 - [ ] `migrate-maxprice` dry-run → apply（§20.2, docs/operations.md §5）。
 - [ ] 既知HTML fixture で新Lambda 確認。
 - [ ] 手動 invoke で SQS から1件ずつ疎通確認。
+- [ ] 旧全件dispatchのWork Queue/DLQが残る場合は、messageのcycleと件数を確認し、明示承認後に派生jobだけをpurgeする（`docs/operations.md` §3.4）。S3正本は削除しない。
 - [ ] event source mapping 有効化 → 3 Scheduler 有効化。
 - [ ] 既存 `release-notifier` が有効であること。
 
@@ -141,7 +145,6 @@ ISBN形式Paper候補のrecent除外（§13.4）を含む「実作者 → `new_r
 実行（1本の疎通）:
 - scope を1作者へ絞るため、`schedule-checks` を全文一括 dispatch せず、対象作者 A の `new_release_search` 1件だけ SQS へ投入する（job schema は §8、`MessageGroupId=amazon-requests`、`MessageDeduplicationId` = `job_id` の SHA-256 hex）。投入は `aws sqs send-message` で行う。
 - event source mapping が有効なら `check-worker` が `new_release_search` を処理し、ISBN候補を `new_release_paper_detail` へ投入し、続いて同 detail を処理して `paper_books_asins.json` を upsert する。
-- 一括確認でよい場合は `aws lambda invoke --function-name <ScheduleChecksFunction> ...` で `new_release` 1周期を手動起動し、対象作者 A の経路だけ下記で検証する（他作者の経路は今回の検証対象外）。
 
 実行後に read-only で検証する（assert）:
 - `paper_books_asins.json` の VersionId が変化したか（書込発生の有無）。recent・MinPrice 両方を満たす候補なら VersionId が変わり、対象 ASIN が1件 upsert されている。recent外なら VersionId は変化せず対象 ASIN は不存在のまま。
@@ -154,4 +157,3 @@ ISBN形式Paper候補のrecent除外（§13.4）を含む「実作者 → `new_r
 
 recovery:
 - 書込結果が想定と異なる場合は、記録した VersionId を使って Versioning から対象 object の旧 version を参照・復元する（§20.4）。別 backup copy は要求しない。
-

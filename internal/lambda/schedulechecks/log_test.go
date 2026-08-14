@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/shinderuman/kindle-automation/internal/application/dispatch"
-	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
 	"github.com/shinderuman/kindle-automation/internal/logging"
 )
@@ -29,7 +28,15 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
 	event := dispatch.Event{CheckType: job.CheckSale, ScheduledAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)}
-	result := dispatch.DispatchResult{TargetCount: 5, EnqueuedCount: 6, UpcomingMerged: 2}
+	result := dispatch.DispatchResult{
+		CycleID:          "sale:2026-07-22T23:00:00Z",
+		CycleTargetCount: 271,
+		TargetCount:      5,
+		EnqueuedCount:    6,
+		UpcomingMerged:   2,
+		SlotIndex:        23,
+		SlotCount:        24,
+	}
 
 	s.logCycle(context.Background(), event, result)
 
@@ -43,8 +50,11 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	if m["check_type"] != "sale" {
 		t.Errorf("check_type = %v, want sale", m["check_type"])
 	}
-	if m["cycle_id"] != scheduling.CycleID("sale", event.ScheduledAt) {
-		t.Errorf("cycle_id = %v, want %q", m["cycle_id"], scheduling.CycleID("sale", event.ScheduledAt))
+	if m["cycle_id"] != result.CycleID {
+		t.Errorf("cycle_id = %v, want %q", m["cycle_id"], result.CycleID)
+	}
+	if m["cycle_target_count"] != float64(271) {
+		t.Errorf("cycle_target_count = %v, want 271", m["cycle_target_count"])
 	}
 	if m["target_count"] != float64(5) {
 		t.Errorf("target_count = %v, want 5", m["target_count"])
@@ -55,13 +65,16 @@ func TestLogCycle_DispatchedContainsCounts(t *testing.T) {
 	if m["upcoming_merged"] != float64(2) {
 		t.Errorf("upcoming_merged = %v, want 2", m["upcoming_merged"])
 	}
+	if m["slot_index"] != float64(23) || m["slot_count"] != float64(24) {
+		t.Errorf("slot = (%v, %v), want (23, 24)", m["slot_index"], m["slot_count"])
+	}
 }
 
 func TestLogCycle_DisabledWhenCheckerOff(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
 	event := dispatch.Event{CheckType: job.CheckNewRelease, ScheduledAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)}
-	result := dispatch.DispatchResult{Disabled: true}
+	result := dispatch.DispatchResult{Disabled: true, CycleID: "new_release:2026-07-22T21:00:00Z", SlotIndex: 36, SlotCount: 72}
 
 	s.logCycle(context.Background(), event, result)
 
@@ -74,6 +87,9 @@ func TestLogCycle_DisabledWhenCheckerOff(t *testing.T) {
 	}
 	if m["check_type"] != "new_release" {
 		t.Errorf("check_type = %v, want new_release", m["check_type"])
+	}
+	if m["cycle_id"] != result.CycleID || m["slot_index"] != float64(36) || m["slot_count"] != float64(72) {
+		t.Errorf("cycle metadata = %v", m)
 	}
 	for _, k := range []string{"target_count", "enqueued_count", "upcoming_merged"} {
 		if _, ok := m[k]; ok {

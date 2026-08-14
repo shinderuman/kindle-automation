@@ -5,3 +5,4 @@ bootstrap
 
 # SAM build・package 生成物（AGENTS.md 13）。
 .aws-sam/
+build.toml

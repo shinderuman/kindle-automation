@@ -67,86 +67,139 @@ type Dependencies struct {
 // Disabled が true のときは Checker 無効で投入を省略したことを表す。
 // composition root がこの値から cycle_dispatched または cycle_disabled を出す。
 type DispatchResult struct {
-	Disabled       bool
-	TargetCount    int // 対象件数（dedup 後）。sale は sale_check 対象のみで finalize を含まない。
-	EnqueuedCount  int // 実投入 job 数。sale は sale_check + finalize = TargetCount + 1。
-	UpcomingMerged int // sale 周回の Upcoming→Unprocessed 取り込み件数。sale 以外は 0。
+	Disabled         bool
+	CycleID          string
+	CycleTargetCount int
+	TargetCount      int
+	EnqueuedCount    int
+	UpcomingMerged   int
+	SlotIndex        int
+	SlotCount        int
 }
 
 // Run は EventBridge Scheduler イベントをジョブ化して SQS へ投入する。
 func Run(ctx context.Context, deps Dependencies, event Event) (DispatchResult, error) {
-	cycleID := scheduling.CycleID(string(event.CheckType), event.ScheduledAt)
+	window, err := cycleWindow(event.CheckType)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	cycleStart, slotIndex, slotCount, err := scheduling.WindowSlot(event.ScheduledAt, window, dispatchInterval)
+	if err != nil {
+		return DispatchResult{}, fmt.Errorf("resolve dispatch slot: %w", err)
+	}
+	result := DispatchResult{
+		CycleID:   scheduling.CycleID(string(event.CheckType), cycleStart),
+		SlotIndex: slotIndex,
+		SlotCount: slotCount,
+	}
 	enabled, err := deps.ConfigReader.IsEnabled(ctx, event.CheckType)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("load config for %s: %w", event.CheckType, err)
 	}
 	if !enabled {
-		// Checker 無効ならジョブを投入しない（cycle_disabled）。
-		return DispatchResult{Disabled: true}, nil
+		result.Disabled = true
+		return result, nil
 	}
 	switch event.CheckType {
 	case job.CheckSale:
-		return runSale(ctx, deps, event, cycleID)
+		return runSale(ctx, deps, event, result)
 	case job.CheckNewRelease:
-		return runNewRelease(ctx, deps, event, cycleID)
+		return runNewRelease(ctx, deps, event, result)
 	case job.CheckPaperToKindle:
-		return runPaperToKindle(ctx, deps, event, cycleID)
+		return runPaperToKindle(ctx, deps, event, result)
+	}
+	return DispatchResult{}, fmt.Errorf("unknown check_type %q", event.CheckType)
+}
+
+const (
+	dispatchInterval = 5 * time.Minute
+	saleWindow       = 2 * time.Hour
+	standardWindow   = 6 * time.Hour
+)
+
+func cycleWindow(checkType job.CheckType) (time.Duration, error) {
+	switch checkType {
+	case job.CheckSale:
+		return saleWindow, nil
+	case job.CheckNewRelease, job.CheckPaperToKindle:
+		return standardWindow, nil
 	default:
-		return DispatchResult{}, fmt.Errorf("unknown check_type %q", event.CheckType)
+		return 0, fmt.Errorf("unknown check_type %q", checkType)
 	}
 }
 
-// Upcoming 取り込み → sale_check → 全件投入成功後に sale_finalize を1件、の順序。
-func runSale(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
-	merged, err := deps.UpcomingMerger.MergeUpcoming(ctx)
-	if err != nil {
-		return DispatchResult{}, fmt.Errorf("merge upcoming: %w", err)
+func runSale(ctx context.Context, deps Dependencies, event Event, result DispatchResult) (DispatchResult, error) {
+	if result.SlotIndex == 0 {
+		merged, err := deps.UpcomingMerger.MergeUpcoming(ctx)
+		if err != nil {
+			return DispatchResult{}, fmt.Errorf("merge upcoming: %w", err)
+		}
+		result.UpcomingMerged = merged
 	}
 	asins, err := deps.AsinListReader.LoadAsins(ctx, deps.Keys.Unprocessed)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("load unprocessed: %w", err)
 	}
 	deduped := dedup(asins)
-	jobs := buildAsinJobs(job.KindSaleCheck, event.CheckType, cycleID, event.ScheduledAt, deduped)
+	shard, err := selectShard(deduped, result.SlotIndex, result.SlotCount)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	jobs := buildAsinJobs(job.KindSaleCheck, event.CheckType, result.CycleID, event.ScheduledAt, shard)
 	if err := enqueueBatched(ctx, deps.Enqueuer, jobs); err != nil {
 		return DispatchResult{}, fmt.Errorf("enqueue sale_check: %w", err)
 	}
-	// 対象が空でも Sale だけは sale_finalize を投入し、空リストへ Gist を同期できるようにする（SPECIFICATION.md 6）。
-	finalize := buildJob(job.KindSaleFinalize, event.CheckType, cycleID, event.ScheduledAt, finalizeTargetID, job.Target{})
-	if err := deps.Enqueuer.EnqueueBatch(ctx, []job.Job{finalize}); err != nil {
-		return DispatchResult{}, fmt.Errorf("enqueue sale_finalize: %w", err)
+	result.CycleTargetCount = len(deduped)
+	result.TargetCount = len(shard)
+	result.EnqueuedCount = len(shard)
+	if result.SlotIndex == result.SlotCount-1 {
+		finalize := buildJob(job.KindSaleFinalize, event.CheckType, result.CycleID, event.ScheduledAt, finalizeTargetID, job.Target{})
+		if err := deps.Enqueuer.EnqueueBatch(ctx, []job.Job{finalize}); err != nil {
+			return DispatchResult{}, fmt.Errorf("enqueue sale_finalize: %w", err)
+		}
+		result.EnqueuedCount++
 	}
-	return DispatchResult{
-		TargetCount:    len(deduped),
-		EnqueuedCount:  len(deduped) + 1,
-		UpcomingMerged: merged,
-	}, nil
+	return result, nil
 }
 
-func runNewRelease(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
+func runNewRelease(ctx context.Context, deps Dependencies, event Event, result DispatchResult) (DispatchResult, error) {
 	names, err := deps.AuthorReader.LoadAuthorNames(ctx, deps.Keys.Authors)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("load authors: %w", err)
 	}
 	deduped := dedup(names)
-	jobs := buildAuthorJobs(job.KindNewReleaseSearch, event.CheckType, cycleID, event.ScheduledAt, deduped)
+	shard, err := selectShard(deduped, result.SlotIndex, result.SlotCount)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	jobs := buildAuthorJobs(job.KindNewReleaseSearch, event.CheckType, result.CycleID, event.ScheduledAt, shard)
 	if err := enqueueBatched(ctx, deps.Enqueuer, jobs); err != nil {
 		return DispatchResult{}, err
 	}
-	return DispatchResult{TargetCount: len(deduped), EnqueuedCount: len(deduped)}, nil
+	result.CycleTargetCount = len(deduped)
+	result.TargetCount = len(shard)
+	result.EnqueuedCount = len(shard)
+	return result, nil
 }
 
-func runPaperToKindle(ctx context.Context, deps Dependencies, event Event, cycleID string) (DispatchResult, error) {
+func runPaperToKindle(ctx context.Context, deps Dependencies, event Event, result DispatchResult) (DispatchResult, error) {
 	asins, err := deps.AsinListReader.LoadAsins(ctx, deps.Keys.PaperBooks)
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("load paper_books: %w", err)
 	}
 	deduped := dedup(asins)
-	jobs := buildAsinJobs(job.KindPaperToKindleCheck, event.CheckType, cycleID, event.ScheduledAt, deduped)
+	shard, err := selectShard(deduped, result.SlotIndex, result.SlotCount)
+	if err != nil {
+		return DispatchResult{}, err
+	}
+	jobs := buildAsinJobs(job.KindPaperToKindleCheck, event.CheckType, result.CycleID, event.ScheduledAt, shard)
 	if err := enqueueBatched(ctx, deps.Enqueuer, jobs); err != nil {
 		return DispatchResult{}, err
 	}
-	return DispatchResult{TargetCount: len(deduped), EnqueuedCount: len(deduped)}, nil
+	result.CycleTargetCount = len(deduped)
+	result.TargetCount = len(shard)
+	result.EnqueuedCount = len(shard)
+	return result, nil
 }
 
 const finalizeTargetID = "finalize"
@@ -208,4 +261,18 @@ func dedup(values []string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+func selectShard(values []string, slotIndex, slotCount int) ([]string, error) {
+	out := make([]string, 0, len(values)/slotCount+1)
+	for _, value := range values {
+		index, err := scheduling.ShardIndex(value, slotCount)
+		if err != nil {
+			return nil, fmt.Errorf("assign dispatch shard: %w", err)
+		}
+		if index == slotIndex {
+			out = append(out, value)
+		}
+	}
+	return out, nil
 }

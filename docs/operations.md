@@ -60,6 +60,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 - Work Queue / Work DLQ / Scheduler DLQ が FIFO / Standard 構成どおりに作成されていること。
 - check-worker の event source mapping が `BatchSize=1` かつ `WorkerMappingEnabled` の指定どおりの有効状態（初回は無効）であること。check-worker は失敗時に Lambda error を返し SQS へ再配信させる契約（partial batch response は使用しない）。`WorkerMappingEnabled` は `SchedulersEnabled` とは独立した parameter なので、3 Scheduler とは別々に有効状態を確認する。確認は `aws lambda list-event-source-mappings --profile <P> --region <R> --query "EventSourceMappings[?contains(FunctionArn,'CheckWorkerFunction')].{State:State,BatchSize:BatchSize}"`（`State` が `Enabled`/`Disabled`、`BatchSize` が 1 であること）。
 - 3 Scheduler が `SchedulersEnabled` の指定どおりの有効状態であること（初回は無効）。
+- Scheduler式がSale=`cron(0/5 * * * ? *)`、New Release=`cron(1/5 * * * ? *)`、Paper-to-Kindle=`cron(2/5 * * * ? *)`で、タイムゾーンが`Asia/Tokyo`であること。業務周期はSale 2時間、他2つは6時間のまま、対象を5分slotへ分割する。
 - 2 Lambda の IAM role が共有されていないこと。
 - S3 bucket リソースが stack 削除対象に入っていないこと。
 
@@ -118,8 +119,24 @@ Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移し�
 - 1件の平均 `duration_ms` が増加していないか。
 - 直前の周回が次のセール周回までに終了しているか。
 
+Schedulerとevent source mappingを意図的に停止したままWork Queueを保持した場合も、最古messageが7200秒を超えるとこのAlarmは発報する。停止中であること、mappingが`Disabled`であること、queue件数が意図した保持数であることを確認できた場合は、追加障害ではなく停止状態の結果として扱う。
+
 原因を確認せずに MessageGroupId を分割しない。分割すると Amazon 同時リクエスト数が増える。
 構造化ログで直列処理が周期内に収まらないことを確認した場合だけ変更する。
+
+### 3.4 連続アクセス遮断後の再開
+
+全件一括dispatchで作成された旧Work Queueを、5分slot版のworkerへそのまま流すと再び連続アクセスになる。切り替え時は次の順序で扱う。
+
+1. `SchedulersEnabled=false`、`WorkerMappingEnabled=false`を維持して修正版をdeployする。
+2. Work QueueとWork DLQの件数、各messageの`cycle_id`と作成時刻をread-onlyで確認する。
+3. 旧周期から残った派生jobだけであることを確認する。S3正本は削除しない。
+4. 旧jobをpurgeする場合は、削除対象queueと件数を確定し、明示承認後に実行する。
+5. queueが空であることを確認してevent source mappingを有効化する。
+6. 3 Schedulerを有効化し、Saleの複数slotで`target_count`、`response_bytes`、`duration_ms`、`job_error`を確認する。
+7. 2時間のSale周回完了後、各対象が1回だけ割り当てられ、最終slot後に`sale_finalize`が完了したことを確認する。
+
+Work QueueとDLQはS3正本から再生成できる派生jobだが、purgeは不可逆操作として扱う。原因未確認のDLQや、新版有効化後に作成されたjobを一括削除しない。
 
 ### 3.3 Scheduler DLQ
 

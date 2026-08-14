@@ -169,14 +169,14 @@ func TestTemplate_DisableDefaults(t *testing.T) {
 	}
 }
 
-// TestTemplate_SchedulerCycles は 3 Scheduler の業務周期(sale=2h, new_release/paper_to_kindle=1日4回)・JST・default 無効を検証する (SPECIFICATION.md §6)。
+// TestTemplate_SchedulerCycles は3 Checkerの5分分割・JST・default無効を検証する。
 // target/retry/DLQ 参照解決・check_type wiring は cfn-lint/review へ委ねる。
 func TestTemplate_SchedulerCycles(t *testing.T) {
 	res := resources(t)
 	want := map[string]string{
-		"SaleSchedule":          "cron(0 0/2 * * ? *)",
-		"NewReleaseSchedule":    "cron(10 0/6 * * ? *)",
-		"PaperToKindleSchedule": "cron(20 0/6 * * ? *)",
+		"SaleSchedule":          "cron(0/5 * * * ? *)",
+		"NewReleaseSchedule":    "cron(1/5 * * * ? *)",
+		"PaperToKindleSchedule": "cron(2/5 * * * ? *)",
 	}
 	for name, p := range ofType(res, "AWS::Scheduler::Schedule") {
 		cron, ok := want[name]

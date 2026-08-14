@@ -264,7 +264,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: kindle-automation-sale
-      ScheduleExpression: cron(0 0/2 * * ? *)
+      ScheduleExpression: cron(0/5 * * * ? *)
       ScheduleExpressionTimezone: Asia/Tokyo
       FlexibleTimeWindow:
         Mode: "OFF"
@@ -290,7 +290,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: kindle-automation-new-release
-      ScheduleExpression: cron(10 0/6 * * ? *)
+      ScheduleExpression: cron(1/5 * * * ? *)
       ScheduleExpressionTimezone: Asia/Tokyo
       FlexibleTimeWindow:
         Mode: "OFF"
@@ -315,7 +315,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: kindle-automation-paper-to-kindle
-      ScheduleExpression: cron(20 0/6 * * ? *)
+      ScheduleExpression: cron(2/5 * * * ? *)
       ScheduleExpressionTimezone: Asia/Tokyo
       FlexibleTimeWindow:
         Mode: "OFF"

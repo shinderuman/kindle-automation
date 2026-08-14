@@ -144,15 +144,17 @@ Lambdaはユーザー管理VPCへ接続しない。Lambda標準のインター�
 
 EventBridge Schedulerのタイムゾーンを`Asia/Tokyo`、Flexible Time Windowを`OFF`にする。
 
-| チェック | cron式 | JST起動時刻 | 1日の周回数 |
-|---|---|---|---:|
-| セール | `cron(0 0/2 * * ? *)` | 0:00から2時間ごと | 12 |
-| 新刊 | `cron(10 0/6 * * ? *)` | 0:10、6:10、12:10、18:10 | 4 |
-| 紙書籍・Kindle版 | `cron(20 0/6 * * ? *)` | 0:20、6:20、12:20、18:20 | 4 |
+| チェック | Scheduler cron式 | JST起動分 | 業務周期 | 1日の全件周回数 |
+|---|---|---|---|---:|
+| セール | `cron(0/5 * * * ? *)` | 0、5、10、…、55分 | 2時間 | 12 |
+| 新刊 | `cron(1/5 * * * ? *)` | 1、6、11、…、56分 | 6時間 | 4 |
+| 紙書籍・Kindle版 | `cron(2/5 * * * ? *)` | 2、7、12、…、57分 | 6時間 | 4 |
 
-1周は、Scheduler起動時にS3に存在する対象のスナップショットを1回ずつジョブ化したものと定義する。起動後に手動または自動で追加された対象は次の周回から処理する。
+Amazonへの連続アクセスを避けるため、1周の対象を5分ごとのslotへ分割する。セールは2時間を24 slot、新刊と紙書籍・Kindle版は6時間を72 slotとする。対象識別子のSHA-256から求めた値をslot数で剰余し、同じ対象を同じ周期内の同じslotへ決定的に割り当てる。S3配列の並び順や別対象の追加・削除で既存対象のslotを移動させない。
 
-Schedulerイベントの`<aws.scheduler.scheduled-time>`を基に、次の形式で決定的な`cycle_id`を作る。Scheduler再試行でも同じ値になるようにする。
+各slotは実行時の最新S3本文を読み、現在slotへ属する対象だけをジョブ化する。対象が割当slotより前に追加された場合は同じ周回、割当slot通過後に追加された場合は次の周回から処理する。各周回を通じて対象1件につき1回を基本とし、SchedulerまたはSQSの再試行による重複は冪等処理で吸収する。
+
+Schedulerイベントの`<aws.scheduler.scheduled-time>`からJSTの2時間または6時間周期窓の開始時刻を求め、UTCへ変換して次の形式で決定的な`cycle_id`を作る。同じ周期窓の全slotとScheduler再試行で同じ値になるようにする。
 
 ```text
 {check_type}:{scheduled_time_utc}
@@ -169,7 +171,7 @@ Schedulerから`schedule-checks`へ渡す入力は次の形とする。
 }
 ```
 
-`Enabled=false`のCheckerは`cycle_disabled`をINFOログへ出してジョブを投入しない。対象配列が空の場合は`target_count=0`の正常な`cycle_dispatched`とし、エラーにしない。Saleだけは空の場合も`sale_finalize`を投入し、Gistを現在の空リストへ同期できるようにする。
+`Enabled=false`のCheckerは各slotで`cycle_disabled`をINFOログへ出してジョブを投入しない。現在slotの対象配列が空の場合は`target_count=0`の正常な`cycle_dispatched`とし、エラーにしない。Saleは最終slotで`sale_finalize`を投入し、全件が空の場合もGistを現在の空リストへ同期する。
 
 各Schedulerの再試行設定は次とする。
 
@@ -256,7 +258,7 @@ Amazon系の1件が再試行中は、`amazon-requests`の後続ジョブを待�
 
 検索結果で必須項目が揃った候補は候補ごとに`new_release_result`、不足する候補は候補ごとに`new_release_detail`を投入する。検索job自身は候補のS3保存と商品通知を行わない。検索候補ASINが10〜13桁の数字だけのISBNの場合は`new_release_result`にも`new_release_detail`にも入れず、候補ごとに`new_release_paper_detail`を投入して紙書籍候補として検証する（§13.4）。ただし最新の`paper_books_asins.json`に同ASINが既存の場合は投入しない（§13.3）。ISBN候補を候補段階で除外しない。紙書籍ページでKindle版を検出した場合も同様に`paper_to_kindle_detail`を投入する。
 
-`schedule-checks`は`SendMessageBatch`の10件単位を順番に送信し、並列送信しない。セール周回では全`sale_check`の送信成功後にだけ`sale_finalize`を送る。batch内に失敗entryが1件でもあればdispatchを失敗させ、同じ`cycle_id`と`job_id`でScheduler再試行を受ける。
+`schedule-checks`は現在slotの対象を`SendMessageBatch`の10件単位で順番に送信し、並列送信しない。セールの最終slotでは同slotの全`sale_check`送信成功後にだけ`sale_finalize`を送る。同じFIFO MessageGroup内では、それ以前のslotで投入済みの`sale_check`より後ろへ並ぶ。batch内に失敗entryが1件でもあればdispatchを失敗させ、同じ`cycle_id`と`job_id`でScheduler再試行を受ける。
 
 ### 7.4 再試行と冪等性
 
@@ -537,10 +539,12 @@ response byte数だけの固定下限は設けない。短い本文であって�
 
 ### 12.1 対象と周期
 
-- 対象: セール周回開始時に統合済みの`unprocessed_asins.json`
+- 対象: 各slot実行時の最新`unprocessed_asins.json`
 - 周期: 2時間ごと
 - 1日: 全対象を12周
 - 1ジョブ: 1 ASIN、商品ページ1リクエスト
+
+周回先頭slotでUpcomingをUnprocessedへ統合し、24 slotへ安定ハッシュ分割して処理する。
 
 ### 12.2 取得値
 
@@ -610,7 +614,7 @@ price_change = current - old.CurrentPrice
 
 外部通知失敗時に価格履歴を巻き戻さない。通知失敗はERRORログへ記録する。
 
-周回の最後に`sale_finalize`がSale用`gist_update`を1回投入する。`gist_update`は実行時点の`unprocessed_asins.json`からSale Gistを再生成する。
+周回の最終slotに投入する`sale_finalize`がSale用`gist_update`を1回投入する。`gist_update`は実行時点の`unprocessed_asins.json`からSale Gistを再生成する。
 
 ## 13. 新刊チェック
 
@@ -621,6 +625,8 @@ price_change = current - old.CurrentPrice
 - 1日: 全作者を4周
 - 検索ジョブ: 1作者、検索ページ1リクエスト
 - 詳細ジョブ: 1候補ASIN、商品ページ1リクエスト
+
+各周回は72 slotへ安定ハッシュ分割し、作者ごとに1つのslotで検索する。
 
 ### 13.2 検索URL
 
@@ -732,6 +738,8 @@ Author gist の投入（手順4）を notified/upcoming の upsert（手順5-6�
 - 1日: 全対象を4周
 - 確認ジョブ: 1紙書籍ASIN、商品ページ1リクエスト
 - 詳細ジョブ: 1Kindle候補ASIN、商品ページ1リクエスト
+
+各周回は72 slotへ安定ハッシュ分割し、紙書籍ASINごとに1つのslotで確認する。
 
 ### 14.2 紙書籍ページ確認
 
@@ -932,7 +940,7 @@ Cookie、Authorization、アクセストークン、Slack token、GitHub token�
 
 ### 18.3 固定イベント名
 
-- `cycle_dispatched`: 対象数、投入成功数、Upcoming取り込み数
+- `cycle_dispatched`: 周回対象数、slot対象数、投入成功数、Upcoming取り込み数、slot番号
 - `cycle_disabled`: Checker設定により投入を省略
 - `job_completed`: 正常処理結果
 - `job_terminal`: 404、対象種別不一致等の再試行しない結果
@@ -941,7 +949,7 @@ Cookie、Authorization、アクセストークン、Slack token、GitHub token�
 - `gist_error`: GitHub Gist更新エラー
 - `alarm_notification`: CloudWatch AlarmのSlack通知結果
 
-`cycle_dispatched`には`target_count`と`enqueued_count`を含め、周回が対象全件を投入したことをログだけで検証できるようにする。
+`cycle_dispatched`には`cycle_target_count`、`target_count`、`enqueued_count`、`slot_index`、`slot_count`を含める。`cycle_target_count`は各slotで読み取った最新S3の全対象数、`target_count`は現在slotへ割り当てた件数とする。
 
 ## 19. 秘密情報とIAM
 
@@ -1142,7 +1150,9 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 
 ### 22.4 ユースケース・ハンドラーテスト
 
-- 各Scheduler起動で対象件数と同数のジョブを投入する
+- 各Scheduler起動で現在slotの対象件数と同数のジョブを投入する
+- 周回内の全slotを通すと、重複除外後の各対象がちょうど1回投入される
+- S3配列の並び替えや別対象の追加・削除で既存対象の割当slotが変わらない
 - Amazonへアクセスし得る全ジョブのMessageGroupIdが`amazon-requests`になる
 - `gist_update`のMessageGroupIdが`external-updates`になり、Amazon clientを呼ばない
 - 1 worker起動のAmazonリクエストが最大1回になる
@@ -1167,6 +1177,7 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 - API Gateway、ヘッドレスブラウザ、PA API資格情報を使用していない
 - 1 worker起動のAmazonリクエストが0回または1回である
 - Amazonリクエストが同時に2件実行されない
+- Amazon対象を5分slotへ決定的に分散し、全件を一度にWork Queueへ投入しない
 - セール対象全件を2時間ごとに1周する
 - 作者全件と紙書籍全件を1日4周する
 - セール判定4条件が独立して動作する

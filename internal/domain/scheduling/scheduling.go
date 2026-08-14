@@ -4,7 +4,9 @@ package scheduling
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -24,4 +26,29 @@ func JobID(kind string, cycleID string, targetID string) string {
 func DedupID(jobID string) string {
 	sum := sha256.Sum256([]byte(jobID))
 	return hex.EncodeToString(sum[:])
+}
+
+// WindowSlot はJST基準の周期窓開始時刻と、窓内の実行slotを返す。
+func WindowSlot(scheduledAt time.Time, window, interval time.Duration) (time.Time, int, int, error) {
+	if window <= 0 || interval <= 0 || window%interval != 0 {
+		return time.Time{}, 0, 0, fmt.Errorf("invalid window %s or interval %s", window, interval)
+	}
+	const jstOffset = 9 * time.Hour
+	utc := scheduledAt.UTC()
+	cycleStart := utc.Add(jstOffset).Truncate(window).Add(-jstOffset)
+	slotCount := int(window / interval)
+	slotIndex := int(utc.Sub(cycleStart) / interval)
+	if slotIndex < 0 || slotIndex >= slotCount {
+		return time.Time{}, 0, 0, fmt.Errorf("scheduled time %s is outside cycle window", scheduledAt.Format(time.RFC3339))
+	}
+	return cycleStart, slotIndex, slotCount, nil
+}
+
+// ShardIndex は同じ対象を常に同じslotへ割り当てる。
+func ShardIndex(target string, shardCount int) (int, error) {
+	if shardCount <= 0 {
+		return 0, fmt.Errorf("invalid shard count %d", shardCount)
+	}
+	sum := sha256.Sum256([]byte(target))
+	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(shardCount)), nil
 }

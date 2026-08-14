@@ -11,7 +11,6 @@ import (
 	"log/slog"
 
 	"github.com/shinderuman/kindle-automation/internal/application/dispatch"
-	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/logging"
 	"github.com/shinderuman/kindle-automation/internal/notification"
 )
@@ -47,13 +46,16 @@ func (s *Scheduler) logCycle(ctx context.Context, event dispatch.Event, result d
 	}
 	attrs := []slog.Attr{
 		slog.String("check_type", string(event.CheckType)),
-		slog.String("cycle_id", scheduling.CycleID(string(event.CheckType), event.ScheduledAt)),
+		slog.String("cycle_id", result.CycleID),
+		slog.Int("slot_index", result.SlotIndex),
+		slog.Int("slot_count", result.SlotCount),
 	}
 	if result.Disabled {
 		s.Logger.LogAttrs(ctx, slog.LevelInfo, logging.EventCycleDisabled, attrs...)
 		return
 	}
 	attrs = append(attrs,
+		slog.Int("cycle_target_count", result.CycleTargetCount),
 		slog.Int("target_count", result.TargetCount),
 		slog.Int("enqueued_count", result.EnqueuedCount),
 		slog.Int("upcoming_merged", result.UpcomingMerged),

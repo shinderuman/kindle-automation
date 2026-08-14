@@ -83,3 +83,118 @@ func TestJobID_DiscriminatesByKindCycleTarget(t *testing.T) {
 		t.Errorf("different target must yield different job_id")
 	}
 }
+
+func TestWindowSlot_UsesJSTCycleBoundaries(t *testing.T) {
+	jst := time.FixedZone("JST", 9*60*60)
+	tests := []struct {
+		name      string
+		at        time.Time
+		window    time.Duration
+		wantStart time.Time
+		wantSlot  int
+		wantCount int
+	}{
+		{
+			name:      "sale cycle first slot",
+			at:        time.Date(2026, 8, 15, 0, 0, 0, 0, jst),
+			window:    2 * time.Hour,
+			wantStart: time.Date(2026, 8, 14, 15, 0, 0, 0, time.UTC),
+			wantSlot:  0,
+			wantCount: 24,
+		},
+		{
+			name:      "sale cycle final slot",
+			at:        time.Date(2026, 8, 15, 1, 55, 0, 0, jst),
+			window:    2 * time.Hour,
+			wantStart: time.Date(2026, 8, 14, 15, 0, 0, 0, time.UTC),
+			wantSlot:  23,
+			wantCount: 24,
+		},
+		{
+			name:      "sale next cycle",
+			at:        time.Date(2026, 8, 15, 2, 0, 0, 0, jst),
+			window:    2 * time.Hour,
+			wantStart: time.Date(2026, 8, 14, 17, 0, 0, 0, time.UTC),
+			wantSlot:  0,
+			wantCount: 24,
+		},
+		{
+			name:      "new release offset first slot",
+			at:        time.Date(2026, 8, 15, 0, 1, 0, 0, jst),
+			window:    6 * time.Hour,
+			wantStart: time.Date(2026, 8, 14, 15, 0, 0, 0, time.UTC),
+			wantSlot:  0,
+			wantCount: 72,
+		},
+		{
+			name:      "paper offset final slot",
+			at:        time.Date(2026, 8, 15, 5, 57, 0, 0, jst),
+			window:    6 * time.Hour,
+			wantStart: time.Date(2026, 8, 14, 15, 0, 0, 0, time.UTC),
+			wantSlot:  71,
+			wantCount: 72,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			start, slot, count, err := WindowSlot(tc.at, tc.window, 5*time.Minute)
+			if err != nil {
+				t.Fatalf("WindowSlot: %v", err)
+			}
+			if !start.Equal(tc.wantStart) || slot != tc.wantSlot || count != tc.wantCount {
+				t.Fatalf("WindowSlot = (%s, %d, %d), want (%s, %d, %d)", start, slot, count, tc.wantStart, tc.wantSlot, tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestWindowSlot_IsTimezoneIndependent(t *testing.T) {
+	moment := time.Date(2026, 8, 14, 16, 55, 0, 0, time.UTC)
+	jst := time.FixedZone("JST", 9*60*60)
+	startUTC, slotUTC, countUTC, err := WindowSlot(moment, 2*time.Hour, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("WindowSlot UTC: %v", err)
+	}
+	startJST, slotJST, countJST, err := WindowSlot(moment.In(jst), 2*time.Hour, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("WindowSlot JST: %v", err)
+	}
+	if !startUTC.Equal(startJST) || slotUTC != slotJST || countUTC != countJST {
+		t.Fatalf("same instant differs: UTC=(%s,%d,%d) JST=(%s,%d,%d)", startUTC, slotUTC, countUTC, startJST, slotJST, countJST)
+	}
+}
+
+func TestWindowSlot_RejectsInvalidDurations(t *testing.T) {
+	for _, tc := range []struct {
+		window   time.Duration
+		interval time.Duration
+	}{
+		{window: 0, interval: 5 * time.Minute},
+		{window: 2 * time.Hour, interval: 0},
+		{window: 2 * time.Hour, interval: 7 * time.Minute},
+	} {
+		if _, _, _, err := WindowSlot(time.Now(), tc.window, tc.interval); err == nil {
+			t.Errorf("WindowSlot(%s, %s) should fail", tc.window, tc.interval)
+		}
+	}
+}
+
+func TestShardIndex_IsDeterministicAndBounded(t *testing.T) {
+	for _, count := range []int{1, 24, 72} {
+		got, err := ShardIndex("B0FX3X569X", count)
+		if err != nil {
+			t.Fatalf("ShardIndex: %v", err)
+		}
+		again, err := ShardIndex("B0FX3X569X", count)
+		if err != nil {
+			t.Fatalf("ShardIndex again: %v", err)
+		}
+		if got != again || got < 0 || got >= count {
+			t.Fatalf("ShardIndex count=%d got=%d again=%d", count, got, again)
+		}
+	}
+	if _, err := ShardIndex("B0FX3X569X", 0); err == nil {
+		t.Fatal("ShardIndex should reject zero shard count")
+	}
+}

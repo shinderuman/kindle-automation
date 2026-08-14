@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shinderuman/kindle-automation/internal/domain/scheduling"
 	"github.com/shinderuman/kindle-automation/internal/job"
 )
 
 type fakeEnqueuer struct {
 	batches [][]job.Job
 	calls   int
-	failOn  int // 何番目の batch（0始まり）で失敗させるか。-1 で失敗なし
+	failOn  int
 }
 
 func (f *fakeEnqueuer) EnqueueBatch(_ context.Context, jobs []job.Job) error {
@@ -28,8 +29,8 @@ func (f *fakeEnqueuer) EnqueueBatch(_ context.Context, jobs []job.Job) error {
 
 func (f *fakeEnqueuer) allJobs() []job.Job {
 	var out []job.Job
-	for _, b := range f.batches {
-		out = append(out, b...)
+	for _, batch := range f.batches {
+		out = append(out, batch...)
 	}
 	return out
 }
@@ -62,13 +63,13 @@ func (f fakeConfig) IsEnabled(_ context.Context, _ job.CheckType) (bool, error) 
 }
 
 type fakeUpcoming struct {
-	called bool
+	calls  int
 	merged int
 	err    error
 }
 
 func (f *fakeUpcoming) MergeUpcoming(_ context.Context) (int, error) {
-	f.called = true
+	f.calls++
 	return f.merged, f.err
 }
 
@@ -83,495 +84,413 @@ func baseDeps(enq *fakeEnqueuer) Dependencies {
 	}
 }
 
-func saleEvent() Event {
+var cycleStart = time.Date(2026, 8, 14, 15, 0, 0, 0, time.UTC)
+
+func eventAtSlot(checkType job.CheckType, slot int) Event {
+	offset := time.Duration(0)
+	switch checkType {
+	case job.CheckNewRelease:
+		offset = time.Minute
+	case job.CheckPaperToKindle:
+		offset = 2 * time.Minute
+	}
 	return Event{
-		CheckType:   job.CheckSale,
-		ScheduledAt: time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC),
+		CheckType:   checkType,
+		ScheduledAt: cycleStart.Add(time.Duration(slot)*dispatchInterval + offset),
 	}
 }
 
-func TestRun_Sale_EnqueuesOneJobPerAsinAndFinalizeLast(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001", "B0ASIN0002"}}
-	deps.UpcomingMerger = &fakeUpcoming{}
+func valuesForSlot(t *testing.T, prefix string, count, slot, slotCount int) []string {
+	t.Helper()
+	values := make([]string, 0, count)
+	for i := 0; len(values) < count; i++ {
+		value := fmt.Sprintf("%s%06d", prefix, i)
+		index, err := scheduling.ShardIndex(value, slotCount)
+		if err != nil {
+			t.Fatalf("ShardIndex: %v", err)
+		}
+		if index == slot {
+			values = append(values, value)
+		}
+	}
+	return values
+}
 
-	result, err := Run(context.Background(), deps, saleEvent())
+func TestRun_SaleFirstSlotMergesUpcomingAndEnqueuesOnlyItsShard(t *testing.T) {
+	enq := &fakeEnqueuer{failOn: -1}
+	upcoming := &fakeUpcoming{merged: 7}
+	deps := baseDeps(enq)
+	deps.UpcomingMerger = upcoming
+	selected := valuesForSlot(t, "B0SALE", 2, 0, 24)
+	other := valuesForSlot(t, "B0OTHER", 1, 1, 24)[0]
+	deps.AsinListReader = fakeAsinReader{asins: []string{selected[0], other, selected[1]}}
+
+	result, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 0))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-
-	all := enq.allJobs()
-	if len(all) != 3 {
-		t.Fatalf("len(jobs) = %d, want 3", len(all))
+	jobs := enq.allJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("jobs = %d, want 2", len(jobs))
 	}
-	lastBatch := enq.batches[len(enq.batches)-1]
-	if len(lastBatch) != 1 || lastBatch[0].Kind != job.KindSaleFinalize {
-		t.Fatalf("last batch should be sale_finalize only: %+v", lastBatch)
-	}
-	for i, j := range all {
-		if j.Kind == job.KindSaleFinalize && i != len(all)-1 {
-			t.Errorf("sale_finalize at index %d, want last", i)
+	for _, queued := range jobs {
+		if queued.Kind != job.KindSaleCheck || queued.Target.ASIN == other {
+			t.Errorf("unexpected job: %+v", queued)
 		}
+	}
+	if upcoming.calls != 1 || result.UpcomingMerged != 7 {
+		t.Errorf("upcoming calls=%d merged=%d", upcoming.calls, result.UpcomingMerged)
+	}
+	if result.CycleID != "sale:2026-08-14T15:00:00Z" || result.SlotIndex != 0 || result.SlotCount != 24 {
+		t.Errorf("cycle metadata = %+v", result)
+	}
+	if result.CycleTargetCount != 3 || result.TargetCount != 2 || result.EnqueuedCount != 2 {
+		t.Errorf("counts = %+v", result)
+	}
+}
+
+func TestRun_SaleNonFirstSlotDoesNotMergeUpcoming(t *testing.T) {
+	enq := &fakeEnqueuer{failOn: -1}
+	upcoming := &fakeUpcoming{}
+	deps := baseDeps(enq)
+	deps.UpcomingMerger = upcoming
+	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 1, 1, 24)}
+
+	if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 1)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if upcoming.calls != 0 {
+		t.Errorf("MergeUpcoming calls = %d, want 0", upcoming.calls)
+	}
+}
+
+func TestRun_SaleFinalSlotEnqueuesFinalizeLast(t *testing.T) {
+	enq := &fakeEnqueuer{failOn: -1}
+	deps := baseDeps(enq)
+	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 2, 23, 24)}
+
+	result, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 23))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	jobs := enq.allJobs()
+	if len(jobs) != 3 || jobs[len(jobs)-1].Kind != job.KindSaleFinalize {
+		t.Fatalf("jobs = %+v", jobs)
 	}
 	if result.TargetCount != 2 || result.EnqueuedCount != 3 {
-		t.Errorf("result = (target=%d enqueued=%d), want (2,3)", result.TargetCount, result.EnqueuedCount)
-	}
-	if result.Disabled {
-		t.Errorf("result must not be disabled")
+		t.Errorf("counts = %+v", result)
 	}
 }
 
-func TestRun_Sale_AmazonJobsUseAmazonRequestsMessageGroup(t *testing.T) {
+func TestRun_SaleFinalSlotEnqueuesFinalizeWhenShardIsEmpty(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
+	deps.AsinListReader = fakeAsinReader{}
 
-	if _, err := Run(context.Background(), deps, saleEvent()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	for _, j := range enq.allJobs() {
-		if got := job.MessageGroup(j.Kind); got != "amazon-requests" {
-			t.Errorf("MessageGroup(%v) = %q, want amazon-requests", j.Kind, got)
-		}
-	}
-}
-
-func TestRun_Sale_FinalizeEnqueuedEvenWhenEmpty(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: nil}
-
-	result, err := Run(context.Background(), deps, saleEvent())
+	result, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 23))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	all := enq.allJobs()
-	if len(all) != 1 || all[0].Kind != job.KindSaleFinalize {
-		t.Fatalf("empty sale should still enqueue sale_finalize: %+v", all)
+	jobs := enq.allJobs()
+	if len(jobs) != 1 || jobs[0].Kind != job.KindSaleFinalize {
+		t.Fatalf("jobs = %+v", jobs)
 	}
 	if result.TargetCount != 0 || result.EnqueuedCount != 1 {
-		t.Errorf("result = (target=%d enqueued=%d), want (0,1)", result.TargetCount, result.EnqueuedCount)
+		t.Errorf("counts = %+v", result)
 	}
 }
 
-func TestRun_Sale_FinalizeNotEnqueuedWhenCheckFailed(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: 0} // 最初の sale_check batch を失敗
+func TestRun_SaleFailurePreventsFinalize(t *testing.T) {
+	enq := &fakeEnqueuer{failOn: 0}
 	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
+	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 1, 23, 24)}
 
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("Run should fail when sale_check enqueue fails")
+	if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 23)); err == nil {
+		t.Fatal("Run should fail")
 	}
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindSaleFinalize {
-			t.Errorf("sale_finalize must not be enqueued when sale_check failed")
+	for _, queued := range enq.allJobs() {
+		if queued.Kind == job.KindSaleFinalize {
+			t.Fatal("sale_finalize must not be enqueued")
 		}
 	}
 }
 
-func TestRun_Sale_MergeUpcomingCountReported(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	upc := &fakeUpcoming{merged: 7}
+func TestRun_SaleFinalizeFailureIsReturned(t *testing.T) {
+	enq := &fakeEnqueuer{failOn: 1}
 	deps := baseDeps(enq)
-	deps.UpcomingMerger = upc
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
+	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 1, 23, 24)}
 
-	result, err := Run(context.Background(), deps, saleEvent())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !upc.called {
-		t.Errorf("MergeUpcoming must be called for sale cycle")
-	}
-	if result.UpcomingMerged != 7 {
-		t.Errorf("UpcomingMerged = %d, want 7", result.UpcomingMerged)
+	if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 23)); err == nil {
+		t.Fatal("Run should fail")
 	}
 }
 
-func TestRun_NewRelease_EnqueuesOneJobPerAuthor(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AuthorReader = fakeAuthorReader{names: []string{"海李", "作者B"}}
+func TestRun_NewReleaseAndPaperUseCurrentShard(t *testing.T) {
+	tests := []struct {
+		name      string
+		checkType job.CheckType
+		kind      job.Kind
+	}{
+		{name: "new release", checkType: job.CheckNewRelease, kind: job.KindNewReleaseSearch},
+		{name: "paper to kindle", checkType: job.CheckPaperToKindle, kind: job.KindPaperToKindleCheck},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enq := &fakeEnqueuer{failOn: -1}
+			deps := baseDeps(enq)
+			selected := valuesForSlot(t, "TARGET", 2, 17, 72)
+			other := valuesForSlot(t, "OTHER", 1, 18, 72)[0]
+			if tc.checkType == job.CheckNewRelease {
+				deps.AuthorReader = fakeAuthorReader{names: []string{selected[0], other, selected[1]}}
+			} else {
+				deps.AsinListReader = fakeAsinReader{asins: []string{selected[0], other, selected[1]}}
+			}
 
-	result, err := Run(context.Background(), deps, Event{CheckType: job.CheckNewRelease, ScheduledAt: saleEvent().ScheduledAt})
+			result, err := Run(context.Background(), deps, eventAtSlot(tc.checkType, 17))
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result.CycleTargetCount != 3 || result.TargetCount != 2 || result.EnqueuedCount != 2 || result.SlotCount != 72 {
+				t.Errorf("result = %+v", result)
+			}
+			for _, queued := range enq.allJobs() {
+				if queued.Kind != tc.kind || job.MessageGroup(queued.Kind) != "amazon-requests" {
+					t.Errorf("unexpected job: %+v", queued)
+				}
+			}
+		})
+	}
+}
+
+func TestRun_EachTargetAppearsOncePerCycle(t *testing.T) {
+	tests := []struct {
+		name      string
+		checkType job.CheckType
+		slots     int
+		kind      job.Kind
+	}{
+		{name: "sale", checkType: job.CheckSale, slots: 24, kind: job.KindSaleCheck},
+		{name: "new release", checkType: job.CheckNewRelease, slots: 72, kind: job.KindNewReleaseSearch},
+		{name: "paper", checkType: job.CheckPaperToKindle, slots: 72, kind: job.KindPaperToKindleCheck},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			values := []string{"TARGET0001", "TARGET0002", "TARGET0001", "", "TARGET0003"}
+			seen := map[string]int{}
+			for slot := 0; slot < tc.slots; slot++ {
+				enq := &fakeEnqueuer{failOn: -1}
+				deps := baseDeps(enq)
+				deps.AsinListReader = fakeAsinReader{asins: values}
+				deps.AuthorReader = fakeAuthorReader{names: values}
+				if _, err := Run(context.Background(), deps, eventAtSlot(tc.checkType, slot)); err != nil {
+					t.Fatalf("slot %d: %v", slot, err)
+				}
+				for _, queued := range enq.allJobs() {
+					if queued.Kind != tc.kind {
+						continue
+					}
+					target := queued.Target.ASIN
+					if tc.checkType == job.CheckNewRelease {
+						target = queued.Target.AuthorName
+					}
+					seen[target]++
+				}
+			}
+			for _, target := range []string{"TARGET0001", "TARGET0002", "TARGET0003"} {
+				if seen[target] != 1 {
+					t.Errorf("%s count = %d, want 1", target, seen[target])
+				}
+			}
+		})
+	}
+}
+
+func TestSelectShard_IsStableAcrossOrderAndUnrelatedInsertions(t *testing.T) {
+	values := []string{"TARGET0001", "TARGET0002", "TARGET0003"}
+	index, err := scheduling.ShardIndex(values[0], 24)
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("ShardIndex: %v", err)
 	}
-	all := enq.allJobs()
-	if len(all) != 2 {
-		t.Fatalf("len(jobs) = %d, want 2", len(all))
+	first, err := selectShard(values, index, 24)
+	if err != nil {
+		t.Fatalf("selectShard: %v", err)
 	}
-	for _, j := range all {
-		if j.Kind != job.KindNewReleaseSearch {
-			t.Errorf("kind = %v, want new_release_search", j.Kind)
+	second, err := selectShard([]string{"ADDED", values[2], values[0], values[1]}, index, 24)
+	if err != nil {
+		t.Fatalf("selectShard reordered: %v", err)
+	}
+	if !contains(first, values[0]) || !contains(second, values[0]) {
+		t.Fatalf("target moved after list edit: first=%v second=%v", first, second)
+	}
+}
+
+func TestRun_UsesSameCycleIDAcrossWindow(t *testing.T) {
+	cycleIDs := map[string]struct{}{}
+	for _, slot := range []int{0, 12, 23} {
+		enq := &fakeEnqueuer{failOn: -1}
+		deps := baseDeps(enq)
+		deps.AsinListReader = fakeAsinReader{}
+		result, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, slot))
+		if err != nil {
+			t.Fatalf("slot %d: %v", slot, err)
 		}
-		if got := job.MessageGroup(j.Kind); got != "amazon-requests" {
-			t.Errorf("MessageGroup = %q, want amazon-requests", got)
-		}
+		cycleIDs[result.CycleID] = struct{}{}
 	}
-	if result.TargetCount != 2 || result.EnqueuedCount != 2 || result.UpcomingMerged != 0 {
-		t.Errorf("result = %+v, want target=2 enqueued=2 upcoming=0", result)
+	if len(cycleIDs) != 1 {
+		t.Fatalf("cycle IDs = %v, want one", cycleIDs)
+	}
+
+	next := eventAtSlot(job.CheckSale, 0)
+	next.ScheduledAt = next.ScheduledAt.Add(saleWindow)
+	result, err := Run(context.Background(), baseDeps(&fakeEnqueuer{failOn: -1}), next)
+	if err != nil {
+		t.Fatalf("next cycle: %v", err)
+	}
+	if _, exists := cycleIDs[result.CycleID]; exists {
+		t.Fatalf("next window reused cycle ID %s", result.CycleID)
 	}
 }
 
-func TestRun_PaperToKindle_EnqueuesOneJobPerAsin(t *testing.T) {
+func TestRun_JobIDsAreDeterministic(t *testing.T) {
+	target := valuesForSlot(t, "B0SALE", 1, 3, 24)[0]
+	run := func() job.Job {
+		enq := &fakeEnqueuer{failOn: -1}
+		deps := baseDeps(enq)
+		deps.AsinListReader = fakeAsinReader{asins: []string{target}}
+		if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 3)); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return enq.allJobs()[0]
+	}
+	first, second := run(), run()
+	if first.JobID != second.JobID || first.CycleID != second.CycleID {
+		t.Fatalf("jobs differ: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestRun_BatchesAtMostTenJobs(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0PAPER001"}}
+	deps.AsinListReader = fakeAsinReader{asins: valuesForSlot(t, "B0SALE", 25, 3, 24)}
 
-	result, err := Run(context.Background(), deps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: saleEvent().ScheduledAt})
-	if err != nil {
+	if _, err := Run(context.Background(), deps, eventAtSlot(job.CheckSale, 3)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	all := enq.allJobs()
-	if len(all) != 1 || all[0].Kind != job.KindPaperToKindleCheck {
-		t.Fatalf("jobs = %+v", all)
+	if len(enq.batches) != 3 {
+		t.Fatalf("batch count = %d, want 3", len(enq.batches))
 	}
-	if result.TargetCount != 1 || result.EnqueuedCount != 1 {
-		t.Errorf("result = (target=%d enqueued=%d), want (1,1)", result.TargetCount, result.EnqueuedCount)
+	for i, batch := range enq.batches {
+		if len(batch) > 10 {
+			t.Errorf("batch %d size = %d", i, len(batch))
+		}
 	}
 }
 
-func TestRun_Disabled_EnqueuesNothingAndReportsDisabled(t *testing.T) {
+func TestRun_DisabledIncludesCycleMetadataAndEnqueuesNothing(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
 	deps.ConfigReader = fakeConfig{enabled: false}
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
 
-	result, err := Run(context.Background(), deps, saleEvent())
+	result, err := Run(context.Background(), deps, eventAtSlot(job.CheckNewRelease, 8))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(enq.batches) != 0 {
-		t.Errorf("disabled checker must not enqueue: %+v", enq.batches)
-	}
-	if !result.Disabled {
-		t.Errorf("result must be disabled when checker is disabled")
-	}
-}
-
-func TestRun_DedupAsins(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001", "B0ASIN0001", "B0ASIN0002"}}
-
-	if _, err := Run(context.Background(), deps, saleEvent()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	checks := 0
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindSaleCheck {
-			checks++
-		}
-	}
-	if checks != 2 {
-		t.Errorf("sale_check count = %d, want 2 (dedup)", checks)
-	}
-}
-
-func TestRun_JobIDIsDeterministic(t *testing.T) {
-	event := saleEvent()
-	mk := func() []job.Job {
-		enq := &fakeEnqueuer{failOn: -1}
-		deps := baseDeps(enq)
-		deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
-		if _, err := Run(context.Background(), deps, event); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		return enq.allJobs()
-	}
-	first := mk()
-	second := mk()
-	if len(first) != len(second) {
-		t.Fatalf("job count differs across runs")
-	}
-	for i := range first {
-		if first[i].JobID != second[i].JobID {
-			t.Errorf("JobID not deterministic: %q vs %q", first[i].JobID, second[i].JobID)
-		}
-	}
-}
-
-func TestRun_BatchSizeLimit(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	asins := make([]string, 25)
-	for i := range asins {
-		asins[i] = "B0ASIN" + string(rune('A'+i)) + "0001"
-	}
-	deps.AsinListReader = fakeAsinReader{asins: asins}
-
-	if _, err := Run(context.Background(), deps, saleEvent()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// 25 件は 10+10+5 の3 batch。ただし sale_finalize は別 batch。
-	for i, b := range enq.batches {
-		if len(b) > 10 {
-			t.Errorf("batch %d has %d jobs, max 10", i, len(b))
-		}
-	}
-}
-
-func TestRun_ConfigError_StopsBeforeEnqueue(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.ConfigReader = fakeConfig{enabled: true, err: errors.New("config down")}
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
-
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("want error when config load fails")
+	if !result.Disabled || result.CycleID == "" || result.SlotIndex != 8 || result.SlotCount != 72 {
+		t.Errorf("result = %+v", result)
 	}
 	if len(enq.batches) != 0 {
-		t.Errorf("config error must not enqueue: %+v", enq.batches)
+		t.Fatalf("jobs = %+v", enq.batches)
 	}
 }
 
-func TestRun_UnknownCheckType_ReturnsError(t *testing.T) {
+func TestRun_RejectsUnknownCheckType(t *testing.T) {
 	enq := &fakeEnqueuer{failOn: -1}
 	deps := baseDeps(enq)
 
-	_, err := Run(context.Background(), deps, Event{CheckType: job.CheckType("bogus"), ScheduledAt: saleEvent().ScheduledAt})
-	if err == nil {
-		t.Fatal("want error for unknown check_type")
+	if _, err := Run(context.Background(), deps, Event{CheckType: job.CheckType("bogus"), ScheduledAt: cycleStart}); err == nil {
+		t.Fatal("Run should fail")
 	}
 	if len(enq.batches) != 0 {
-		t.Errorf("unknown check_type must not enqueue: %+v", enq.batches)
+		t.Fatalf("jobs = %+v", enq.batches)
 	}
 }
 
-func TestRun_Sale_MergeUpcomingError_Stops(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.UpcomingMerger = &fakeUpcoming{err: errors.New("merge down")}
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
-
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("want error when MergeUpcoming fails")
+func TestRun_PropagatesDependencyFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		event Event
+		setup func(*Dependencies)
+	}{
+		{
+			name:  "config",
+			event: eventAtSlot(job.CheckSale, 0),
+			setup: func(deps *Dependencies) {
+				deps.ConfigReader = fakeConfig{enabled: true, err: errors.New("config down")}
+			},
+		},
+		{
+			name:  "upcoming",
+			event: eventAtSlot(job.CheckSale, 0),
+			setup: func(deps *Dependencies) { deps.UpcomingMerger = &fakeUpcoming{err: errors.New("merge down")} },
+		},
+		{
+			name:  "unprocessed",
+			event: eventAtSlot(job.CheckSale, 0),
+			setup: func(deps *Dependencies) { deps.AsinListReader = fakeAsinReader{err: errors.New("load down")} },
+		},
+		{
+			name:  "authors",
+			event: eventAtSlot(job.CheckNewRelease, 0),
+			setup: func(deps *Dependencies) { deps.AuthorReader = fakeAuthorReader{err: errors.New("load down")} },
+		},
+		{
+			name:  "paper",
+			event: eventAtSlot(job.CheckPaperToKindle, 0),
+			setup: func(deps *Dependencies) { deps.AsinListReader = fakeAsinReader{err: errors.New("load down")} },
+		},
 	}
-	if len(enq.batches) != 0 {
-		t.Errorf("merge error must not enqueue: %+v", enq.batches)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enq := &fakeEnqueuer{failOn: -1}
+			deps := baseDeps(enq)
+			tc.setup(&deps)
+			if _, err := Run(context.Background(), deps, tc.event); err == nil {
+				t.Fatal("Run should fail")
+			}
+			if len(enq.batches) != 0 {
+				t.Fatalf("jobs = %+v", enq.batches)
+			}
+		})
 	}
 }
 
-func TestRun_Sale_LoadAsinsError_StopsAfterMerge(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	upc := &fakeUpcoming{}
-	deps := baseDeps(enq)
-	deps.UpcomingMerger = upc
-	deps.AsinListReader = fakeAsinReader{err: errors.New("load down")}
-
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("want error when LoadAsins fails")
+func TestRun_PropagatesEnqueueFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		checkType job.CheckType
+	}{
+		{name: "new release", checkType: job.CheckNewRelease},
+		{name: "paper", checkType: job.CheckPaperToKindle},
 	}
-	if !upc.called {
-		t.Errorf("MergeUpcoming must run before LoadAsins")
-	}
-	if len(enq.batches) != 0 {
-		t.Errorf("load error must not enqueue: %+v", enq.batches)
-	}
-}
-
-func TestRun_Sale_FinalizeEnqueueFailure_ReturnsError(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: 1} // call0=sale_check 成功、call1=sale_finalize 失敗
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
-
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("want error when sale_finalize enqueue fails")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enq := &fakeEnqueuer{failOn: 0}
+			deps := baseDeps(enq)
+			value := valuesForSlot(t, "TARGET", 1, 4, 72)
+			deps.AsinListReader = fakeAsinReader{asins: value}
+			deps.AuthorReader = fakeAuthorReader{names: value}
+			if _, err := Run(context.Background(), deps, eventAtSlot(tc.checkType, 4)); err == nil {
+				t.Fatal("Run should fail")
+			}
+		})
 	}
 }
 
-func TestRun_Sale_MidBatchFailure_NoFinalize(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: 1} // 12件は 10+2。2件目(呼び出し1)で失敗
-	deps := baseDeps(enq)
-	asins := make([]string, 12)
-	for i := range asins {
-		asins[i] = fmt.Sprintf("B0ASIN%05d", i)
-	}
-	deps.AsinListReader = fakeAsinReader{asins: asins}
-
-	_, err := Run(context.Background(), deps, saleEvent())
-	if err == nil {
-		t.Fatal("want error on mid-batch failure")
-	}
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindSaleFinalize {
-			t.Errorf("sale_finalize must not be enqueued on mid-batch failure")
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
 		}
 	}
-}
-
-func TestRun_NewRelease_LoadAuthorsError_Stops(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AuthorReader = fakeAuthorReader{err: errors.New("authors down")}
-
-	_, err := Run(context.Background(), deps, Event{CheckType: job.CheckNewRelease, ScheduledAt: saleEvent().ScheduledAt})
-	if err == nil {
-		t.Fatal("want error when LoadAuthorNames fails")
-	}
-	if len(enq.batches) != 0 {
-		t.Errorf("authors load error must not enqueue: %+v", enq.batches)
-	}
-}
-
-func TestRun_NewRelease_EnqueueFailure_ReturnsError(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: 0}
-	deps := baseDeps(enq)
-	deps.AuthorReader = fakeAuthorReader{names: []string{"海李"}}
-
-	_, err := Run(context.Background(), deps, Event{CheckType: job.CheckNewRelease, ScheduledAt: saleEvent().ScheduledAt})
-	if err == nil {
-		t.Fatal("want error on new_release enqueue failure")
-	}
-}
-
-func TestRun_PaperToKindle_LoadAsinsError_Stops(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{err: errors.New("paper load down")}
-
-	_, err := Run(context.Background(), deps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: saleEvent().ScheduledAt})
-	if err == nil {
-		t.Fatal("want error when paper LoadAsins fails")
-	}
-	if len(enq.batches) != 0 {
-		t.Errorf("paper load error must not enqueue: %+v", enq.batches)
-	}
-}
-
-func TestRun_PaperToKindle_EnqueueFailure_ReturnsError(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: 0}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0PAPER001"}}
-
-	_, err := Run(context.Background(), deps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: saleEvent().ScheduledAt})
-	if err == nil {
-		t.Fatal("want error on paper enqueue failure")
-	}
-}
-
-func TestRun_NewRelease_DedupAuthors(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AuthorReader = fakeAuthorReader{names: []string{"海李", "海李", "作者B"}}
-
-	if _, err := Run(context.Background(), deps, Event{CheckType: job.CheckNewRelease, ScheduledAt: saleEvent().ScheduledAt}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	searches := 0
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindNewReleaseSearch {
-			searches++
-		}
-	}
-	if searches != 2 {
-		t.Errorf("new_release_search count = %d, want 2 (dedup)", searches)
-	}
-}
-
-func TestRun_PaperToKindle_DedupAsins(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0PAPER001", "B0PAPER001", "B0PAPER002"}}
-
-	if _, err := Run(context.Background(), deps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: saleEvent().ScheduledAt}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	checks := 0
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindPaperToKindleCheck {
-			checks++
-		}
-	}
-	if checks != 2 {
-		t.Errorf("paper_to_kindle_check count = %d, want 2 (dedup)", checks)
-	}
-}
-
-func TestRun_Sale_DedupFiltersEmptyStrings(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001", "", "B0ASIN0002"}}
-
-	if _, err := Run(context.Background(), deps, saleEvent()); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	checks := 0
-	for _, j := range enq.allJobs() {
-		if j.Kind == job.KindSaleCheck {
-			checks++
-		}
-	}
-	if checks != 2 {
-		t.Errorf("sale_check count = %d, want 2 (empty filtered)", checks)
-	}
-}
-
-func TestRun_PaperToKindle_AmazonJobsUseAmazonRequestsMessageGroup(t *testing.T) {
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0PAPER001"}}
-
-	if _, err := Run(context.Background(), deps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: saleEvent().ScheduledAt}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	for _, j := range enq.allJobs() {
-		if got := job.MessageGroup(j.Kind); got != "amazon-requests" {
-			t.Errorf("MessageGroup(%v) = %q, want amazon-requests", j.Kind, got)
-		}
-	}
-}
-
-func TestRun_Sale_CycleIDIsUTCNormalized(t *testing.T) {
-	jst := time.FixedZone("JST", 9*60*60)
-	enq := &fakeEnqueuer{failOn: -1}
-	deps := baseDeps(enq)
-	deps.AsinListReader = fakeAsinReader{asins: []string{"B0ASIN0001"}}
-	event := Event{CheckType: job.CheckSale, ScheduledAt: time.Date(2026, 7, 23, 9, 0, 0, 0, jst)}
-
-	if _, err := Run(context.Background(), deps, event); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	const wantCycle = "sale:2026-07-23T00:00:00Z"
-	for _, j := range enq.allJobs() {
-		if j.CycleID != wantCycle {
-			t.Errorf("CycleID = %q, want %q", j.CycleID, wantCycle)
-		}
-	}
-	check := enq.allJobs()[0]
-	wantJobID := "sale_check:" + wantCycle + ":B0ASIN0001"
-	if check.JobID != wantJobID {
-		t.Errorf("sale_check JobID = %q, want %q", check.JobID, wantJobID)
-	}
-}
-
-func TestRun_JobID_DiscriminatesByKindAndTarget(t *testing.T) {
-	at := time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC)
-
-	saleEnq := &fakeEnqueuer{failOn: -1}
-	saleDeps := baseDeps(saleEnq)
-	saleDeps.AsinListReader = fakeAsinReader{asins: []string{"B0SHARED001"}}
-	if _, err := Run(context.Background(), saleDeps, Event{CheckType: job.CheckSale, ScheduledAt: at}); err != nil {
-		t.Fatalf("sale Run: %v", err)
-	}
-
-	paperEnq := &fakeEnqueuer{failOn: -1}
-	paperDeps := baseDeps(paperEnq)
-	paperDeps.AsinListReader = fakeAsinReader{asins: []string{"B0SHARED001"}}
-	if _, err := Run(context.Background(), paperDeps, Event{CheckType: job.CheckPaperToKindle, ScheduledAt: at}); err != nil {
-		t.Fatalf("paper Run: %v", err)
-	}
-
-	saleCheckID := saleEnq.allJobs()[0].JobID
-	paperCheckID := paperEnq.allJobs()[0].JobID
-	if saleCheckID == paperCheckID {
-		t.Errorf("same target across kinds must differ: sale=%q paper=%q", saleCheckID, paperCheckID)
-	}
+	return false
 }

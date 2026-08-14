@@ -69,7 +69,7 @@ func TestHandleEvent_SchedulerRouteDispatches(t *testing.T) {
 	store.Seed("unprocessed_asins.json", `[]`)
 	enq := &recordingEnqueuer{}
 	sched := newScheduler(store, enq, nil)
-	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
 
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
 		t.Fatalf("HandleEvent: %v", err)
@@ -181,7 +181,7 @@ func TestHandleEvent_ReadsCheckerConfigPerInvocation(t *testing.T) {
 			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 	}
-	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
 
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
 		t.Fatalf("first HandleEvent: %v", err)
@@ -220,7 +220,7 @@ func TestHandleEvent_CheckerConfigLoadFailurePropagates(t *testing.T) {
 			Keys:           dispatch.Keys{Unprocessed: "unprocessed_asins.json", Authors: "authors.json", PaperBooks: "paper_books_asins.json"},
 		},
 	}
-	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
 
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
 		t.Fatal("HandleEvent must propagate checker config load failure")
@@ -250,7 +250,7 @@ func TestHandleEvent_DispatchEnqueueFailurePropagates(t *testing.T) {
 		},
 	}
 	// sale は対象空でも sale_finalize を投入するため、enqueuer 失敗が必ず発火する。
-	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-09T00:00:00Z"}`
+	body := `{"version":1,"source":"scheduler","check_type":"sale","scheduled_at":"2026-08-08T16:55:00Z"}`
 
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err == nil {
 		t.Fatal("HandleEvent must propagate enqueue failure")
