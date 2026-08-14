@@ -134,7 +134,7 @@ Schedulerとevent source mappingを意図的に停止したままWork Queueを�
 4. 旧jobをpurgeする場合は、削除対象queueと件数を確定し、明示承認後に実行する。
 5. queueが空であることを確認してevent source mappingを有効化する。
 6. 3 Schedulerを有効化し、Saleの複数slotで`target_count`、`response_bytes`、`duration_ms`、`job_error`を確認する。
-7. 2時間のSale周回完了後、各対象が1回だけ割り当てられ、最終slot後に`sale_finalize`が完了したことを確認する。
+7. 2時間のSale周回完了後、Scheduler DLQが空であること、全slotの`cycle_dispatched`で各対象が1回だけ割り当てられたこと、最終slot後に`sale_finalize`が完了したことを確認する。`sale_finalize`の成功だけでは前slotの成功を含まないため、単独で周回完了の証明に使わない。
 
 Work QueueとDLQはS3正本から再生成できる派生jobだが、purgeは不可逆操作として扱う。原因未確認のDLQや、新版有効化後に作成されたjobを一括削除しない。
 
@@ -143,6 +143,8 @@ Work QueueとDLQはS3正本から再生成できる派生jobだが、purgeは不
 EventBridge Scheduler の再試行上限を超えた event が Scheduler DLQ へ入る。
 DLQ message の Scheduler 入力 JSON（`SPECIFICATION.md` §6 形式）から対象 check 種別と時刻を確認し、
 `schedule-checks` の該当時刻のログで投入成否（`cycle_dispatched` / `cycle_disabled`）を確認する。
+
+各slotは独立したScheduler eventであるため、Saleで前slotがここへ落ちても最終slotの`sale_finalize`は投入される（`SPECIFICATION.md` §6）。
 
 ---
 

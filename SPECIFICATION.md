@@ -173,6 +173,8 @@ Schedulerから`schedule-checks`へ渡す入力は次の形とする。
 
 `Enabled=false`のCheckerは各slotで`cycle_disabled`をINFOログへ出してジョブを投入しない。現在slotの対象配列が空の場合は`target_count=0`の正常な`cycle_dispatched`とし、エラーにしない。Saleは最終slotで`sale_finalize`を投入し、全件が空の場合もGistを現在の空リストへ同期する。
 
+各slotは独立したScheduler eventであり、最終slotの成功は前slotの成否を含まない。前slotがScheduler再試行上限後にScheduler DLQへ移っても`sale_finalize`の投入は止まらず、その成否を`sale_finalize`は検知しない。`sale_finalize`の成功単独は全24 slotの成功を証明しない。周回の成否はScheduler DLQが空であることと各slotの`cycle_dispatched`の確認で判断する。
+
 各Schedulerの再試行設定は次とする。
 
 - Maximum event age: 240秒
