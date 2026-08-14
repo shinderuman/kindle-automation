@@ -51,11 +51,22 @@ func applyMigration(body []byte) ([]byte, report, error) {
 			top[checker] = enc
 		}
 	}
-	out, err := json.MarshalIndent(top, "", "    ")
-	if err != nil {
+	normalized := make(map[string]any, len(top))
+	for section, raw := range top {
+		v, err := decodeSection(raw)
+		if err != nil {
+			return nil, report{}, fmt.Errorf("decode %s: %w", section, err)
+		}
+		normalized[section] = v
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "    ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(normalized); err != nil {
 		return nil, report{}, fmt.Errorf("encode top: %w", err)
 	}
-	return bytes.ReplaceAll(out, []byte(`\u0026`), []byte("&")), rep, nil
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), rep, nil
 }
 
 func ensureMinPrice(m map[string]json.RawMessage) (bool, error) {
@@ -68,4 +79,14 @@ func ensureMinPrice(m map[string]json.RawMessage) (bool, error) {
 	}
 	m["MinPrice"] = enc
 	return true, nil
+}
+
+func decodeSection(raw json.RawMessage) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
