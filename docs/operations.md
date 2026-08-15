@@ -9,7 +9,7 @@
 - 本番 Lambda は `schedule-checks` と `check-worker` の2本だけ。
 - Amazon HTTP 取得は直列化されており、1 worker 起動で Amazon へ最大1回しかアクセスしない。
 - 商品通知（Slack notice / Mastodon）は best-effort。通知 outbox は持たない。
-- 運用エラー通知は CloudWatch Alarm の `ALARM` 遷移時だけ Slack error channel へ1件送る。
+- 運用エラー通知は CloudWatch Alarm の `ALARM` / `OK` 遷移時に Slack error channel へ1件ずつ送る。
 
 ---
 
@@ -82,11 +82,17 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/check-worker
 
 ## 3. DLQ / Alarm 対応
 
-Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移したときだけ、
-`schedule-checks` が Alarm イベントで起動し Slack error channel へ1件通知する。
-同じ Alarm 状態の間にエラー件数分の通知は増やさない。復旧は Alarm の `OK` 遷移で確認する。
+Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` と `OK` の両遷移で
+`schedule-checks` を Alarm イベントで起動し、Slack error channel へ通知する（`SPECIFICATION.md` §17.2）。
+通知本文は Alarm 名・状態・何が起きたか・対応要否・種類別手順・state reason・状態更新時刻を含み、
+`OK` 通知は復旧済み・現時点の追加対応不要を伝える。ただし `OK` 通知は原因調査の完了を意味しない。
+同じ Alarm 状態の間にエラー件数分の通知は増やさない。
+`state.reason`・`state.timestamp` が payload に欠落する場合は「不明」へ fallback し、推測値を表示しない。
+未知の Alarm 名には既知 Alarm 向け固定手順を出さず、CloudWatch Alarm 詳細とログ確認を案内する。
 
 ### 3.1 Work DLQ（`SPECIFICATION.md` §26.1）
+
+通知の種類別案内（`job_error` 確認 → 原因解消 → redrive）に沿って次を進める。
 
 1. Alarm 通知の queue 名と message 数を確認する。
 2. DLQ message の `job_id`, `cycle_id`, `kind`, target を確認する。
@@ -95,9 +101,9 @@ Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移し�
 5. selector・code・対象 data の必要な修正を行い、fixture と自動 test を追加する。
 6. 修正版を deploy する。
 7. DLQ message を Work Queue へ redrive する。
-8. `job_completed` ログ、DLQ 空、Alarm の `OK` 遷移を確認する。
+8. `job_completed` ログ、DLQ 空、Alarm の `OK` 遷移通知を確認する。
 
-原因確認前に DLQ message を削除しない。404・商品種別不一致などの terminal result は DLQ へ入らない。
+原因確認前に DLQ message を削除（purge）しない。404・商品種別不一致などの terminal result は DLQ へ入らない。
 
 #### 3.1.1 設定読込失敗（`error_type=config_load`）
 
@@ -112,14 +118,18 @@ Work DLQ・Scheduler DLQ・Work Queue 滞留の3 Alarm が `ALARM` へ遷移し�
 
 ### 3.2 Queue 滞留（`SPECIFICATION.md` §26.2）
 
+通知の種類別案内（event source mapping・`job_error`/throttle・滞留増加の確認）に沿って次を進める。
+
 `ApproximateAgeOfOldestMessage` が2時間（7200秒）を超えた場合は次を確認する。
 
+- check-worker の event source mapping が有効であるか。
 - 同じ Amazon job が再試行を繰り返していないか。
-- 403, 429, CAPTCHA, 短い200本文が複数 target で発生していないか。
+- 403, 429, CAPTCHA, 短い200本文が複数 target で発生していないか（Lambda throttle も確認する）。
 - 1件の平均 `duration_ms` が増加していないか。
 - 直前の周回が次のセール周回までに終了しているか。
+- Work Queue の滞留数が増加中の場合は Scheduler を停止する。
 
-Schedulerとevent source mappingを意図的に停止したままWork Queueを保持した場合も、最古messageが7200秒を超えるとこのAlarmは発報する。停止中であること、mappingが`Disabled`であること、queue件数が意図した保持数であることを確認できた場合は、追加障害ではなく停止状態の結果として扱う。
+Schedulerとevent source mappingを意図的に停止したままWork Queueを保持した場合も、最古messageが7200秒を超えるとこのAlarmは発報する。停止中であること、mappingが`Disabled`であること、queue件数が意図した保持数であることを確認できた場合は、追加障害ではなく停止状態の結果として扱う。この場合も Work Queue の purge は通常手順にしない。
 
 原因を確認せずに MessageGroupId を分割しない。分割すると Amazon 同時リクエスト数が増える。
 構造化ログで直列処理が周期内に収まらないことを確認した場合だけ変更する。
@@ -141,8 +151,13 @@ Work QueueとDLQはS3正本から再生成できる派生jobだが、purgeは不
 ### 3.3 Scheduler DLQ
 
 EventBridge Scheduler の再試行上限を超えた event が Scheduler DLQ へ入る。
+通知の種類別案内（schedule-checks ログと DLQ message 確認 → 原因解消 → 対象周期の再実行）に沿って次を進める。
+
 DLQ message の Scheduler 入力 JSON（`SPECIFICATION.md` §6 形式）から対象 check 種別と時刻を確認し、
 `schedule-checks` の該当時刻のログで投入成否（`cycle_dispatched` / `cycle_disabled`）を確認する。
+原因解消後、対象周期（slot）を再実行する。
+
+原因確認前に Scheduler DLQ message を削除（purge）しない。
 
 各slotは独立したScheduler eventであるため、Saleで前slotがここへ落ちても最終slotの`sale_finalize`は投入される（`SPECIFICATION.md` §6）。
 

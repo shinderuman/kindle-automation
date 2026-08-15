@@ -150,13 +150,13 @@ func TestHandleEvent_AlarmRouteNotifies(t *testing.T) {
 func TestHandleEvent_AlarmNonAlarmStateSkipsNotify(t *testing.T) {
 	sender := &fakeSender{}
 	sched := newScheduler(storage.NewMemStore(), &recordingEnqueuer{}, sender)
-	body := `{"source":"aws.cloudwatch","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"OK"}}}`
+	body := `{"source":"aws.cloudwatch","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"INSUFFICIENT_DATA"}}}`
 
 	if err := sched.HandleEvent(context.Background(), []byte(body)); err != nil {
-		t.Fatalf("non-ALARM state must not error: %v", err)
+		t.Fatalf("INSUFFICIENT_DATA state must not error: %v", err)
 	}
 	if sender.called {
-		t.Errorf("error sender must not be called for non-ALARM state")
+		t.Errorf("error sender must not be called for INSUFFICIENT_DATA state")
 	}
 }
 
@@ -186,14 +186,16 @@ func TestHandleEvent_BrokenJSONErrors(t *testing.T) {
 func TestHandleAlarm_SendFailureReturnsError(t *testing.T) {
 	sender := &fakeSender{err: errors.New("slack down")}
 	sched := &Scheduler{ErrorSender: sender}
-	if err := sched.HandleAlarm(context.Background(), "WorkDLQDepth"); err == nil {
+	alarm := alarmNotificationInput{AlarmName: "WorkDLQDepth", StateValue: AlarmStateAlarm}
+	if err := sched.HandleAlarm(context.Background(), alarm); err == nil {
 		t.Fatal("HandleAlarm should return error on send failure")
 	}
 }
 
 func TestHandleAlarm_NoSenderSucceeds(t *testing.T) {
 	sched := &Scheduler{}
-	if err := sched.HandleAlarm(context.Background(), "WorkDLQDepth"); err != nil {
+	alarm := alarmNotificationInput{AlarmName: "WorkDLQDepth", StateValue: AlarmStateAlarm}
+	if err := sched.HandleAlarm(context.Background(), alarm); err != nil {
 		t.Fatalf("HandleAlarm with no sender should succeed: %v", err)
 	}
 }

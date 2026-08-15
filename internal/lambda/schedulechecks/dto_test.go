@@ -42,15 +42,32 @@ func TestParseScheduleInput_RejectsInvalid(t *testing.T) {
 
 func TestParseAlarmInput_Valid(t *testing.T) {
 	body := `{"source":"aws.cloudwatch","alarmArn":"arn:aws:cloudwatch:us-east-1:111122223333:alarm:kindle-automation-work-dlq","accountId":"111122223333","time":"2026-08-04T12:36:15.490+0000","region":"us-east-1","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"ALARM","reason":"test","timestamp":"2026-08-04T12:36:15.490+0000"},"previousState":{"value":"OK","reason":"","timestamp":"2026-08-04T12:31:29.595+0000"}}}`
-	name, state, err := parseAlarmInput([]byte(body))
+	alarm, err := parseAlarmInput([]byte(body))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if name != "kindle-automation-work-dlq" {
-		t.Errorf("alarmName = %q", name)
+	if alarm.AlarmName != "kindle-automation-work-dlq" {
+		t.Errorf("alarmName = %q", alarm.AlarmName)
 	}
-	if state != "ALARM" {
-		t.Errorf("state = %q, want ALARM", state)
+	if alarm.StateValue != "ALARM" {
+		t.Errorf("state = %q, want ALARM", alarm.StateValue)
+	}
+	if alarm.Reason != "test" {
+		t.Errorf("reason = %q", alarm.Reason)
+	}
+	if alarm.StateTimestamp != "2026-08-04T12:36:15.490+0000" {
+		t.Errorf("stateTimestamp = %q", alarm.StateTimestamp)
+	}
+}
+
+func TestParseAlarmInput_AllowsMissingOptionalFields(t *testing.T) {
+	body := `{"source":"aws.cloudwatch","alarmData":{"alarmName":"kindle-automation-work-dlq","state":{"value":"OK"}}}`
+	alarm, err := parseAlarmInput([]byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if alarm.Reason != "" || alarm.StateTimestamp != "" {
+		t.Errorf("optional fields must stay empty, got %+v", alarm)
 	}
 }
 
@@ -64,7 +81,7 @@ func TestParseAlarmInput_RejectsInvalid(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := parseAlarmInput([]byte(body)); !errors.Is(err, ErrInvalidAlarmInput) {
+			if _, err := parseAlarmInput([]byte(body)); !errors.Is(err, ErrInvalidAlarmInput) {
 				t.Fatalf("err = %v, want ErrInvalidAlarmInput", err)
 			}
 		})

@@ -889,13 +889,39 @@ SlackとMastodonのHTTP clientはそれぞれ5秒timeoutとし、片方の失敗
 
 個別のAmazonリクエスト失敗をその場でSlackへ送らない。再試行中のエラーはCloudWatch Logsだけへ記録する。
 
-次のCloudWatch Alarmが`ALARM`へ遷移した時だけ、`schedule-checks`をAlarmイベントで起動してSlack error channelへ1件通知する。
+次のCloudWatch Alarmが状態を遷移させた時、`schedule-checks`をAlarmイベントで起動してSlack error channelへ通知する。`ALARM`遷移と`OK`遷移の両方で通知する。
 
 - Work DLQの`ApproximateNumberOfMessagesVisible >= 1`
 - Scheduler DLQの`ApproximateNumberOfMessagesVisible >= 1`
 - Work Queueの`ApproximateAgeOfOldestMessage >= 7200秒`
 
-同じAlarm状態の間に個別エラー数だけ通知を増やさない。復旧はCloudWatch Alarmの`OK`遷移で確認する。
+同じAlarm状態の間に個別エラー数だけ通知を増やさない。復旧確認は`OK`遷移1件の通知で済ませ、追加の`INSUFFICIENT_DATA`等では通知しない。
+
+#### 17.2.1 通知本文
+
+通知はAlarm名だけの1行とせず、人間が対応判断できるSlack本文を構築する。必須要素は次のとおり。
+
+- Alarm名
+- 状態（`ALARM` / `OK`）
+- 何が起きたかの1行要約
+- 人間の対応要否
+- Alarm種類別の具体的な確認・復旧手順
+- CloudWatch payloadの`state.reason`（state updated reason）
+- payloadの`state.timestamp`（状態更新時刻）
+
+`state.reason`・`state.timestamp`がpayloadに含まれない場合は推測で埋めず、`不明`などの固定文言へfallbackする。`alarmData.alarmName`・`state.value`が欠落するpayloadは再試行無意味なterminal入力としてerrorを返し、通知しない。
+
+#### 17.2.2 種類別の案内
+
+`ALARM`遷移の案内はAlarm名ごとに次の内容へ分ける。
+
+- Work DLQ（`kindle-automation-work-dlq`）: 対応必要。check-workerの`job_error`ログとDLQ messageの対象jobを確認し、原因解消後にDLQをWork Queueへredriveする。原因確認前のDLQ purgeは禁止。
+- Scheduler DLQ（`kindle-automation-scheduler-dlq`）: 対応必要。schedule-checksログとScheduler DLQのmessageを確認し、原因解消後に対象周期を再実行する。原因確認前のDLQ purgeは禁止。
+- Work Queue滞留（`kindle-automation-work-queue-stall`）: 対応必要。check-workerのevent source mapping有効状態、`job_error`とthrottle、Work Queue滞留数の増加を確認する。滞留が増加中の場合はScheduler停止を案内する。purgeを通常手順にしない。
+
+`OK`遷移の案内は既知3Alarm共通で、復旧済み・現時点の追加対応不要と明記する。ただし`ALARM`期間に原因調査が必要なケースがあることは通知本文からもわかるようにし、復旧通知で原因調査を打ち切らない。
+
+未知のAlarm名には既知Alarm向けの固定手順を出さない。対応判断不能として、CloudWatch Alarm詳細と当該時間帯のログ確認を案内する。
 
 ## 18. ログとメトリクス
 
@@ -1226,9 +1252,9 @@ fixtureは実HTMLを`testdata`へ固定保存し、テストからAmazonへア�
 5. selector・code・対象dataの必要な修正を行い、fixtureと自動testを追加する
 6. 修正版をdeployする
 7. DLQ messageをWork Queueへredriveする
-8. `job_completed`、DLQ空、AlarmのOK遷移を確認する
+8. `job_completed`、DLQ空、AlarmのOK遷移通知を確認する
 
-原因確認前にDLQ messageを削除しない。404、商品種別不一致等のterminal resultはDLQへ入らない。
+原因確認前にDLQ messageを削除しない。404、商品種別不一致等のterminal resultはDLQへ入らない。OK遷移通知は復旧確認だけですべての原因調査が完了したことを意味しない。
 
 ### 26.2 Queue滞留
 

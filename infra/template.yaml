@@ -163,7 +163,7 @@ Resources:
           MetricNamespace: KindleAutomation
           MetricValue: "1"
 
-  # SPECIFICATION.md 17.2。ALARM 遷移でのみ schedule-checks を起動し Slack error channel へ通知する。OK 遷移では起動しない（復旧は Alarm の OK 遷移で確認）。
+  # SPECIFICATION.md 17.2。ALARM/OK 両遷移で schedule-checks を起動し Slack error channel へ通知する（OK は復旧確認用）。
   WorkDLQAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -182,6 +182,8 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
+        - !GetAtt ScheduleChecksFunction.Arn
+      OKActions:
         - !GetAtt ScheduleChecksFunction.Arn
 
   SchedulerDLQAlarm:
@@ -203,6 +205,8 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
         - !GetAtt ScheduleChecksFunction.Arn
+      OKActions:
+        - !GetAtt ScheduleChecksFunction.Arn
 
   WorkQueueStallAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -222,6 +226,8 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions:
+        - !GetAtt ScheduleChecksFunction.Arn
+      OKActions:
         - !GetAtt ScheduleChecksFunction.Arn
 
   # CloudWatch Alarm から schedule-checks を invoke する resource-based permission（SPECIFICATION.md 19）。

@@ -62,13 +62,13 @@ func (s *Scheduler) logCycle(ctx context.Context, event dispatch.Event, result d
 	s.Logger.LogAttrs(ctx, slog.LevelInfo, logging.EventCycleDispatched, attrs...)
 }
 
-// HandleAlarm は CloudWatch Alarm の ALARM 遷移を Slack error channel へ1件通知する（SPECIFICATION.md 5.1）。
 // 通知失敗は error を返し Lambda 経由で再試行させる。ErrorSender が未設定ならログ記録のみ。
-func (s *Scheduler) HandleAlarm(ctx context.Context, alarmName string) error {
-	message := fmt.Sprintf("🚨 CloudWatch Alarm 発報: %s", alarmName)
+func (s *Scheduler) HandleAlarm(ctx context.Context, alarm alarmNotificationInput) error {
+	message := buildAlarmMessage(alarm)
 	if s.Logger != nil {
 		s.Logger.LogAttrs(ctx, slog.LevelInfo, logging.EventAlarmNotification,
-			slog.String("alarm_name", alarmName),
+			slog.String("alarm_name", alarm.AlarmName),
+			slog.String("state", alarm.StateValue),
 		)
 	}
 	if s.ErrorSender == nil {
@@ -77,7 +77,8 @@ func (s *Scheduler) HandleAlarm(ctx context.Context, alarmName string) error {
 	if err := s.ErrorSender.Send(ctx, message); err != nil {
 		if s.Logger != nil {
 			s.Logger.LogAttrs(ctx, slog.LevelError, logging.EventAlarmNotification,
-				slog.String("alarm_name", alarmName),
+				slog.String("alarm_name", alarm.AlarmName),
+				slog.String("state", alarm.StateValue),
 				slog.String("error", err.Error()),
 			)
 		}
@@ -113,27 +114,24 @@ func (s *Scheduler) HandleEvent(ctx context.Context, raw json.RawMessage) error 
 	}
 }
 
-// handleAlarmEvent は CloudWatch Alarm の直接 invoke payload を decode し ALARM 遷移のみ通知する。
-// payload は source=aws.cloudwatch, alarmData.alarmName, alarmData.state.value（SPECIFICATION.md 17.2）。
-// decode/validation 失敗は terminal error として伝播する。ALARM 未満の状態では通知せず正常終了する。
+// ALARM/OK 以外（INSUFFICIENT_DATA 等）では通知せず正常終了する。decode/validation 失敗は terminal error として伝播する。
 func (s *Scheduler) handleAlarmEvent(ctx context.Context, raw json.RawMessage) error {
-	alarmName, state, err := parseAlarmInput(raw)
+	alarm, err := parseAlarmInput(raw)
 	if err != nil {
 		s.logTerminal(ctx, "alarm_input_invalid", "", err)
 		return err
 	}
-	if state != AlarmStateAlarm {
-		// AlarmActions 経由なら通常 ALARM だが、OK/INSUFFICIENT_DATA では通知しない（SPECIFICATION.md 17.2）。
+	if alarm.StateValue != AlarmStateAlarm && alarm.StateValue != AlarmStateOK {
 		// event 名は replaceAttr が msg を "event" key へ map するため msg へ渡す（event attr の併用は重複 key になる）。
 		if s.Logger != nil {
 			s.Logger.LogAttrs(ctx, slog.LevelInfo, "alarm_state_ignored",
-				slog.String("alarm_name", alarmName),
-				slog.String("state", state),
+				slog.String("alarm_name", alarm.AlarmName),
+				slog.String("state", alarm.StateValue),
 			)
 		}
 		return nil
 	}
-	return s.HandleAlarm(ctx, alarmName)
+	return s.HandleAlarm(ctx, alarm)
 }
 
 // logTerminal は decode/validation 失敗など再試行無意味な terminal 起動を ERROR で記録する。

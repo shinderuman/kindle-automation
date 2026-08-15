@@ -38,25 +38,44 @@ type alarmData struct {
 }
 
 type alarmState struct {
-	Value string `json:"value"`
+	Value     string `json:"value"`
+	Reason    string `json:"reason"`
+	Timestamp string `json:"timestamp"`
 }
 
-// AlarmStateAlarm は CloudWatch Alarm の state.value が ALARM へ遷移したことを表す（SPECIFICATION.md 17.2）。
-const AlarmStateAlarm = "ALARM"
+const (
+	AlarmStateAlarm = "ALARM"
+	AlarmStateOK    = "OK"
+)
 
-// parseAlarmInput は alarmName・state.value 欠落を再試行無意味な terminal 入力として ErrInvalidAlarmInput を返す。
-func parseAlarmInput(data []byte) (alarmName, stateValue string, err error) {
+// Reason・StateTimestamp は payload へ必須ではないため空文字のまま保持し、
+// 通知本文側で固定文言へ fallback する（SPECIFICATION.md 17.2.1）。
+type alarmNotificationInput struct {
+	AlarmName      string
+	StateValue     string
+	Reason         string
+	StateTimestamp string
+}
+
+// alarmName・state.value 欠落は再試行無意味な terminal 入力として ErrInvalidAlarmInput を返す。
+// reason・timestamp は欠落しても error にしない（SPECIFICATION.md 17.2.1）。
+func parseAlarmInput(data []byte) (alarmNotificationInput, error) {
 	var in alarmInput
 	if err := json.Unmarshal(data, &in); err != nil {
-		return "", "", fmt.Errorf("%w: decode: %v", ErrInvalidAlarmInput, err)
+		return alarmNotificationInput{}, fmt.Errorf("%w: decode: %v", ErrInvalidAlarmInput, err)
 	}
 	if in.AlarmData.AlarmName == "" {
-		return "", "", fmt.Errorf("%w: alarmData.alarmName missing", ErrInvalidAlarmInput)
+		return alarmNotificationInput{}, fmt.Errorf("%w: alarmData.alarmName missing", ErrInvalidAlarmInput)
 	}
 	if in.AlarmData.State.Value == "" {
-		return "", "", fmt.Errorf("%w: alarmData.state.value missing", ErrInvalidAlarmInput)
+		return alarmNotificationInput{}, fmt.Errorf("%w: alarmData.state.value missing", ErrInvalidAlarmInput)
 	}
-	return in.AlarmData.AlarmName, in.AlarmData.State.Value, nil
+	return alarmNotificationInput{
+		AlarmName:      in.AlarmData.AlarmName,
+		StateValue:     in.AlarmData.State.Value,
+		Reason:         in.AlarmData.State.Reason,
+		StateTimestamp: in.AlarmData.State.Timestamp,
+	}, nil
 }
 
 func parseScheduleInput(data []byte) (dispatch.Event, error) {

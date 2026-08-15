@@ -61,7 +61,7 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 | §13 | 検索→result/detail の2段階, 検索 job は S3 保存・通知しない | `internal/application/newrelease/newrelease.go` |
 | §7.2 / §13.4 | `new_release_result` の `product.item_type` は正規値 `kindle` のみ許可。空文字・未知値は `ErrInvalidItemType` で Amazon 到達前に拒否し、推測値・空文字を入れない | `internal/job/job.go` |
 | §15 | S3 全体から Gist 再生成, gist_type ごとの決定 ID | `internal/gist/gist.go`, `internal/gist/markdown.go` |
-| §17.2 | Alarm 3種が ALARM 遷移時のみ schedule-checks 起動, OKActions なし | `infra/template.yaml`, `internal/lambda/schedulechecks/handler.go` |
+| §17.2 | Alarm 3種が ALARM/OK 両遷移で schedule-checks 起動。通知本文は Alarm 名・状態・種類別手順・state reason・状態更新時刻を含み、field 欠落は「不明」fallback、未知 Alarm 名は対応判断不能 | `infra/template.yaml`, `internal/lambda/schedulechecks/alarm.go`, `internal/lambda/schedulechecks/handler.go` |
 | §18.1 | 共通ログ field 一式, ErrorCount metric filter | `internal/lambda/checkworker/handler.go`, `infra/template.yaml` |
 | §19 | SSM secure→plain fallback, GetParametersByPath 不使用, IAM 関数別 | `internal/config/ssm.go`, `infra/template.yaml` |
 
@@ -103,7 +103,8 @@ go test -tags=livesmoke -run 'TestLiveSmoke' ./internal/amazon/
 ### 5.4 Alarm → 通知連携
 - [ ] Work DLQ / Scheduler DLQ / Work Queue 滞留(7200秒) の各 Alarm が ALARM 遷移時に `schedule-checks` を起動すること。
 - [ ] 同じ Alarm 状態で通知が増殖しないこと。
-- [ ] OK 遷移では `schedule-checks` を起動しないこと。
+- [ ] OK 遷移でも `schedule-checks` が起動し、復旧済み・追加対応不要・原因調査余地を含む OK 通知が1件送られること。
+- [ ] ALARM 通知の本文が Alarm 名・状態・種類別手順（purge 禁止を含む）・state reason・状態更新時刻を含むこと。state.reason / state.timestamp 欠落時に「不明」と表示されること。
 
 ### 5.5 実 HTTP・外部API
 - [ ] Lambda 環境から Amazon.co.jp への到達性と、実HTMLに対する各 selector の有効性（検索発売日 `nth-child`, CAPTCHA/access-denied marker）。Kindle商品・紙商品・検索ページの selector は実fixture(`testdata/amazon`)で検証済み。CAPTCHA/access-denied marker と 404 構造は live smoke(§2) と §4 の未取得 fixture 追加後に完結する。

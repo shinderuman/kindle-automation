@@ -257,16 +257,16 @@ func TestTemplate_LogsAndMetrics(t *testing.T) {
 	}
 }
 
-// TestTemplate_Alarms は Alarm が ALARM 遷移でのみ schedule-checks を起動する (OKActions なし) ことを検証する (SPECIFICATION.md §17.2)。
 func TestTemplate_Alarms(t *testing.T) {
 	res := resources(t)
 	for name, a := range ofType(res, "AWS::CloudWatch::Alarm") {
-		if hasKey(a, "OKActions") {
-			t.Errorf("alarm %s must not have OKActions (OK 遷移では起動しない)", name)
-		}
 		actions := a["AlarmActions"]
 		if actions == nil || len(actions.Content) == 0 {
 			t.Errorf("alarm %s must have AlarmActions (ALARM 遷移で起動)", name)
+		}
+		okActions := a["OKActions"]
+		if okActions == nil || len(okActions.Content) == 0 {
+			t.Errorf("alarm %s must have OKActions (OK 遷移で復旧通知する)", name)
 		}
 	}
 }

@@ -98,7 +98,7 @@ func TestLogAlarm_HasSingleEventKey(t *testing.T) {
 	var buf bytes.Buffer
 	s := &Scheduler{Logger: logging.New(&buf, slog.LevelInfo)}
 
-	if err := s.HandleAlarm(context.Background(), "WorkDLQDepth"); err != nil {
+	if err := s.HandleAlarm(context.Background(), alarmNotificationInput{AlarmName: "WorkDLQDepth", StateValue: AlarmStateAlarm}); err != nil {
 		t.Fatalf("HandleAlarm: %v", err)
 	}
 
