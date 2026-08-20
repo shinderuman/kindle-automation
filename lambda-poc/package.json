@@ -1,0 +1,10 @@
+{
+  "name": "kindle-browser-lambda-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@sparticuz/chromium-min": "149.0.0",
+    "puppeteer-core": "24.15.0"
+  }
+}

@@ -6,3 +6,7 @@ bootstrap
 # SAM build・package 生成物（AGENTS.md 13）。
 .aws-sam/
 build.toml
+
+# 旧Lambda PoCの依存生成物・invoke入出力。
+lambda-poc/node_modules/
+lambda-poc/invoke*.json
